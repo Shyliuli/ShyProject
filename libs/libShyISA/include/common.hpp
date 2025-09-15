@@ -1,0 +1,10 @@
+#pragma once
+#define ENABLE_RS_ERROR
+#define ENABLE_RS_KEYWORD
+#include "rustic.hpp"
+#include <iostream>
+#include <print>
+#include <string>
+#include <vector>
+#include <memory>
+#include "CoreError.hpp"
