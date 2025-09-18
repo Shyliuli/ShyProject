@@ -18,7 +18,7 @@ fn Memory::create() -> Result<unique_ptr<Memory>, CoreError>
         return Err<unique_ptr<Memory>>(CoreError(AllocError{
             .message = "Failed to allocate memory for memory class!"}));
     }
-    return Ok<CoreError>(mem);
+    return Ok<CoreError>(std::move(mem));
 }
 
 // 写入内存值实现
