@@ -1,0 +1,14 @@
+// This is a single line comment
+setn sp 0x00FFFFFF // Initialize stack pointer
+setn 1x 1          // Set register to 1
+
+/* This is a block comment
+   spanning multiple lines
+   with various content */
+
+addn 0x00200001 1  // Increment memory location
+outn 314159        // Output number
+
+/* Another block comment */ setn 2x 2 // Inline block comment
+
+// Final comment at end of file

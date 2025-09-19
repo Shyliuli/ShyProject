@@ -1,4 +1,4 @@
-#include "address.hpp"
+#include "ShyISA/address.hpp"
 
 // HUMAN: 地址空间分布定义
 #define MEM_START 0x00100100     ///< 内存地址空间起始地址

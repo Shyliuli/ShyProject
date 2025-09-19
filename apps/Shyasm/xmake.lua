@@ -4,7 +4,16 @@ target("Shyasm")
     set_kind("binary")
     set_languages("c++23")
     add_files("src/*.cpp")
+    add_includedirs("include")
     add_deps("ShyISA")
+
+target("test_shyasm")
+    set_kind("binary")
+    set_languages("c++23")
+    add_files("tests/*.cpp", "src/first_scanner.cpp", "src/str_helper.cpp")
+    add_includedirs("include")
+    add_includedirs("../../libs/libShyISA/include", {public = true})
+    add_includedirs("../../third_party", {public = true})
     --
 -- If you want to known more usage about xmake, please see https://xmake.io
 --

@@ -1,4 +1,4 @@
-#include "reg.hpp"
+#include "ShyISA/reg.hpp"
 
 // 私有构造函数实现 - 初始化所有寄存器为0
 Reg::Reg() : reg_map({

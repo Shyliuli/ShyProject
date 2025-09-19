@@ -1,0 +1,15 @@
+___DEFINE___
+REG1 0x1
+REG2 0x2
+VAL1 100
+VAL2 200
+STACK_BASE 0x00FFFFFF
+DATA_ADDR 0x00200000
+___DATA___
+DATA_ADDR REG1      // Should become: 0x00200000 0x1
+0x00200001 VAL1     // Should become: 0x00200001 100
+___CODE___
+setn REG1 VAL1      // Should become: setn 0x1 100
+setn REG2 VAL2      // Should become: setn 0x2 200
+setn sp STACK_BASE  // Should become: setn sp 0x00FFFFFF
+add REG1 REG2       // Should become: add 0x1 0x2
