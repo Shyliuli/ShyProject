@@ -23,7 +23,7 @@ public:
      * @param memory 目标内存上下文。
      * @return 成功返回 AsmProcess 指针，失败返回核心错误。
      */
-    fn create(string input,unique_ptr<Memory> memory)->Result<unique_ptr<AsmProcess>,CoreError>;
+    fn static create(string input,unique_ptr<Memory> memory)->Result<unique_ptr<AsmProcess>,CoreError>;
 
     /**
      * @brief 执行汇编处理流程,更新has_processed
