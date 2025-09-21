@@ -87,7 +87,7 @@ public:
      * @param input 原始汇编源码。
      * @return 成功时返回拥有权指针，失败返回核心错误。
      */
-    fn create(string input)->Result<unique_ptr<Tokenizer>,CoreError>;
+    fn static create(string input)->Result<unique_ptr<Tokenizer>,CoreError>;
 
     /**
      * @brief 按索引访问指定的Token。

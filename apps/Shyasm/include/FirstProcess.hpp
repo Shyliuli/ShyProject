@@ -19,7 +19,7 @@ public:
      * @param input 待处理的原始汇编文本。
      * @return 成功返回 FirstProcess 指针，失败返回核心错误。
      */
-    fn create(string input)->Result<unique_ptr<FirstProcess>,CoreError>;
+    fn static create(string input)->Result<unique_ptr<FirstProcess>,CoreError>;
 
     /**
      * @brief 移除源码中的注释内容。
