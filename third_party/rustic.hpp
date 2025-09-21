@@ -77,6 +77,7 @@
 #include <functional>
 #include <stdexcept>
 #include <type_traits>
+#include <utility>
 #include <print>
 
 using u8 = uint8_t;
@@ -212,125 +213,174 @@ public:
 template<typename T, typename E>
 class Result {
 private:
-    std::variant<T, E> value;
+    using OkStorage = std::conditional_t<std::is_reference_v<T>,
+                                         std::reference_wrapper<std::remove_reference_t<T>>,
+                                         T>;
+    using ErrStorage = std::conditional_t<std::is_reference_v<E>,
+                                          std::reference_wrapper<std::remove_reference_t<E>>,
+                                          E>;
+
+    std::variant<OkStorage, ErrStorage> value;
     bool is_ok_value;
+
+    using OkRef = std::add_lvalue_reference_t<std::remove_reference_t<T>>;
+    using OkConstRef = std::add_lvalue_reference_t<const std::remove_reference_t<T>>;
+    using ErrRef = std::add_lvalue_reference_t<std::remove_reference_t<E>>;
+    using ErrConstRef = std::add_lvalue_reference_t<const std::remove_reference_t<E>>;
+
+    OkRef ok_ref() {
+        if constexpr (std::is_reference_v<T>) {
+            return std::get<OkStorage>(value).get();
+        } else {
+            return std::get<OkStorage>(value);
+        }
+    }
+
+    OkConstRef ok_ref() const {
+        if constexpr (std::is_reference_v<T>) {
+            return std::get<OkStorage>(value).get();
+        } else {
+            return std::get<OkStorage>(value);
+        }
+    }
+
+    ErrRef err_ref() {
+        if constexpr (std::is_reference_v<E>) {
+            return std::get<ErrStorage>(value).get();
+        } else {
+            return std::get<ErrStorage>(value);
+        }
+    }
+
+    ErrConstRef err_ref() const {
+        if constexpr (std::is_reference_v<E>) {
+            return std::get<ErrStorage>(value).get();
+        } else {
+            return std::get<ErrStorage>(value);
+        }
+    }
 
 public:
     // Constructors for success values
-    template<typename U, typename = std::enable_if_t<!std::is_same_v<std::decay_t<U>, Result> && 
-                                                     std::is_convertible_v<U, T>>>
-    Result(U&& ok_val, std::true_type) : value(std::forward<U>(ok_val)), is_ok_value(true) {}
-    
-    // Constructors for error values  
     template<typename U, typename = std::enable_if_t<!std::is_same_v<std::decay_t<U>, Result> &&
-                                                     std::is_convertible_v<U, E>>>
-    Result(U&& err_val, std::false_type) : value(std::forward<U>(err_val)), is_ok_value(false) {}
-    
+                                                     std::is_constructible_v<OkStorage, U>>>
+    Result(U&& ok_val, std::true_type)
+        : value(std::in_place_index<0>, std::forward<U>(ok_val)), is_ok_value(true) {}
+
+    // Constructors for error values
+    template<typename U, typename = std::enable_if_t<!std::is_same_v<std::decay_t<U>, Result> &&
+                                                     std::is_constructible_v<ErrStorage, U>>>
+    Result(U&& err_val, std::false_type)
+        : value(std::in_place_index<1>, std::forward<U>(err_val)), is_ok_value(false) {}
+
     // Static factory methods
     template<typename U = T>
     static Result<T, E> Ok(U&& val) {
         return Result<T, E>(std::forward<U>(val), std::true_type{});
     }
-    
+
     // Special overload for Unit type
     static Result<Unit, E> Ok() {
         return Result<Unit, E>(Unit{}, std::true_type{});
     }
-    
+
     template<typename U = E>
     static Result<T, E> Err(U&& err) {
         return Result<T, E>(std::forward<U>(err), std::false_type{});
     }
-    
+
     // Query methods
     bool is_ok() const {
         return is_ok_value;
     }
-    
+
     bool is_err() const {
         return !is_ok_value;
     }
-    
+
     // Access methods
-    T& unwrap() {
+    OkRef unwrap() {
         if (is_err()) {
             std::println("try to unwarp an err value");
-             throw std::runtime_error("Called `Result::unwrap()` on an `Err` value");
+            throw std::runtime_error("Called `Result::unwrap()` on an `Err` value");
         }
-        return std::get<T>(value);
+        return ok_ref();
     }
-    
-    const T& unwrap() const {
+
+    OkConstRef unwrap() const {
         if (is_err()) {
             std::println("try to unwarp an err value");
-             throw std::runtime_error("Called `Result::unwrap()` on an `Err` value");
+            throw std::runtime_error("Called `Result::unwrap()` on an `Err` value");
         }
-        return std::get<T>(value);
+        return ok_ref();
     }
-    
-    E& unwrap_err() {
+
+    ErrRef unwrap_err() {
         if (is_ok()) {
             throw std::runtime_error("called `Result::unwrap_err()` on an `Ok` value");
         }
-        return std::get<E>(value);
+        return err_ref();
     }
-    
-    const E& unwrap_err() const {
+
+    ErrConstRef unwrap_err() const {
         if (is_ok()) {
             throw std::runtime_error("called `Result::unwrap_err()` on an `Ok` value");
         }
-        return std::get<E>(value);
+        return err_ref();
     }
-    
-    T unwrap_or(const T& default_val) const {
-        return is_ok() ? std::get<T>(value) : default_val;
+
+    std::remove_reference_t<T> unwrap_or(const std::remove_reference_t<T>& default_val) const {
+        return is_ok() ? static_cast<std::remove_reference_t<T>>(ok_ref()) : default_val;
     }
-    
+
     template<typename F>
-    T unwrap_or_else(F&& f) const {
-        return is_ok() ? std::get<T>(value) : f(std::get<E>(value));
+    std::remove_reference_t<T> unwrap_or_else(F&& f) const {
+        if (is_ok()) {
+            return static_cast<std::remove_reference_t<T>>(ok_ref());
+        }
+        return f(err_ref());
     }
-    
+
     // Functional methods
     template<typename F>
     auto map(F&& f) const -> Result<decltype(f(std::declval<T>())), E> {
         using RetType = decltype(f(std::declval<T>()));
         if (is_ok()) {
-            return Result<RetType, E>::Ok(f(std::get<T>(value)));
+            return Result<RetType, E>::Ok(f(ok_ref()));
         }
-        return Result<RetType, E>::Err(std::get<E>(value));
+        return Result<RetType, E>::Err(err_ref());
     }
-    
+
     template<typename F>
     auto map_err(F&& f) const -> Result<T, decltype(f(std::declval<E>()))> {
         using ErrType = decltype(f(std::declval<E>()));
         if (is_err()) {
-            return Result<T, ErrType>::Err(f(std::get<E>(value)));
+            return Result<T, ErrType>::Err(f(err_ref()));
         }
-        return Result<T, ErrType>::Ok(std::get<T>(value));
+        return Result<T, ErrType>::Ok(ok_ref());
     }
-    
+
     template<typename F>
     auto and_then(F&& f) const -> decltype(f(std::declval<T>())) {
-        if (is_ok()) {
-            return f(std::get<T>(value));
-        }
         using RetType = decltype(f(std::declval<T>()));
-        return RetType::Err(std::get<E>(value));
-    }
-    
-    Option<T> ok() const {
         if (is_ok()) {
-            return Option<T>::Some(std::get<T>(value));
+            return f(ok_ref());
         }
-        return Option<T>::None();
+        return RetType::Err(err_ref());
     }
-    
-    Option<E> err() const {
-        if (is_err()) {
-            return Option<E>::Some(std::get<E>(value));
+
+    Option<std::remove_reference_t<T>> ok() const {
+        if (is_ok()) {
+            return Option<std::remove_reference_t<T>>::Some(ok_ref());
         }
-        return Option<E>::None();
+        return Option<std::remove_reference_t<T>>::None();
+    }
+
+    Option<std::remove_reference_t<E>> err() const {
+        if (is_err()) {
+            return Option<std::remove_reference_t<E>>::Some(err_ref());
+        }
+        return Option<std::remove_reference_t<E>>::None();
     }
 };
 
