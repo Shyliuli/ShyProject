@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <variant>
+#include <type_traits>
 #include <print>
 #include "rustic.hpp"
 
@@ -87,7 +88,8 @@ private:
     
 public:
     // 构造函数，接受任意错误类型
-    template<typename T>
+    template<typename T,
+             typename = std::enable_if_t<!std::is_same_v<std::decay_t<T>, CoreError>>>
     CoreError(T&& err) : error(std::forward<T>(err)) {}
     
     // 统一的print接口

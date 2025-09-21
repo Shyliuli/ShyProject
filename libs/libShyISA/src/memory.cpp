@@ -1,4 +1,5 @@
 #include "ShyISA/memory.hpp"
+#include <new>
 using std::unique_ptr;
 
 // Memory类构造函数实现
