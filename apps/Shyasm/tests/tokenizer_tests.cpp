@@ -165,3 +165,37 @@ TEST_CASE("Tokenizer to_string reassembles source text") {
     CHECK(out.unwrap() == src);
 }
 
+TEST_CASE("Token::to_u32 returns Err for non-numeric token") {
+    auto tkr_res = Tokenizer::create("addn");
+    REQUIRE(tkr_res.is_ok());
+    auto tkr = std::move(tkr_res.unwrap());
+    auto tok_res = tkr->next();
+    REQUIRE(tok_res.is_ok());
+    auto &tok = tok_res.unwrap();
+    CHECK(tok.type() == Token::Type::COMMAND);
+    auto v = tok.to_u32();
+    CHECK(v.is_err());
+}
+
+TEST_CASE("Tokenizer invalid hex literal yields to_u32 error") {
+    auto tkr_res = Tokenizer::create("0x");
+    REQUIRE(tkr_res.is_ok());
+    auto tkr = std::move(tkr_res.unwrap());
+    auto tok_res = tkr->next();
+    REQUIRE(tok_res.is_ok());
+    auto &tok = tok_res.unwrap();
+    CHECK(tok.type() == Token::Type::HEX);
+    auto v = tok.to_u32();
+    CHECK(v.is_err());
+}
+
+TEST_CASE("Tokenizer next beyond end returns Err") {
+    auto tkr_res = Tokenizer::create("1");
+    REQUIRE(tkr_res.is_ok());
+    auto tkr = std::move(tkr_res.unwrap());
+    auto a = tkr->next();
+    REQUIRE(a.is_ok());
+    // at end
+    auto b = tkr->next();
+    CHECK(b.is_err());
+}

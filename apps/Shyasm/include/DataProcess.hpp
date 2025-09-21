@@ -22,7 +22,7 @@ public:
      * @param input 包含数据段定义的源码。
      * @return 成功返回 DataProcess 指针，失败返回核心错误。
      */
-    fn create(string input)->Result<unique_ptr<DataProcess>,CoreError>;
+    fn static create(string input)->Result<unique_ptr<DataProcess>,CoreError>;
 
     /**
      * @brief 执行数据段解析与转换，更新has_processed

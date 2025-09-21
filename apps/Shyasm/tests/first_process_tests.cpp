@@ -45,3 +45,37 @@ TEST_CASE("macro_process expands simple symbol macros from DEFINE") {
     CHECK(out.find("outn 10") != std::string::npos);
 }
 
+TEST_CASE("macro_process returns Err when using undefined symbol") {
+    const char* src =
+        "___DEFINE___\n"
+        "SP sp\n"
+        "___CODE___\n"
+        "setn foo 1\n"; // 'foo' is not defined
+    auto r = FirstProcess::create(src);
+    REQUIRE(r.is_ok());
+    auto fp = std::move(r.unwrap());
+
+    fp->comment_process();
+    auto mr = fp->macro_process();
+    CHECK(mr.is_err());
+}
+
+TEST_CASE("macro_process replaces whole identifiers only") {
+    const char* src =
+        "___DEFINE___\n"
+        "PI 3\n"
+        "___CODE___\n"
+        "outn PI\n"
+        "outn PIVS\n";
+    auto r = FirstProcess::create(src);
+    REQUIRE(r.is_ok());
+    auto fp = std::move(r.unwrap());
+
+    fp->comment_process();
+    auto mr = fp->macro_process();
+    REQUIRE(mr.is_ok());
+    auto out = fp->to_string();
+    CHECK(out.find("outn 3") != std::string::npos);
+    // Ensure partial word 'PI' inside 'PIVS' was not replaced
+    CHECK(out.find("outn PIVS") != std::string::npos);
+}

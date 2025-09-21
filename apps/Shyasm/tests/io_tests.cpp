@@ -43,3 +43,12 @@ TEST_CASE("Io::write_to_file dumps memory to file") {
     CHECK(fs::file_size(path) > 0);
 }
 
+TEST_CASE("Io::read_from_file returns Err if file not found") {
+    auto r = Io::read_from_file("build/test_io/does_not_exist.asm");
+    CHECK(r.is_err());
+}
+
+TEST_CASE("Io::write_to_file returns Err on null memory") {
+    auto r = Io::write_to_file("build/test_io/null.sfs", unique_ptr<Memory>{});
+    CHECK(r.is_err());
+}

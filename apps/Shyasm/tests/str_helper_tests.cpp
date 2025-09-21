@@ -53,3 +53,26 @@ TEST_CASE("get_part returns Err for missing section") {
     CHECK(r.is_err());
 }
 
+TEST_CASE("get_part returns empty string for empty section") {
+    const char* src =
+        "___DEFINE___\n"
+        "SP sp\n"
+        "___DATA___\n"
+        "___CODE___\n";
+
+    auto r = get_part(src, part_t::DATA);
+    REQUIRE(r.is_ok());
+    CHECK(r.unwrap() == std::string{});
+}
+
+TEST_CASE("get_part handles section at EOF without trailing newline") {
+    const char* src =
+        "___DEFINE___\n"
+        "SP sp\n"
+        "___CODE___\n"
+        "setn sp 1"; // no trailing newline
+
+    auto r = get_part(src, part_t::CODE);
+    REQUIRE(r.is_ok());
+    CHECK(r.unwrap() == std::string{"setn sp 1"});
+}
