@@ -13,9 +13,58 @@ fn Token::str() -> string {
 }
 
 fn Token::to_u32() -> Result<u32, CoreError> {
-    return Result<u32, CoreError>::Err(CoreError{AllocError{"Token::to_u32 not implemented"}});
+    switch (token_type)
+    {
+        case Type::CHAR:
+        case Type::HEX:
+        case Type::DEC:
+        case Type::BIN:
+        case Type::REG:
+            return Err<u32>(CoreError(AllocError{"Token::to_u32 not implemented"}));
+        default:
+            let msg=std::format("Cannot convert {} to u32,type is {}", raw_str,token_type);
+            return Err<u32>(CoreError(InvalidType{
+                .message=msg,
+                .type=type_to_string(token_type)
+            }));
+    }
 }
 
 fn Token::tokenizer() -> Result<Tokenizer, CoreError> {
     return Result<Tokenizer, CoreError>::Err(CoreError{AllocError{"Token::tokenizer not implemented"}});
 }
+fn Token::type_to_string(Type type)->string{
+        switch (type)
+        {
+        case Type::CHAR:
+            return "char";
+        case Type::HEX:
+            return "hex";
+        case Type::DEC:
+            return "dec";
+        case Type::BIN:
+            return "bin";
+        case Type::REG:
+            return "reg";
+        case Type::ARRAY:
+            return "array";
+        case Type::STRING:
+            return "string";
+        case Type::FLAG:
+            return "flag";
+        case Type::COMMAND:
+            return "command";
+        case Type::NEXT_LINE:
+            return "next_line";
+        case Type::ANY:
+            return "any";
+        case Type::LINE_COMMNET:
+            return "line_comment";
+        case Type::BLOCK_COMMENT_START:
+            return "block_comment_start";
+        case Type::BLOCK_COMMENT_END:
+            return "block_comment_end";
+        default:
+            return "unknown";
+        }
+    }

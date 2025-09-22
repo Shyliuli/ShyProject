@@ -75,7 +75,13 @@ public:
      * @return 成功时返回新的 tokenizer 实例，否则返回词法错误。
      */
     fn tokenizer() -> Result<Tokenizer, CoreError>;
+    /**
+     * @brief 获取Token的string。
+     * @return 获取到的string。
+     */
+    fn Token::type_to_string(Type type)->string
 };
+
 
 /**
  * @brief 负责将源码分割为Token序列的状态化 tokenizer。
