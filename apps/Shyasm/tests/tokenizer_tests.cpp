@@ -2,7 +2,7 @@
 #include "doctest.h"
 #include "tokenlizer.hpp"
 
-TEST_CASE("Tokenizer parses decimal literal") {
+TEST_CASE("Tokenizer 解析十进制字面量") {
     auto tkr_res = Tokenizer::create("123");
     REQUIRE(tkr_res.is_ok());
     auto tkr = std::move(tkr_res.unwrap());
@@ -17,7 +17,7 @@ TEST_CASE("Tokenizer parses decimal literal") {
     CHECK(val.unwrap() == 123u);
 }
 
-TEST_CASE("Tokenizer parses hex literal 0x10 -> 16") {
+TEST_CASE("Tokenizer 解析十六进制 0x10 -> 16") {
     auto tkr_res = Tokenizer::create("0x10");
     REQUIRE(tkr_res.is_ok());
     auto tkr = std::move(tkr_res.unwrap());
@@ -32,7 +32,7 @@ TEST_CASE("Tokenizer parses hex literal 0x10 -> 16") {
     CHECK(val.unwrap() == 16u);
 }
 
-TEST_CASE("Tokenizer parses bin literal 101b -> 5") {
+TEST_CASE("Tokenizer 解析二进制 101b -> 5") {
     auto tkr_res = Tokenizer::create("101b");
     REQUIRE(tkr_res.is_ok());
     auto tkr = std::move(tkr_res.unwrap());
@@ -47,7 +47,7 @@ TEST_CASE("Tokenizer parses bin literal 101b -> 5") {
     CHECK(val.unwrap() == 5u);
 }
 
-TEST_CASE("Tokenizer parses char literal 'A' -> 65") {
+TEST_CASE("Tokenizer 解析字符字面量 'A' -> 65") {
     auto tkr_res = Tokenizer::create("'A'");
     REQUIRE(tkr_res.is_ok());
     auto tkr = std::move(tkr_res.unwrap());
@@ -62,7 +62,7 @@ TEST_CASE("Tokenizer parses char literal 'A' -> 65") {
     CHECK(val.unwrap() == static_cast<u32>('A'));
 }
 
-TEST_CASE("Tokenizer categorizes COMMAND, REG, DEC and NEXT_LINE") {
+TEST_CASE("Tokenizer 分类 COMMAND、REG、DEC 和 NEXT_LINE") {
     auto tkr_res = Tokenizer::create("addn 1x 1\n");
     REQUIRE(tkr_res.is_ok());
     auto tkr = std::move(tkr_res.unwrap());
@@ -84,7 +84,7 @@ TEST_CASE("Tokenizer categorizes COMMAND, REG, DEC and NEXT_LINE") {
     CHECK(d.unwrap().type() == Token::Type::NEXT_LINE);
 }
 
-TEST_CASE("Tokenizer reset_index rewinds to first token") {
+TEST_CASE("Tokenizer reset_index 回到首个 token") {
     auto tkr_res = Tokenizer::create("1\n2\n");
     REQUIRE(tkr_res.is_ok());
     auto tkr = std::move(tkr_res.unwrap());
@@ -102,7 +102,7 @@ TEST_CASE("Tokenizer reset_index rewinds to first token") {
     CHECK(v.unwrap() == 1u);
 }
 
-TEST_CASE("Token::tokenizer for ARRAY -> iterates elements") {
+TEST_CASE("Token::tokenizer 处理 ARRAY -> 迭代元素") {
     auto tkr_res = Tokenizer::create("{'A',2,3}");
     REQUIRE(tkr_res.is_ok());
     auto tkr = std::move(tkr_res.unwrap());
@@ -131,7 +131,7 @@ TEST_CASE("Token::tokenizer for ARRAY -> iterates elements") {
     CHECK(e3.unwrap().to_u32().unwrap() == 3u);
 }
 
-TEST_CASE("Token::tokenizer for STRING -> iterates characters") {
+TEST_CASE("Token::tokenizer 处理 STRING -> 逐字符迭代") {
     auto tkr_res = Tokenizer::create("\"Hi\"");
     REQUIRE(tkr_res.is_ok());
     auto tkr = std::move(tkr_res.unwrap());
@@ -155,7 +155,7 @@ TEST_CASE("Token::tokenizer for STRING -> iterates characters") {
     CHECK(c2.unwrap().to_u32().unwrap() == static_cast<u32>('i'));
 }
 
-TEST_CASE("Tokenizer to_string reassembles source text") {
+TEST_CASE("Tokenizer to_string 还原源码文本") {
     auto src = std::string{"addn 1x 1\n"};
     auto tkr_res = Tokenizer::create(src);
     REQUIRE(tkr_res.is_ok());
@@ -165,7 +165,7 @@ TEST_CASE("Tokenizer to_string reassembles source text") {
     CHECK(out.unwrap() == src);
 }
 
-TEST_CASE("Token::to_u32 returns Err for non-numeric token") {
+TEST_CASE("Token::to_u32 对非数值类型返回 Err") {
     auto tkr_res = Tokenizer::create("addn");
     REQUIRE(tkr_res.is_ok());
     auto tkr = std::move(tkr_res.unwrap());
@@ -177,7 +177,7 @@ TEST_CASE("Token::to_u32 returns Err for non-numeric token") {
     CHECK(v.is_err());
 }
 
-TEST_CASE("Tokenizer invalid hex literal yields to_u32 error") {
+TEST_CASE("Tokenizer 非法十六进制字面量导致 to_u32 错误") {
     auto tkr_res = Tokenizer::create("0x");
     REQUIRE(tkr_res.is_ok());
     auto tkr = std::move(tkr_res.unwrap());
@@ -189,7 +189,7 @@ TEST_CASE("Tokenizer invalid hex literal yields to_u32 error") {
     CHECK(v.is_err());
 }
 
-TEST_CASE("Tokenizer next beyond end returns Err") {
+TEST_CASE("Tokenizer 在末尾后 next 返回 Err") {
     auto tkr_res = Tokenizer::create("1");
     REQUIRE(tkr_res.is_ok());
     auto tkr = std::move(tkr_res.unwrap());

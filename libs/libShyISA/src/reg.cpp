@@ -32,40 +32,8 @@ Reg::Reg() : reg_map({
     {0x1B, &ex},
     {0x1C, &blts},
     {0x1D, &bltl}
-}),reg_str2addr_map(
-    {
-        {"0x", 0x00},
-        {"1x", 0x01},
-        {"2x", 0x02},
-        {"3x", 0x03},
-        {"4x", 0x04},
-        {"5x", 0x05},
-        {"6x", 0x06},
-        {"7x", 0x07},
-        {"8x", 0x08},
-        {"9x", 0x09},
-        {"Ax", 0x0A},
-        {"Bx", 0x0B},
-        {"Cx", 0x0C},
-        {"Dx", 0x0D},
-        {"Ex", 0x0E},
-        {"Fx", 0x0F},
-        {"PC", 0x10},
-        {"MD", 0x11},
-        {"SP", 0x12},
-        {"TM", 0x13},
-        {"TA1", 0x14},
-        {"TA2", 0x15},
-        {"M1", 0x16},
-        {"M2", 0x17},
-        {"M3", 0x18},
-        {"M4", 0x19},
-        {"RS", 0x1A},
-        {"EX", 0x1B},
-        {"BLTS", 0x1C},
-        {"BLTL", 0x1D}
-    }
-)
+})
+
 {
     // 初始化通用寄存器数组
     gp_reg.fill(0);
@@ -73,7 +41,40 @@ Reg::Reg() : reg_map({
     // 初始化所有特殊功能寄存器
     pc = md = sp = tm = ta1 = ta2 = m1 = m2 = m3 = m4 = rs = ex = blts = bltl = 0;
 }
-
+// Define class static register name -> address map (lowercase keys)
+const std::unordered_map<std::string,u32> Reg::reg_str2addr_map =
+{
+    {"0x", 0x00},
+    {"1x", 0x01},
+    {"2x", 0x02},
+    {"3x", 0x03},
+    {"4x", 0x04},
+    {"5x", 0x05},
+    {"6x", 0x06},
+    {"7x", 0x07},
+    {"8x", 0x08},
+    {"9x", 0x09},
+    {"ax", 0x0A},
+    {"bx", 0x0B},
+    {"cx", 0x0C},
+    {"dx", 0x0D},
+    {"ex", 0x0E},
+    {"fx", 0x0F},
+    {"pc", 0x10},
+    {"md", 0x11},
+    {"sp", 0x12},
+    {"tm", 0x13},
+    {"ta1", 0x14},
+    {"ta2", 0x15},
+    {"m1", 0x16},
+    {"m2", 0x17},
+    {"m3", 0x18},
+    {"m4", 0x19},
+    {"rs", 0x1A},
+    {"ex", 0x1B},
+    {"blts", 0x1C},
+    {"bltl", 0x1D}
+};
 // 静态工厂方法实现
 fn Reg::create() -> Result<std::unique_ptr<Reg>, CoreError>
 {
@@ -162,16 +163,16 @@ fn Reg::write(u32 val, Address addr) -> Result<Unit, CoreError>
 }
 // 将寄存器名称字符串转换为地址实现
 fn Reg::str2addr(std::string str)->Result<Address,CoreError>{    
-    // 将小写字母转换为大写，实现大小写不敏感匹配
-    for(int i=0;i<str.length();i++){
-        if('a'<=str[i] && str[i]<='z'){
-            str[i] = str[i] - 'a' + 'A';
+    // 将大写字母转换为小写，实现大小写不敏感匹配
+    for (size_t i = 0; i < str.length(); ++i) {
+        if ('A' <= str[i] && str[i] <= 'Z') {
+            str[i] = str[i] - 'A' + 'a';
         }
     }
     
     // 在寄存器名称映射表中查找
     let it = reg_str2addr_map.find(str);
-    if(it == reg_str2addr_map.end()) {
+    if (it == reg_str2addr_map.end()) {
         return Err<Address>(
             CoreError(
                 RegNotFind{

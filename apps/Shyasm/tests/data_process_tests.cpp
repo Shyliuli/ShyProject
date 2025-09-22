@@ -2,12 +2,12 @@
 #include "doctest.h"
 #include "DataProcess.hpp"
 
-TEST_CASE("DataProcess::create returns instance") {
+TEST_CASE("DataProcess::create 返回实例") {
     auto r = DataProcess::create("___DATA___\n");
     CHECK(r.is_ok());
 }
 
-TEST_CASE("DataProcess::process succeeds on empty DATA section") {
+TEST_CASE("DataProcess::process 对空 DATA 段成功处理") {
     auto r = DataProcess::create("___DATA___\n");
     REQUIRE(r.is_ok());
     auto dp = std::move(r.unwrap());
@@ -15,7 +15,7 @@ TEST_CASE("DataProcess::process succeeds on empty DATA section") {
     CHECK(pr.is_ok());
 }
 
-TEST_CASE("DataProcess::process returns Err on invalid line") {
+TEST_CASE("DataProcess::process 对非法行返回 Err") {
     const char* src =
         "___DATA___\n"
         "0xZZZ 1\n"; // invalid address format

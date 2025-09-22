@@ -8,7 +8,9 @@ fn Tokenizer::create(string input) -> Result<unique_ptr<Tokenizer>, CoreError> {
         return Err<unique_ptr<Tokenizer>>(CoreError(AllocError{
             .message = "Failed to allocate Tokenizer"}));
     }
-    return Ok<CoreError>(std::move(tokenizer));
+    return Err<unique_ptr<Tokenizer>>(CoreError(AllocError{
+            .message = "Tokenizer的创建还没实现！"}));
+    // return Ok<CoreError>(std::move(tokenizer));
 }
 
 fn Tokenizer::get_token(u32 i) -> Result<Token&, CoreError> {

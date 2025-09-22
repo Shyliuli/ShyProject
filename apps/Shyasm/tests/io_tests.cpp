@@ -4,7 +4,7 @@
 #include <fstream>
 #include <filesystem>
 
-TEST_CASE("Io::read_from_file reads text content") {
+TEST_CASE("Io::read_from_file 读取文本内容") {
     namespace fs = std::filesystem;
     auto dir = fs::path{"build/test_io"};
     fs::create_directories(dir);
@@ -22,7 +22,7 @@ TEST_CASE("Io::read_from_file reads text content") {
     CHECK(r.unwrap() == std::string{content});
 }
 
-TEST_CASE("Io::write_to_file dumps memory to file") {
+TEST_CASE("Io::write_to_file 将内存导出到文件") {
     namespace fs = std::filesystem;
     auto dir = fs::path{"build/test_io"};
     fs::create_directories(dir);
@@ -43,12 +43,12 @@ TEST_CASE("Io::write_to_file dumps memory to file") {
     CHECK(fs::file_size(path) > 0);
 }
 
-TEST_CASE("Io::read_from_file returns Err if file not found") {
+TEST_CASE("Io::read_from_file 文件不存在时返回 Err") {
     auto r = Io::read_from_file("build/test_io/does_not_exist.asm");
     CHECK(r.is_err());
 }
 
-TEST_CASE("Io::write_to_file returns Err on null memory") {
+TEST_CASE("Io::write_to_file 空内存时返回 Err") {
     auto r = Io::write_to_file("build/test_io/null.sfs", unique_ptr<Memory>{});
     CHECK(r.is_err());
 }

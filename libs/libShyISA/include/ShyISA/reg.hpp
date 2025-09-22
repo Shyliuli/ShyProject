@@ -59,7 +59,7 @@ private:
 
     /// 寄存器地址到内存地址的映射表，用于统一的寄存器访问
     const std::unordered_map<u32,u32*> reg_map;
-    const std::unordered_map<std::string,u32> reg_str2addr_map;
+    const static std::unordered_map<std::string,u32> reg_str2addr_map;
     // 特殊功能寄存器
     u32 pc;          ///< 0x10: 程序计数器 (Program Counter)
     u32 md;          ///< 0x11: 模式寄存器 (Mode Register) - 0=文本模式, 非0=图形模式
@@ -128,5 +128,5 @@ public:
      * 支持大小写不敏感的寄存器名称查找。会自动将小写字母转换为大写后进行匹配。
      * 支持的寄存器名称包括：通用寄存器("0x"-"Fx")和特殊寄存器("PC", "MD", "SP"等)。
      */
-    fn str2addr(std::string str)->Result<Address,CoreError>;
+    static fn str2addr(std::string str)->Result<Address,CoreError>;
 };

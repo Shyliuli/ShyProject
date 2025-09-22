@@ -2,7 +2,7 @@
 #include "doctest.h"
 #include "str_helper.hpp"
 
-TEST_CASE("get_part extracts DEFINE section") {
+TEST_CASE("get_part 提取 DEFINE 段") {
     const char* src =
         "___DEFINE___\n"
         "SP sp\n"
@@ -17,7 +17,7 @@ TEST_CASE("get_part extracts DEFINE section") {
     CHECK(r.unwrap() == std::string{"SP sp\nPI 1\n"});
 }
 
-TEST_CASE("get_part extracts DATA section") {
+TEST_CASE("get_part 提取 DATA 段") {
     const char* src =
         "___DEFINE___\n"
         "SP sp\n"
@@ -31,7 +31,7 @@ TEST_CASE("get_part extracts DATA section") {
     CHECK(r.unwrap() == std::string{"0x00200000 1\n"});
 }
 
-TEST_CASE("get_part extracts CODE section") {
+TEST_CASE("get_part 提取 CODE 段") {
     const char* src =
         "___DEFINE___\n"
         "SP sp\n"
@@ -45,7 +45,7 @@ TEST_CASE("get_part extracts CODE section") {
     CHECK(r.unwrap() == std::string{"setn sp 0x00FFFFFF\n"});
 }
 
-TEST_CASE("get_part returns Err for missing section") {
+TEST_CASE("get_part 在缺失段时返回 Err") {
     const char* src =
         "___CODE___\n"
         "setn sp 0\n";
@@ -53,7 +53,7 @@ TEST_CASE("get_part returns Err for missing section") {
     CHECK(r.is_err());
 }
 
-TEST_CASE("get_part returns empty string for empty section") {
+TEST_CASE("get_part 对空段返回空字符串") {
     const char* src =
         "___DEFINE___\n"
         "SP sp\n"
@@ -65,7 +65,7 @@ TEST_CASE("get_part returns empty string for empty section") {
     CHECK(r.unwrap() == std::string{});
 }
 
-TEST_CASE("get_part handles section at EOF without trailing newline") {
+TEST_CASE("get_part 处理末尾无换行的段") {
     const char* src =
         "___DEFINE___\n"
         "SP sp\n"

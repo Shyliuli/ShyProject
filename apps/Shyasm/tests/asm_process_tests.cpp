@@ -2,7 +2,7 @@
 #include "doctest.h"
 #include "AsmProcess.hpp"
 
-TEST_CASE("AsmProcess::create returns instance with memory") {
+TEST_CASE("AsmProcess::create 使用内存成功返回实例") {
     const char* src =
         "___CODE___\n"
         "setn 1x 1\n";
@@ -14,7 +14,7 @@ TEST_CASE("AsmProcess::create returns instance with memory") {
     CHECK(asm_res.is_ok());
 }
 
-TEST_CASE("AsmProcess .process() and .bin() succeed for minimal program") {
+TEST_CASE("AsmProcess 对最小程序的 process() 与 bin() 成功") {
     const char* src =
         "___DEFINE___\n"
         "SP sp\n"
@@ -34,12 +34,12 @@ TEST_CASE("AsmProcess .process() and .bin() succeed for minimal program") {
     CHECK(bin.is_ok());
 }
 
-TEST_CASE("AsmProcess::create returns Err for null memory") {
+TEST_CASE("AsmProcess::create 为空内存返回 Err") {
     auto asm_res = AsmProcess::create("___CODE___\n", unique_ptr<Memory>{});
     CHECK(asm_res.is_err());
 }
 
-TEST_CASE("AsmProcess::process marks has_processed true") {
+TEST_CASE("AsmProcess::process 将 has_processed 置为 true") {
     const char* src =
         "___DEFINE___\n"
         "SP sp\n"

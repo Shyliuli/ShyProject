@@ -2,12 +2,12 @@
 #include "doctest.h"
 #include "FirstProcess.hpp"
 
-TEST_CASE("FirstProcess::create returns instance") {
+TEST_CASE("FirstProcess::create 返回实例") {
     auto r = FirstProcess::create("___CODE___\n");
     CHECK(r.is_ok());
 }
 
-TEST_CASE("comment_process removes // and /* ... */ comments") {
+TEST_CASE("comment_process 移除 // 和 /* ... */ 注释") {
     const char* src =
         "___CODE___\n"
         "setn 1x 1 // inline comment\n"
@@ -24,7 +24,7 @@ TEST_CASE("comment_process removes // and /* ... */ comments") {
     CHECK(out.find("*/") == std::string::npos);
 }
 
-TEST_CASE("macro_process expands simple symbol macros from DEFINE") {
+TEST_CASE("macro_process 展开 DEFINE 中的简易符号宏") {
     const char* src =
         "___DEFINE___\n"
         "SP sp\n"
@@ -45,7 +45,7 @@ TEST_CASE("macro_process expands simple symbol macros from DEFINE") {
     CHECK(out.find("outn 10") != std::string::npos);
 }
 
-TEST_CASE("macro_process returns Err when using undefined symbol") {
+TEST_CASE("macro_process 使用未定义符号时返回 Err") {
     const char* src =
         "___DEFINE___\n"
         "SP sp\n"
@@ -60,7 +60,7 @@ TEST_CASE("macro_process returns Err when using undefined symbol") {
     CHECK(mr.is_err());
 }
 
-TEST_CASE("macro_process replaces whole identifiers only") {
+TEST_CASE("macro_process 仅替换完整标识符") {
     const char* src =
         "___DEFINE___\n"
         "PI 3\n"

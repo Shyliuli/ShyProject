@@ -79,7 +79,7 @@ public:
      * @brief 获取Token的string。
      * @return 获取到的string。
      */
-    fn Token::type_to_string(Type type)->string
+    fn type_to_string(Type type)->string;
 };
 
 
