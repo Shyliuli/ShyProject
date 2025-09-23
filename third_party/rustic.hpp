@@ -1,73 +1,42 @@
 #ifndef RUSTIC_H
 #define RUSTIC_H
-/*
- * Rustic.hpp - C++安全编程辅助库
- * 
- * 本头文件提供了一套安全的数据类型和错误处理机制，帮助C++程序员避免常见的编程错误。
- * 这些工具借鉴了现代编程语言的设计理念，让C++代码更加安全可靠。
- * 
- * 主要功能：
- * 
- * 1. 明确的数据类型别名：
- *    - u8, u16, u32, u64：无符号整数类型（8位、16位、32位、64位）
- *    - i8, i16, i32, i64：有符号整数类型（8位、16位、32位、64位）
- *    - f32, f64：浮点数类型（32位、64位）
- *    - usize, isize：与系统指针大小相同的整数类型
- *    - fn：函数定义的简化写法，等同于auto
- *    - let：不可变变量声明，等同于const auto
- * 
- * 2. Option<T> 类 - 安全的可选值处理：
- *    传统C++中，函数返回指针或特殊值（如-1）来表示"没有结果"，容易导致空指针解引用或忘记检查。
- *    Option<T>强制程序员明确处理"有值"和"无值"两种情况：
- *    
- *    - Option<T>::Some(value)：表示有一个类型为T的值
- *    - Option<T>::None()：表示没有值
- *    - is_some()/is_none()：检查是否有值
- *    - unwrap()：获取值（如果没有值会抛出异常，强制程序员意识到风险）
- *    - unwrap_or(default)：获取值或提供默认值
- *    - map(function)：如果有值则应用函数变换，否则返回None
- *    
- *    示例：
- *    Option<int> find_index(const std::vector<int>& vec, int target);
- *    auto result = find_index(numbers, 42);
- *    if (result.is_some()) {
- *        std::cout << "找到了，位置：" << result.unwrap() << std::endl;
- *    } else {
- *        std::cout << "没找到" << std::endl;
- *    }
- * 
- * 3. Result<T, E> 类 - 明确的错误处理：
- *    传统C++错误处理要么用异常（可能被忽略），要么用错误码（容易忘记检查）。
- *    Result<T, E>强制程序员同时考虑成功和失败情况：
- *    
- *    - Result<T, E>::Ok(value)：表示操作成功，包含类型为T的结果
- *    - Result<T, E>::Err(error)：表示操作失败，包含类型为E的错误信息
- *    - is_ok()/is_err()：检查操作是否成功
- *    - unwrap()：获取成功值（如果是错误会抛异常）
- *    - unwrap_err()：获取错误值（如果是成功会抛异常）
- *    - unwrap_or(default)：获取成功值或提供默认值
- *    - map(function)：如果成功则变换值，如果失败则传递错误
- *    
- *    示例：
- *    Result<int, std::string> divide(int a, int b);
- *    auto result = divide(10, 2);
- *    if (result.is_ok()) {
- *        std::cout << "结果：" << result.unwrap() << std::endl;
- *    } else {
- *        std::cout << "错误：" << result.unwrap_err() << std::endl;
- *    }
- * 
- * 4. Unit 结构体：
- *    表示"无意义的值"，用于不需要返回具体内容的函数
- * 
- * 安全性提升：
- * - 消除空指针解引用：Option强制检查值是否存在
- * - 明确错误处理：Result让错误无法被忽视
- * - 类型安全：明确的数据类型减少隐式转换错误
- * - 函数式编程：map、and_then等方法支持安全的数据变换链
- * 
- * 这套工具不会完全阻止所有错误，但能帮助程序员在编写代码时更加注意潜在问题，
- * 减少运行时错误和难以调试的bug。
+/**
+ *  @file  rustic.hpp
+ *  @brief Rustic - 让 C++ 拥有 Rust 般安全体验的轻量级工具头
+ *
+ *  1. 简洁而明确的类型别名
+ *     - u8 / u16 / u32 / u64   8/16/32/64 位无符号整数
+ *     - i8 / i16 / i32 / i64   8/16/32/64 位有符号整数
+ *     - f32 / f64              单/双精度浮点数
+ *     - usize / isize          与指针同宽的无/有符号整数
+ *
+ *  2. 声明风格的语法糖（需定义 ENABLE_RS_KEYWORD）
+ *     - fn  → 展开为 auto，用于函数声明
+ *       例：fn add(int a, int b) -> int { ... }
+ *     - let → 展开为 const auto，用于定义不可变变量
+ *       例：let x = 42;
+ *
+ *  3. 空值与错误处理的显式化封装（需定义 ENABLE_RS_ERROR）
+ *     - Option<T>   安全的“可有可无”值
+ *       - Some(v) / None()  构造
+ *       - is_some() / is_none()
+ *       - unwrap() / unwrap_or(def) / map(...)
+ *     - Result<T,E> 安全的“可能失败”值
+ *       - Ok(v) / Err(e)    构造
+ *       - is_ok() / is_err()
+ *       - unwrap() / unwrap_err() / map(...) / and_then(...)
+ *     全局辅助：Some(...), None(), Ok(...), Err(...)
+ *
+ *  使用示例：
+ *  @code
+ *  fn divide(i32 a, i32 b) -> Result<i32, std::string> {
+ *      if (b == 0) return Err("divide by zero");
+ *      return Ok(a / b);
+ *  }
+ *
+ *  let r = divide(10, 0);
+ *  if (r.is_err()) std::cerr << r.unwrap_err();
+ *  @endcode
  */
 
 #include <cstdlib>
