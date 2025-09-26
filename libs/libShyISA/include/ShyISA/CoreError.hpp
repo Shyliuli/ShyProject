@@ -76,6 +76,20 @@ struct RegNotFind {
     }
 };
 
+ /**
+ * @struct OverFlow
+ * @brief 溢出错误
+ *
+ * 当数据溢出时抛出的错误类型
+ */
+struct OverFlow {
+    std::string message;
+    
+    void print() const {
+        std::println("OverFlow: {}", message);
+    }
+};
+
 /**
  * @class CoreError
  * @brief 核心错误容器类
@@ -84,7 +98,7 @@ struct RegNotFind {
  */
 class CoreError {
 private:
-    std::variant<AllocError, InvalidAddress, InvalidType, RegNotFind> error;
+    std::variant<AllocError, InvalidAddress, InvalidType, RegNotFind, OverFlow> error;
     
 public:
     // 构造函数，接受任意错误类型

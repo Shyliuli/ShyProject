@@ -6,3 +6,4 @@
 #include "ShyISA/address.hpp"
 #include "ShyISA/memory.hpp"
 #include "ShyISA/reg.hpp"
+#include "ShyISA/command.hpp"

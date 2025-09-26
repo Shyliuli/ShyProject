@@ -61,7 +61,8 @@ using f32 = float;
 using f64 = double;
 using usize = size_t;
 using isize = ssize_t;
-
+template<typename T>
+using Vec = std::vector<T>;
 #ifdef ENABLE_RS_KEYWORD
 
 #define fn auto

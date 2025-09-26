@@ -21,3 +21,5 @@ enum class part_t{
  * @return 成功返回目标片段字符串，失败返回核心错误。
  */
 fn get_part(string input,part_t part)->Result<string,CoreError>;
+fn is_whitespace(char c)->bool;
+fn is_whitespace_without_n(char c)->bool;

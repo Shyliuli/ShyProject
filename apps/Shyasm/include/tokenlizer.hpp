@@ -5,6 +5,7 @@
 
 #pragma once
 #include "common.hpp"
+#include "str_helper.hpp"
 
 /**
  * @brief ShyAsm 词法分析阶段产生的单个Token。
@@ -35,6 +36,7 @@ public:
         COMMAND,             ///< 汇编指令，例如 adda
         NEXT_LINE,           ///< 换行符
         ANY,                 ///< 通配字符
+        END_OF_FILE,         ///< 文件结束符
     };
 
 private:

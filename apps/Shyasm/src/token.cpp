@@ -16,7 +16,7 @@ fn Token::to_u32() -> Result<u32, CoreError> {
     switch (token_type)
     {
         case Type::CHAR:
-        return Ok<CoreError>(static_cast<u32>(raw_str[0]));
+        return Ok<CoreError>(static_cast<u32>(raw_str[1]));
         case Type::HEX:
         return Ok<CoreError>(static_cast<u32>(std::stoul(raw_str, nullptr, 16)));
         case Type::DEC:
