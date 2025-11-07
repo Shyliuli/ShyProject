@@ -1,7 +1,0 @@
-target("ShyISA")
-    set_kind("static")
-    set_languages("c++23")
-    add_files("src/*.cpp")
-    add_includedirs("include", {public = true})
-    add_headerfiles("include/(**.hpp)")
-    add_includedirs("../../third_party/", {public = true})
