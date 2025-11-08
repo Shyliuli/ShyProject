@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "ShyIsaLib",
+    "asm",
+    "emu"
+]
+resolver = "2"
