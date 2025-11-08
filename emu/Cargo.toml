@@ -8,4 +8,4 @@ name = "emu"
 path = "src/main.rs"
 
 [dependencies]
-ShyIsaLib = { path = "../ShyIsaLib" }
+shy_isa_lib = { path = "../shy_isa_lib" }

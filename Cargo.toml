@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "ShyIsaLib",
+    "shy_isa_lib",
     "asm",
     "emu"
 ]

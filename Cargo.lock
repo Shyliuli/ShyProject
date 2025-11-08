@@ -3,19 +3,19 @@
 version = 4
 
 [[package]]
-name = "ShyIsaLib"
-version = "0.1.0"
-
-[[package]]
 name = "asm"
 version = "0.1.0"
 dependencies = [
- "ShyIsaLib",
+ "shy_isa_lib",
 ]
 
 [[package]]
 name = "emu"
 version = "0.1.0"
 dependencies = [
- "ShyIsaLib",
+ "shy_isa_lib",
 ]
+
+[[package]]
+name = "shy_isa_lib"
+version = "0.1.0"
