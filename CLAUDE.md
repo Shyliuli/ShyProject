@@ -39,15 +39,18 @@ shy_isa_lib 是 emu 与 asm 的公共库
 .
 ├── Cargo.toml
 └── src
+    ├── addr/               // Address 模块（包含 Addr, Address, Memory, RegFile, Io, Vram）
+    ├── addr.rs             // Addr 模块入口
+    ├── device.rs           // AddrPort trait（设备统一接口）
     ├── error.rs
     ├── isa_def.rs
     ├── lib.rs
-    ├── memory.rs
     └── types.rs
 模块说明：
 
-- lib.rs：库入口，导出 error/isa_def/memory/types。
+- lib.rs：库入口，导出 error/isa_def/device/addr/types。
 - error.rs：统一错误类型 CoreError；实现 Display 与 Error。
-- isa_def.rs：定义寄存器、操作码、内存与 I/O 映射；枚举 repr(u32)；提供 TryFrom`<Word>` 解码。
-- memory.rs：32 位字宽线性内存；读/写（含边界检查）与镜像加载/保存（大端）；提供安全/不安全接口。
-- types.rs：基本类型别名；Word/Addr = u32。
+- isa_def.rs：定义操作码和寄存器；提供 TryFrom`<Word>` 解码。
+- device.rs：定义 AddrPort trait，设备统一接口。
+- addr.rs：Address 模块入口，提供 Addr/Address 等核心类型。
+- types.rs：基本类型别名；Word = u32。
