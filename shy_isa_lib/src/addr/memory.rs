@@ -3,10 +3,10 @@ use crate::{
     device::AddrPort,
     error::CoreError,
     types::Word,
+    isa_def::MEM_CODE_START,
 };
 
 /// Memory 设备实现（主存）
-/// 继承原有 memory.rs 的所有功能，并实现 addr_port trait
 pub struct Memory {
     values: Vec<Word>,
 }
@@ -19,47 +19,18 @@ impl Memory {
         }
     }
 
-    /// 从镜像文件加载
-    pub fn load_img(&mut self, file_name: &str) -> Result<(), CoreError> {
-        let img = std::fs::read(file_name)
-            .map_err(|e| CoreError::IOError(format!("Failed to read image file: {}", e)))?;
-
-        // 检查镜像大小是否正确
-        if img.len() != self.values.len() * 4 {
-            return Err(CoreError::IOError("Image size mismatch".into()));
-        }
-
-        self.values = img
-            .chunks_exact(4)
-            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-            .collect();
-        Ok(())
-    }
 
     /// 检查地址边界
     fn check_bounds(&self, addr: usize) -> Result<(), CoreError> {
         if addr >= self.values.len() {
             Err(CoreError::MemoryError(format!(
                 "Address 0x{:08x} out of bounds (len=0x{:x})",
-                addr,
+                addr as u32+MEM_CODE_START,
                 self.values.len()
             )))
         } else {
             Ok(())
         }
-    }
-
-    /// 加载字到内存（兼容老接口）
-    pub fn load(&mut self, addr: usize, value: Word) -> Result<(), CoreError> {
-        self.check_bounds(addr)?;
-        self.values[addr] = value;
-        Ok(())
-    }
-
-    /// 从内存读取字（兼容老接口）
-    pub fn read(&self, addr: usize) -> Result<Word, CoreError> {
-        self.check_bounds(addr)?;
-        Ok(self.values[addr])
     }
 
     /// 不安全写入（无边界检查）
@@ -78,19 +49,8 @@ impl Memory {
         }
     }
 
-    /// 保存到镜像文件
-    pub fn to_img(&self, file_name: &str) -> Result<(), CoreError> {
-        std::fs::write(file_name, self.to_u8_vec())
-            .map_err(|e| CoreError::IOError(format!("Failed to write image file: {}", e)))
-    }
 
-    /// 转换为字节数组
-    fn to_u8_vec(&self) -> Vec<u8> {
-        self.values
-            .iter()
-            .flat_map(|&word| word.to_be_bytes()) // 大端序
-            .collect()
-    }
+
 
     /// 直接访问底层数据（测试/调试用）
     pub fn data(&self) -> &[Word] {

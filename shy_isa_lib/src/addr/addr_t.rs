@@ -7,8 +7,8 @@ pub struct Addr(u32);
 /// 地址分类
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AddrKind {
-    Reg,      // 寄存器 0x00-0x1F
-    Opcode,   // 指令操作码 0x20-0x6F（不可读写内存）
+    Reg,      // 寄存器 0x00-0x1D
+    Opcode,   // 指令操作码 0x20-0x54（不可读写内存）
     Io,       // I/O 端口 0x70-0xFF
     Vram,     // 显存 0x0000_0100-0x0010_00FF
     Ram,      // 主存 ≥0x0010_0100
@@ -17,10 +17,10 @@ pub enum AddrKind {
 
 // 地址边界常量
 pub const REG_START: u32 = 0x00;
-pub const REG_END:   u32 = 0x1F;
+pub const REG_END:   u32 = 0x1D;
 
 pub const OPC_START: u32 = 0x20;
-pub const OPC_END:   u32 = 0x6F;
+pub const OPC_END:   u32 = 0x54;
 
 pub const IO_START:  u32 = 0x70;
 pub const IO_END:    u32 = 0xFF;
@@ -107,9 +107,9 @@ mod tests {
     fn addr_kind_detection() {
         assert_eq!(Addr::new(0x00).kind(), AddrKind::Reg);
         assert_eq!(Addr::new(0x10).kind(), AddrKind::Reg); // PC
-        assert_eq!(Addr::new(0x1F).kind(), AddrKind::Reg);
+        assert_eq!(Addr::new(0x1D).kind(), AddrKind::Reg);
         assert_eq!(Addr::new(0x20).kind(), AddrKind::Opcode);
-        assert_eq!(Addr::new(0x6F).kind(), AddrKind::Opcode);
+        assert_eq!(Addr::new(0x54).kind(), AddrKind::Opcode);
         assert_eq!(Addr::new(0x70).kind(), AddrKind::Io);
         assert_eq!(Addr::new(0xFF).kind(), AddrKind::Io);
         assert_eq!(Addr::new(0x0000_0100).kind(), AddrKind::Vram);

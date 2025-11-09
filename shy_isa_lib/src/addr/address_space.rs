@@ -1,7 +1,7 @@
 // src/addr/address_space.rs
 use crate::{
+    addr::addr_t::{VRAM_MAX_END, VRAM_START},
     addr::{Addr, AddrKind, Io, Memory, RegFile, Vram},
-    addr::addr::{VRAM_MAX_END, VRAM_START},
     device::AddrPort,
     error::CoreError,
     types::Word,
@@ -12,8 +12,8 @@ use std::fs;
 pub struct Address {
     regs: RegFile,
     vram: Vram,
-    ram:  Memory,
-    io:   Io,
+    ram: Memory,
+    io: Io,
     /// VRAM 的实际结束地址（VRAM_START + vram.len() - 1），用于边界检查
     vram_end: u32,
 }
@@ -50,12 +50,9 @@ impl Address {
             AddrKind::Io => self.io.read(addr.offset()),
             AddrKind::Vram => self.vram.read(addr.offset()),
             AddrKind::Ram => self.ram.read(addr.offset()),
-            AddrKind::Opcode => Err(CoreError::MemoryError(
-                "Cannot read from opcode space".to_string()
-            )),
-            AddrKind::Reserved => Err(CoreError::MemoryError(
-                format!("Reserved address space: 0x{:08x}", addr.raw())
-            )),
+            /*we need this to avoid complex process for saving to sfs */
+            AddrKind::Opcode => Ok(0u32),
+            AddrKind::Reserved => Ok(0u32),
         }
     }
 
@@ -67,58 +64,32 @@ impl Address {
             AddrKind::Vram => self.vram.write(addr.offset(), val),
             AddrKind::Ram => self.ram.write(addr.offset(), val),
             AddrKind::Opcode => Err(CoreError::MemoryError(
-                "Cannot write to opcode space".to_string()
+                "Cannot write to opcode space".to_string(),
             )),
-            AddrKind::Reserved => Err(CoreError::MemoryError(
-                format!("Reserved address space: 0x{:08x}", addr.raw())
-            )),
+            AddrKind::Reserved => Err(CoreError::MemoryError(format!(
+                "Reserved address space: 0x{:08x}",
+                addr.raw()
+            ))),
         }
     }
 
     /// 从 SFS 文件加载镜像到地址空间
-    pub fn load_sfs(&mut self, path: &str) -> Result<(), CoreError> {
-        let data = fs::read(path).map_err(|e| {
-            CoreError::MemoryError(format!("Failed to read SFS file '{}': {}", path, e))
-        })?;
-
-        // SFS 文件格式检查（前4字节应该是魔数）
-        if data.len() < 4 {
-            return Err(CoreError::MemoryError(
-                "SFS file too small".to_string()
-            ));
-        }
-
-        // 简单的 SFS 加载逻辑（实际实现可能更复杂）
-        // 这里假设文件包含要加载到内存的数据
-        let word_count = data.len() / 4;
-        for i in 0..word_count {
-            let start = i * 4;
-            let end = start + 4;
-            if end <= data.len() {
-                let mut word_bytes = [0u8; 4];
-                word_bytes.copy_from_slice(&data[start..end]);
-                let word = u32::from_be_bytes(word_bytes); // 大端序
-                let addr = Addr::from_ram_idx(i);
-                self.write(addr, word)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// 将地址空间内容保存为 SFS 文件
     pub fn save_sfs(&self, path: &str) -> Result<(), CoreError> {
-        let mut data = Vec::new();
+        //由于ShyISA的定义，这里使用 u32不会溢出
+        let ram_words = u32::try_from(self.ram.len()).unwrap();
+        
+        let total_words = self.vram_end()+ram_words;
 
-        // 简单的 SFS 保存逻辑 - 保存 RAM 内容
-        // 实际实现可能需要保存更多设备的状态
-        for i in 0..self.ram.len() {
-            let word = self.ram.read(i)?;
-            let word_bytes = word.to_be_bytes(); // 大端序
-            data.extend_from_slice(&word_bytes);
+        // 4 = u32 的字节数；
+        let mut bytes = Vec::with_capacity(total_words as usize * 4);
+
+        for i in 0..total_words {
+            let word: u32 = self.read(Addr::new(i))?;
+            //大端序
+            bytes.extend_from_slice(&word.to_be_bytes());
         }
 
-        fs::write(path, data).map_err(|e| {
+        fs::write(path, bytes).map_err(|e| {
             CoreError::MemoryError(format!("Failed to write SFS file '{}': {}", path, e))
         })?;
 
@@ -208,13 +179,13 @@ mod tests {
         let mut addr_space = Address::new(10, 10);
 
         // 测试保留地址访问
-        let reserved_addr = Addr::new(0x20000000);
-        assert!(addr_space.read(reserved_addr).is_err());
+        let reserved_addr = Addr::new(0x0000_001F);
+        assert!(addr_space.read(reserved_addr).unwrap()==0u32);
         assert!(addr_space.write(reserved_addr, 0).is_err());
 
         // 测试操作码空间访问
         let opcode_addr = Addr::new(0x50);
-        assert!(addr_space.read(opcode_addr).is_err());
+        assert!(addr_space.read(opcode_addr).unwrap()==0u32);
         assert!(addr_space.write(opcode_addr, 0).is_err());
     }
 
