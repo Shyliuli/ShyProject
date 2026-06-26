@@ -33,16 +33,17 @@ ShyISA 是项目的底层契约，定义在 `ShyISA.md` 中。它需要覆盖：
 
 ### asm
 
-asm 是 ShyISA 汇编器，输入 `.asm` 文本，输出 `.sfs` 内存镜像。
+asm 是 ShyISA 汇编器，输入 `.asm` 文本，输出 `.sobj` 编译中间对象。
 
 主要职责：
 
 - 读取汇编源码。
 - 解析 `___DEFINE___`、`___DATA___`、`___CODE___` 三个段。
-- 处理宏定义、寄存器别名、常量和标签。
-- 将数据段写入指定内存地址。
+- 处理宏定义、寄存器名、常量、section、symbol 和局部 label。
+- 将数据和代码写入对应 section。
 - 将代码段编码为固定 12 字节指令。
-- 输出完整 raw `.sfs` 镜像。
+- 为 symbol、section、局部 label 等最终地址未知的位置生成 relocation。
+- 输出可链接 `.sobj` object 文件。
 
 ### emu
 
@@ -59,6 +60,12 @@ emu 是 ShyISA 模拟器，输入 `.sfs` 镜像并执行。
 
 emu 是整个项目最重要的验证工具。asm 的输出、OS 的行为、LLVM 后端生成的程序，最终都要在 emu 上跑通。
 
+### linker
+输入`.sobj`,链接，输出`.sfs`镜像
+`.sfs`是ShyISA的合法程序内存镜像表示，emu将`.sfs`文件完整加载至内存，并初始化pc为指定位置开始运行.
+
+一期到此结束
+<!--
 ### LLVM 后端
 
 LLVM 后端用于让 C、Rust 或其他 LLVM 前端语言生成 ShyISA 代码。
@@ -76,4 +83,4 @@ libc 是面向 C 程序的基础运行时库，运行在 ShyISA OS 之上。
 ### librust
 
 librust 是面向 Rust 程序的基础运行时支持，运行在 ShyISA OS 之上。
-
+-->

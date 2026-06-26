@@ -1,0 +1,64 @@
+___DEFINE___
+
+PI 314159                // 定义常量PI（十进制）
+STACK_INIT 0xEFFFFFFC    // 栈初始化地址（十六进制）
+
+___DATA___
+
+// 数据初始化格式为：地址 内容。可链接源码优先使用 section/symbol
+// 作为地址，由链接器决定 data.* section 的最终地址。
+
+.section data.message
+.symbol message
+message "Hello!"         // UTF-8字符串，按编码字节写入，并以0结尾
+
+.section data.unicode
+.symbol unicode_ni
+unicode_ni 0x4F60        // 32位Unicode code point，对应字符'你'
+
+.section data.counter
+.symbol counter
+counter 12345678         // 32位立即数，按4字节对齐
+
+.section data.array
+.symbol numbers
+numbers {111, 222, 114514} // 数组初始化，元素按32位大端序写入
+
+/*也支持这种注释*/
+/*还支持0x 0X开头的十六进制以及 b结尾的二进制
+example：0x114 0X514 1100b */
+
+.section data.constants
+.symbol stack_init_value
+stack_init_value STACK_INIT
+stack_init_value(4) PI
+
+.section data.ptrs
+.symbol message_plus_one_ptr
+message_plus_one_ptr message(1) // 存储message最终地址+1，由链接器补齐
+
+___CODE___
+
+.section text._start
+.symbol _start
+setn sp STACK_INIT        // 手动初始化栈指针，保持4字节对齐
+
+setn 1x 1                // 将寄存器1x设置为1
+
+start:                   // 定义当前section内的局部label
+
+addn counter 1           // counter由链接器解析为最终地址
+
+oututfa message          // 输出UTF-8字符
+
+oututfa message(1)       // 输出message中第1个字节后的字符地址
+
+outn PI                  // 以十六进制输出宏定义的常量
+
+addn 1x 1                // 寄存器1x加1
+
+sman 1x 10               // 比较1x是否小于10
+
+jmpn start               // 如果条件成立，跳转到局部label
+
+ujmpn start(12)          // 跳转到start后面一条指令，地址由链接器补齐

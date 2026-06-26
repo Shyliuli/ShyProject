@@ -21,7 +21,7 @@ i32 shy_flush(ShyFile *file);
 i32 shy_rename(ShyFile *file, const char *new_name);
 i32 shy_push_back(ShyFile *file, u8 byte);
 i32 shy_push_back_slice(ShyFile *file, const u8 *data, i32 len);
-const u8 *shy_get_raw(ShyFile *file);
+i32 shy_len(ShyFile *file);
 
 #if defined(__cplusplus)
 }

@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,7 +74,7 @@ ShyFile *shy_open(const char *filename) {
     }
 
     struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size < 0 || st.st_size > INT32_MAX) {
+    if (fstat(fd, &st) != 0 || st.st_size < 0 || st.st_size > INT_MAX) {
         close(fd);
         free(file);
         return NULL;
@@ -152,7 +153,7 @@ i32 shy_push_back(ShyFile *file, u8 byte) {
 }
 
 i32 shy_push_back_slice(ShyFile *file, const u8 *data, i32 len) {
-    if (file == NULL || data == NULL || len < 0 || len > INT32_MAX - file->len) {
+    if (file == NULL || data == NULL || len < 0 || len > INT_MAX - file->len) {
         errno = EINVAL;
         return -1;
     }
@@ -219,6 +220,11 @@ i32 shy_push_back_slice(ShyFile *file, const u8 *data, i32 len) {
     return 0;
 }
 
-const u8 *shy_get_raw(ShyFile *file) {
-    return file == NULL ? NULL : file->content;
+i32 shy_len(ShyFile *file) {
+    if (file == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    return file->len;
 }
