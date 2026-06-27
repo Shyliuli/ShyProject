@@ -258,7 +258,7 @@ addend  = 12
 
 - `text._start` 必须存在，并放到 `0x00000100`。
 - 其他 `text.*` section 接在 `text._start` 后面。
-- `data.*` section 从 `0x00200000` 开始依次放置。
+- `data` 和 `data.*` section 从 `0x00200000` 开始依次放置。
 - 其他 section 名暂不定义默认布局，链接器可以报错。
 - section 起始地址按 4 字节对齐。
 

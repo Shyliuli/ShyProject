@@ -1,11 +1,7 @@
 [package]
-name = "emu"
+name = "linker"
 version = "0.1.0"
 edition = "2024"
-
-[[bin]]
-name = "emu"
-path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.103"

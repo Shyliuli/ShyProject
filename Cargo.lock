@@ -97,6 +97,7 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 name = "emu"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "shy_isa_lib",
 ]
 
@@ -135,6 +136,14 @@ checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
 dependencies = [
  "cfg-if",
  "windows-link",
+]
+
+[[package]]
+name = "linker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "shy_isa_lib",
 ]
 
 [[package]]

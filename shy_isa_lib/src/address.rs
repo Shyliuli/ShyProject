@@ -10,8 +10,8 @@ pub enum Address {
 
 impl Address {
     pub fn from_u32(addr: u32) -> Address {
-        use RegType::*;
         use OpType::*;
+        use RegType::*;
 
         match addr {
             // ── 通用寄存器 0x00-0x0F ──

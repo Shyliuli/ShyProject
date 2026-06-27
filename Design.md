@@ -5,7 +5,8 @@ ShyProject 是一个面向教学的完整计算机系统实验项目。项目目
 项目的长期形态包括：
 
 - ShyISA：稳定的指令集、内存模型、Trap 模型和二进制格式规范。
-- asm：将 ShyISA 汇编源码编译为 `.sfs` 内存镜像。
+- asm：将 ShyISA 汇编源码编译为 `.sobj` 可链接 object 文件。
+- linker：将一个或多个 `.sobj` 链接为 `.sfs` raw 内存镜像。
 - emu：执行 `.sfs` 镜像的 ShyISA 模拟器。
 - LLVM 后端：让高级语言能够生成 ShyISA 机器码。
 - OS：运行在 ShyISA 上的最小操作系统。
@@ -24,7 +25,7 @@ ShyISA 是项目的底层契约，定义在 `ShyISA.md` 中。它需要覆盖：
 
 - 寄存器、特殊寄存器和地址映射。
 - 指令编码、指令语义和大小端规则。
-- `.sfs` raw 内存镜像格式。
+- `.sobj` section/object 格式与 `.sfs` raw 内存镜像格式。
 - Trap、权限、内核态/用户态切换规则。
 - I/O 指令与内存映射 I/O。
 - 汇编源文件格式和数据布局。
@@ -61,8 +62,10 @@ emu 是 ShyISA 模拟器，输入 `.sfs` 镜像并执行。
 emu 是整个项目最重要的验证工具。asm 的输出、OS 的行为、LLVM 后端生成的程序，最终都要在 emu 上跑通。
 
 ### linker
-输入`.sobj`,链接，输出`.sfs`镜像
-`.sfs`是ShyISA的合法程序内存镜像表示，emu将`.sfs`文件完整加载至内存，并初始化pc为指定位置开始运行.
+
+linker 输入一个或多个 `.sobj` object 文件，按 `ObjFormat.md` 中定义的 section 规则分配最终地址、解析 symbol、处理 relocation，并输出 `.sfs` raw 内存镜像。
+
+`.sfs` 是 ShyISA 的合法程序内存镜像表示。emu 将 `.sfs` 文件按偏移加载到同值地址，并从入口地址 `0x00000100` 开始执行。
 
 一期到此结束
 <!--

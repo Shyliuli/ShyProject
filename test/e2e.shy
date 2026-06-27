@@ -1,0 +1,17 @@
+___DEFINE___
+
+VALUE 0x2A
+
+___DATA___
+
+.section data.value
+.symbol value
+value VALUE
+
+___CODE___
+
+.section text._start
+.symbol _start
+getn 1x value
+outa 1x
+setn exit 0
