@@ -1,5 +1,5 @@
-pub use anyhow::{bail, Context, Result};
-use shy_isa_lib::{op, reg};
+pub use anyhow::{Context, Result, bail};
+use shy_isa_lib::{file::shyfile, op, reg};
 use std::{collections::HashMap, vec};
 /// 解析后的 ShyISA 汇编源码。
 ///
@@ -568,6 +568,125 @@ impl Obj {
             relocation: reloc,
         })
     }
+    /*AIGC:codex*/
+    pub fn to_file(self, mut f: shyfile::File) -> Result<()> {
+        const MAGIC: u32 = 0x66CCFF00;
+        const HEADER_SIZE: usize = 16;
+
+        if !f.is_empty() {
+            bail!("output object file must be empty");
+        }
+
+        fn push_u32(buf: &mut Vec<u8>, value: u32) {
+            buf.extend_from_slice(&value.to_be_bytes());
+        }
+
+        fn push_c_str(buf: &mut Vec<u8>, value: &str) -> Result<()> {
+            if value.as_bytes().contains(&0) {
+                bail!("object string contains NUL byte: {value:?}");
+            }
+            buf.extend_from_slice(value.as_bytes());
+            buf.push(0);
+            Ok(())
+        }
+
+        fn file_offset(value: usize) -> Result<u32> {
+            u32::try_from(value).context("object file offset exceeds u32::MAX")
+        }
+
+        fn next_offset(buf_len: usize, node_len: usize, has_next: bool) -> Result<u32> {
+            if has_next {
+                file_offset(
+                    buf_len
+                        .checked_add(node_len)
+                        .context("object file offset overflow")?,
+                )
+            } else {
+                Ok(0)
+            }
+        }
+
+        let section_start = if self.section.is_empty() {
+            0
+        } else {
+            HEADER_SIZE as u32
+        };
+
+        let mut buf = Vec::new();
+        push_u32(&mut buf, MAGIC);
+        push_u32(&mut buf, section_start);
+        push_u32(&mut buf, 0);
+        push_u32(&mut buf, 0);
+
+        for (index, section) in self.section.iter().enumerate() {
+            let node_len = 4 + section.name.len() + 1 + 4 + section.bytes.len();
+            let next_section = next_offset(buf.len(), node_len, index + 1 < self.section.len())?;
+
+            push_u32(&mut buf, next_section);
+            push_c_str(&mut buf, &section.name)?;
+            push_u32(
+                &mut buf,
+                u32::try_from(section.bytes.len()).context("section byte_size exceeds u32::MAX")?,
+            );
+            buf.extend_from_slice(&section.bytes);
+        }
+
+        let symbol_start = if self.symbol.is_empty() {
+            0
+        } else {
+            file_offset(buf.len())?
+        };
+
+        for (index, symbol) in self.symbol.iter().enumerate() {
+            let node_len = 4 + 4 + symbol.section.len() + 1 + symbol.name.len() + 1;
+            let next_symbol = next_offset(buf.len(), node_len, index + 1 < self.symbol.len())?;
+
+            push_u32(&mut buf, next_symbol);
+            push_u32(&mut buf, symbol.offset);
+            push_c_str(&mut buf, &symbol.section)?;
+            push_c_str(&mut buf, &symbol.name)?;
+        }
+
+        let relocation_start = if self.relocation.is_empty() {
+            0
+        } else {
+            file_offset(buf.len())?
+        };
+
+        for (index, relocation) in self.relocation.iter().enumerate() {
+            let target_len = match &relocation.target {
+                RelocTarget::Symbol(name) => name.len() + 1,
+                RelocTarget::SectionOffset { section, .. } => 4 + section.len() + 1,
+            };
+            let node_len = 4 + 4 + 4 + 4 + relocation.section.len() + 1 + target_len;
+            let next_relocation =
+                next_offset(buf.len(), node_len, index + 1 < self.relocation.len())?;
+
+            push_u32(&mut buf, next_relocation);
+            push_u32(&mut buf, relocation.offset);
+            push_u32(&mut buf, relocation.addend);
+            match &relocation.target {
+                RelocTarget::Symbol(name) => {
+                    push_u32(&mut buf, 1);
+                    push_c_str(&mut buf, &relocation.section)?;
+                    push_c_str(&mut buf, name)?;
+                }
+                RelocTarget::SectionOffset { section, offset } => {
+                    push_u32(&mut buf, 0);
+                    push_c_str(&mut buf, &relocation.section)?;
+                    push_u32(&mut buf, *offset);
+                    push_c_str(&mut buf, section)?;
+                }
+            }
+        }
+
+        buf[8..12].copy_from_slice(&symbol_start.to_be_bytes());
+        buf[12..16].copy_from_slice(&relocation_start.to_be_bytes());
+
+        f.push_back_slice(&buf)?;
+        f.flush()?;
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjSection {
@@ -601,7 +720,10 @@ pub enum RelocTarget {
 }
 #[cfg(test)]
 mod tests {
-    use super::{parse_u32_literal, Obj, ParsedSource, RelocTarget};
+    use super::{
+        Obj, ObjRelocation, ObjSection, ObjSymbol, ParsedSource, RelocTarget, parse_u32_literal,
+    };
+    use shy_isa_lib::file::shyfile;
 
     #[test]
     fn parses_u32_literals_with_supported_radices() {
@@ -618,6 +740,60 @@ mod tests {
         assert!(parse_u32_literal("0xGG").is_err());
         assert!(parse_u32_literal("102b").is_err());
         assert!(parse_u32_literal("-1").is_err());
+    }
+
+    #[test]
+    fn writes_sobj_binary_format() {
+        let path = format!(
+            "target/test-{}-{}.sobj",
+            std::process::id(),
+            "writes_sobj_binary_format"
+        );
+        std::fs::create_dir_all("target").unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let obj = Obj {
+            section: vec![ObjSection {
+                name: "text._start".to_string(),
+                bytes: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            }],
+            symbol: vec![ObjSymbol {
+                name: "_start".to_string(),
+                section: "text._start".to_string(),
+                offset: 0,
+            }],
+            relocation: vec![ObjRelocation {
+                section: "text._start".to_string(),
+                offset: 4,
+                target: RelocTarget::Symbol("print".to_string()),
+                addend: 8,
+            }],
+        };
+
+        let file = shyfile::File::open(&path).unwrap();
+        obj.to_file(file).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(&bytes[0..4], &0x66CCFF00u32.to_be_bytes());
+        assert_eq!(&bytes[4..8], &16u32.to_be_bytes());
+
+        let symbol_start = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let relocation_start = u32::from_be_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        assert!(symbol_start > 16);
+        assert!(relocation_start > symbol_start);
+
+        assert_eq!(&bytes[16..20], &0u32.to_be_bytes());
+        assert_eq!(&bytes[20..32], b"text._start\0");
+        assert_eq!(&bytes[32..36], &4u32.to_be_bytes());
+        assert_eq!(&bytes[36..40], &[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        assert_eq!(&bytes[symbol_start..symbol_start + 4], &0u32.to_be_bytes());
+        assert_eq!(
+            &bytes[relocation_start + 12..relocation_start + 16],
+            &1u32.to_be_bytes()
+        );
     }
 
     #[test]
@@ -647,18 +823,21 @@ mod tests {
         assert_eq!(obj.section[1].name, "text.print");
         assert_eq!(obj.section[1].bytes.len(), 12);
 
-        assert!(obj
-            .symbol
-            .iter()
-            .any(|symbol| symbol.name == "text._start" && symbol.offset == 0));
-        assert!(obj
-            .symbol
-            .iter()
-            .any(|symbol| symbol.name == "_start" && symbol.section == "text._start"));
-        assert!(obj
-            .symbol
-            .iter()
-            .any(|symbol| symbol.name == "print" && symbol.section == "text.print"));
+        assert!(
+            obj.symbol
+                .iter()
+                .any(|symbol| symbol.name == "text._start" && symbol.offset == 0)
+        );
+        assert!(
+            obj.symbol
+                .iter()
+                .any(|symbol| symbol.name == "_start" && symbol.section == "text._start")
+        );
+        assert!(
+            obj.symbol
+                .iter()
+                .any(|symbol| symbol.name == "print" && symbol.section == "text.print")
+        );
 
         assert_eq!(obj.relocation.len(), 2);
         assert_eq!(obj.relocation[0].section, "text._start");

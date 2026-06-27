@@ -284,3 +284,61 @@ message 0x00200000
 ```
 
 `.sym` 不影响程序执行。
+
+
+### 12. `.sobj` 二进制格式
+
+所有 `u32` 使用大端序。
+所有链表指针都是文件内绝对偏移，`0` 表示 `NULL`。
+所有 `*_c_str` 都是 UTF-8 字节串，以 `0x00` 结尾，字符串内容不得包含 `0x00`。
+
+文件头：
+
+```text
+u32 magic = 0x66CCFF00
+u32 section_start      // first SectionNode file offset, 0 means empty
+u32 symbol_start       // first SymbolNode file offset, 0 means empty
+u32 relocation_start   // first RelocationNode file offset, 0 means empty
+```
+
+`SectionNode` 保存一个 section 的名字和字节内容：
+
+```text
+SectionNode {
+  u32 next_section     // next SectionNode file offset, 0 means end
+  section_name_c_str
+  u32 byte_size
+  u8 bytes[byte_size]
+}
+```
+
+`SymbolNode` 保存一个对外符号的位置：
+
+```text
+SymbolNode {
+  u32 next_symbol      // next SymbolNode file offset, 0 means end
+  u32 offset           // offset inside section_name
+  section_name_c_str
+  symbol_name_c_str
+}
+```
+
+`RelocationNode` 保存一个需要链接器回填的 32 位字段：
+
+```text
+RelocationNode {
+  u32 next_relocation  // next RelocationNode file offset, 0 means end
+  u32 offset           // patch offset inside section_name
+  u32 addend
+  u32 target_kind      // 1 = Symbol, 0 = SectionOffset
+  section_name_c_str   // section to patch
+
+  if target_kind == 1:
+    target_symbol_name_c_str
+  else:
+    u32 target_offset
+    target_section_name_c_str
+}
+```
+
+`target_kind` 只能是 `1` 或 `0`，其他值为非法格式。
