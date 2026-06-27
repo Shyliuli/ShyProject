@@ -516,6 +516,23 @@ impl Obj {
                         offset += 4;
                     }
                 }
+                // 写入字节数组
+                else if let Some(array) =
+                    value.strip_prefix("[").and_then(|s| s.strip_suffix("]"))
+                {
+                    let mut offset = write_offset;
+                    for item in array.split(",").map(str::trim).filter(|s| !s.is_empty()) {
+                        let num = parse_u32_literal(item)?;
+                        if num > u8::MAX as u32 {
+                            bail!("byte array item out of range: {item}");
+                        }
+                        if section.bytes.len() < offset + 1 {
+                            section.bytes.resize(offset + 1, 0);
+                        }
+                        section.bytes[offset] = num as u8;
+                        offset += 1;
+                    }
+                }
                 // 写入数字
                 else if let Ok(num) = parse_u32_literal(value) {
                     if section.bytes.len() < write_offset + 4 {
@@ -859,6 +876,32 @@ mod tests {
             }
         );
         assert_eq!(obj.relocation[1].addend, 12);
+    }
+
+    #[test]
+    fn writes_byte_array_data() {
+        let source = ParsedSource::new(
+            r#"
+            ___DEFINE___
+            ___DATA___
+            .section data.bytes
+            .symbol bytes
+            bytes [97,98,99,0]
+            ___CODE___
+            .section text._start
+            .symbol _start
+            setn exit 0
+            "#
+            .to_owned(),
+        );
+
+        let obj = Obj::from(source).unwrap();
+        let section = obj
+            .section
+            .iter()
+            .find(|section| section.name == "data.bytes")
+            .unwrap();
+        assert_eq!(section.bytes, b"abc\0");
     }
 
     #[test]

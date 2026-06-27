@@ -2,3 +2,7 @@
 .claude/
 target/
 develop.md
+test/testc/*.shy
+test/testc/*.sobj
+test/testc/*.sfs
+test/testc/*.sym
