@@ -80,6 +80,29 @@ struct InitDesg {
   Obj *var;
 };
 
+typedef struct Method Method;
+struct Method {
+  Method *next;
+  Type *self_ty;
+  char *type_name;
+  char *name;
+  Obj *fn;
+};
+
+typedef struct DropVar DropVar;
+struct DropVar {
+  DropVar *next;
+  Obj *var;
+  bool active;
+};
+
+typedef struct DropScope DropScope;
+struct DropScope {
+  DropScope *next;
+  DropVar *vars;
+  int depth;
+};
+
 // All local variable instances created during parsing are
 // accumulated to this list.
 static Obj *locals;
@@ -105,6 +128,14 @@ static char *cont_label;
 static Node *current_switch;
 
 static Obj *builtin_alloca;
+
+static Method *methods;
+static Type *current_impl_ty;
+static char *current_impl_type_name;
+static DropScope *drop_scope;
+static int drop_depth;
+static int brk_drop_depth;
+static int cont_drop_depth;
 
 static bool is_typename(Token *tok);
 static Type *declspec(Token **rest, Token *tok, VarAttr *attr);
@@ -155,10 +186,22 @@ static Token *parse_typedef(Token *tok, Type *basety);
 static bool is_function(Token *tok);
 static Token *function(Token *tok, Type *basety, VarAttr *attr);
 static Token *global_variable(Token *tok, Type *basety, VarAttr *attr);
+static Token *impl_decl(Token *tok);
+static Token *predeclare_impl_decl(Token *tok);
+static void predeclare_globals(Token *tok);
 
 static int align_down(int n, int align) {
   return align_to(n - align + 1, align);
 }
+
+static Type *find_typedef(Token *tok);
+static Node *new_node(NodeKind kind, Token *tok);
+static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok);
+static Node *new_unary(NodeKind kind, Node *expr, Token *tok);
+static Node *new_var_node(Obj *var, Token *tok);
+static Obj *new_lvar(char *name, Type *ty);
+static Node *drop_call(Obj *var, Token *tok);
+static Node *new_funcall_node(Obj *fn, Node *args, Token *tok);
 
 static void enter_scope(void) {
   Scope *sc = calloc(1, sizeof(Scope));
@@ -187,6 +230,267 @@ static Type *find_tag(Token *tok) {
       return ty;
   }
   return NULL;
+}
+
+static Type *find_type_by_name(Token *tok) {
+  Type *ty = find_typedef(tok);
+  if (ty)
+    return ty;
+  return find_tag(tok);
+}
+
+static char *sanitize_ident(char *s) {
+  char *buf = calloc(1, strlen(s) + 1);
+  for (int i = 0; s[i]; i++)
+    buf[i] = isalnum((unsigned char)s[i]) || s[i] == '_' ? s[i] : '_';
+  return buf;
+}
+
+static char *method_symbol_name(char *type_name, char *method_name) {
+  return format("____%s__%s", sanitize_ident(type_name),
+                sanitize_ident(method_name));
+}
+
+static char *current_function_symbol_name(char *name) {
+  return current_impl_ty ? method_symbol_name(current_impl_type_name, name)
+                         : name;
+}
+
+static bool same_struct_type(Type *a, Type *b) {
+  return (a->kind == TY_STRUCT || a->kind == TY_UNION) &&
+         (b->kind == TY_STRUCT || b->kind == TY_UNION) &&
+         is_compatible(a, b);
+}
+
+static Method *find_method(Type *ty, Token *name) {
+  for (Method *m = methods; m; m = m->next)
+    if (same_struct_type(m->self_ty, ty) &&
+        strlen(m->name) == name->len &&
+        !strncmp(m->name, name->loc, name->len))
+      return m;
+  return NULL;
+}
+
+static Method *find_method_by_name(Type *ty, char *name) {
+  for (Method *m = methods; m; m = m->next)
+    if (same_struct_type(m->self_ty, ty) && !strcmp(m->name, name))
+      return m;
+  return NULL;
+}
+
+static void register_method(Type *ty, char *type_name, char *name, Obj *fn) {
+  for (Method *m = methods; m; m = m->next) {
+    if (same_struct_type(m->self_ty, ty) && !strcmp(m->name, name)) {
+      m->type_name = type_name;
+      m->fn = fn;
+      return;
+    }
+  }
+
+  Method *m = calloc(1, sizeof(Method));
+  m->self_ty = ty;
+  m->type_name = type_name;
+  m->name = name;
+  m->fn = fn;
+  m->next = methods;
+  methods = m;
+}
+
+static void register_current_impl_method(char *name, Obj *fn) {
+  if (current_impl_ty)
+    register_method(current_impl_ty, current_impl_type_name, name, fn);
+}
+
+static void enter_drop_scope(void) {
+  DropScope *sc = calloc(1, sizeof(DropScope));
+  sc->next = drop_scope;
+  sc->depth = ++drop_depth;
+  drop_scope = sc;
+}
+
+static void leave_drop_scope(void) {
+  drop_scope = drop_scope->next;
+  drop_depth--;
+}
+
+static void add_drop_var(Obj *var) {
+  if (!drop_scope)
+    return;
+  if (!find_method_by_name(var->ty, "drop"))
+    return;
+
+  DropVar *dv = calloc(1, sizeof(DropVar));
+  dv->var = var;
+  dv->active = true;
+  dv->next = drop_scope->vars;
+  drop_scope->vars = dv;
+}
+
+static bool has_drop(Type *ty) {
+  return find_method_by_name(ty, "drop") != NULL;
+}
+
+static void deactivate_drop_var(Obj *var) {
+  for (DropScope *sc = drop_scope; sc; sc = sc->next)
+    for (DropVar *dv = sc->vars; dv; dv = dv->next)
+      if (dv->var == var)
+        dv->active = false;
+}
+
+static void activate_drop_var(Obj *var) {
+  for (DropScope *sc = drop_scope; sc; sc = sc->next)
+    for (DropVar *dv = sc->vars; dv; dv = dv->next)
+      if (dv->var == var)
+        dv->active = true;
+}
+
+static bool is_active_drop_var(Obj *var) {
+  for (DropScope *sc = drop_scope; sc; sc = sc->next)
+    for (DropVar *dv = sc->vars; dv; dv = dv->next)
+      if (dv->var == var)
+        return dv->active;
+  return false;
+}
+
+static bool is_moved_raii_var(Obj *var) {
+  if (!var || !var->is_local || !has_drop(var->ty))
+    return false;
+
+  for (DropScope *sc = drop_scope; sc; sc = sc->next)
+    for (DropVar *dv = sc->vars; dv; dv = dv->next)
+      if (dv->var == var)
+        return !dv->active;
+  return false;
+}
+
+static void move_raii_value(Node *node) {
+  add_type(node);
+  if (node->kind == ND_VAR && node->var->is_local && has_drop(node->var->ty))
+    deactivate_drop_var(node->var);
+}
+
+static void consume_by_value_arg(Type *param_ty, Node *arg) {
+  if (param_ty && param_ty->kind != TY_PTR && has_drop(arg->ty))
+    move_raii_value(arg);
+}
+
+static Node *raii_assign(Node *lhs, Node *rhs, Token *tok) {
+  if (lhs->kind != ND_VAR || !lhs->var->is_local)
+    error_tok(tok, "RAII assignment requires a local variable target");
+  if (rhs->kind == ND_VAR && rhs->var == lhs->var)
+    error_tok(tok, "cannot move a RAII value into itself");
+
+  Node *drop_stmt = is_active_drop_var(lhs->var) ? drop_call(lhs->var, tok) : NULL;
+  Node *drop = drop_stmt ? drop_stmt->lhs : NULL;
+  move_raii_value(rhs);
+  Node *assign = new_binary(ND_ASSIGN, lhs, rhs, tok);
+  activate_drop_var(lhs->var);
+
+  if (!drop)
+    return assign;
+  return new_binary(ND_COMMA, drop, assign, tok);
+}
+
+static Node *new_funcall_node(Obj *fn, Node *args, Token *tok) {
+  for (Node *arg = args; arg; arg = arg->next)
+    add_type(arg);
+
+  Node *node = new_unary(ND_FUNCALL, new_var_node(fn, tok), tok);
+  node->func_ty = fn->ty;
+  node->ty = fn->ty->return_ty;
+  node->args = args;
+
+  if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION)
+    node->ret_buffer = new_lvar("", node->ty);
+  return node;
+}
+
+static Node *drop_call(Obj *var, Token *tok) {
+  Method *m = find_method_by_name(var->ty, "drop");
+  if (!m)
+    return NULL;
+
+  Node *arg = new_unary(ND_ADDR, new_var_node(var, tok), tok);
+  return new_unary(ND_EXPR_STMT, new_funcall_node(m->fn, arg, tok), tok);
+}
+
+static Node *cleanup_to_depth(int target_depth, Token *tok) {
+  Node head = {};
+  Node *cur = &head;
+
+  for (DropScope *sc = drop_scope; sc && sc->depth > target_depth; sc = sc->next) {
+    for (DropVar *dv = sc->vars; dv; dv = dv->next) {
+      if (!dv->active)
+        continue;
+      Node *call = drop_call(dv->var, tok);
+      if (call)
+        cur = cur->next = call;
+    }
+  }
+
+  Node *node = new_node(ND_BLOCK, tok);
+  node->body = head.next;
+  return node;
+}
+
+static Node *prepend_cleanup(Node *stmt, int target_depth, Token *tok) {
+  Node *cleanup = cleanup_to_depth(target_depth, tok);
+  if (!cleanup->body)
+    return stmt;
+
+  Node head = {};
+  Node *cur = &head;
+  for (Node *n = cleanup->body; n; n = n->next)
+    cur = cur->next = n;
+  cur = cur->next = stmt;
+
+  Node *block = new_node(ND_BLOCK, tok);
+  block->body = head.next;
+  return block;
+}
+
+static Node *append_cleanup(Node *stmt, int target_depth, Token *tok) {
+  Node *cleanup = cleanup_to_depth(target_depth, tok);
+  if (!cleanup->body)
+    return stmt;
+
+  Node *block = new_node(ND_BLOCK, tok);
+  block->body = stmt;
+  stmt->next = cleanup->body;
+  return block;
+}
+
+static Node *return_with_cleanup(Node *ret, Node *expr, Token *tok) {
+  if (!expr)
+    return prepend_cleanup(ret, 0, tok);
+
+  add_type(expr);
+
+  if (expr->kind == ND_VAR && expr->var->is_local && has_drop(expr->var->ty))
+    deactivate_drop_var(expr->var);
+
+  Node *cleanup = cleanup_to_depth(0, tok);
+  if (!cleanup->body) {
+    ret->lhs = expr;
+    return ret;
+  }
+
+  Obj *tmp = new_lvar("", expr->ty);
+  Node *save = new_unary(ND_EXPR_STMT,
+                         new_binary(ND_ASSIGN, new_var_node(tmp, tok), expr, tok),
+                         tok);
+  ret->lhs = new_var_node(tmp, tok);
+
+  Node head = {};
+  Node *cur = &head;
+  cur = cur->next = save;
+  for (Node *n = cleanup->body; n; n = n->next)
+    cur = cur->next = n;
+  cur = cur->next = ret;
+
+  Node *block = new_node(ND_BLOCK, tok);
+  block->body = head.next;
+  return block;
 }
 
 static Node *new_node(NodeKind kind, Token *tok) {
@@ -226,6 +530,13 @@ static Node *new_ulong(long val, Token *tok) {
   Node *node = new_node(ND_NUM, tok);
   node->val = val;
   node->ty = ty_ulong;
+  return node;
+}
+
+static Node *new_size_t(long val, Token *tok) {
+  Node *node = new_node(ND_NUM, tok);
+  node->val = val;
+  node->ty = opt_target_shy ? ty_uint : ty_ulong;
   return node;
 }
 
@@ -458,7 +769,16 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
     }
 
     // Handle user-defined types.
-    Type *ty2 = find_typedef(tok);
+    Type *ty2 = find_type_by_name(tok);
+    if (current_impl_ty && equal(tok, "self")) {
+      if (counter)
+        break;
+      ty = current_impl_ty;
+      tok = tok->next;
+      counter += OTHER;
+      continue;
+    }
+
     if (equal(tok, "struct") || equal(tok, "union") || equal(tok, "enum") ||
         equal(tok, "typeof") || ty2) {
       if (counter)
@@ -824,7 +1144,7 @@ static Node *compute_vla_size(Type *ty, Token *tok) {
   else
     base_sz = new_num(ty->base->size, tok);
 
-  ty->vla_size = new_lvar("", ty_ulong);
+  ty->vla_size = new_lvar("", opt_target_shy ? ty_uint : ty_ulong);
   Node *expr = new_binary(ND_ASSIGN, new_var_node(ty->vla_size, tok),
                           new_binary(ND_MUL, ty->vla_len, base_sz, tok),
                           tok);
@@ -878,6 +1198,7 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
       // For example, `int x[n+2]` is translated to `tmp = n + 2,
       // x = alloca(tmp)`.
       Obj *var = new_lvar(get_ident(ty->name), ty);
+      add_drop_var(var);
       Token *tok = ty->name;
       Node *expr = new_binary(ND_ASSIGN, new_vla_ptr(var, tok),
                               new_alloca(new_var_node(ty->vla_size, tok)),
@@ -888,6 +1209,7 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
     }
 
     Obj *var = new_lvar(get_ident(ty->name), ty);
+    add_drop_var(var);
     if (attr && attr->align)
       var->align = attr->align;
 
@@ -1377,6 +1699,9 @@ static Node *lvar_initializer(Token **rest, Token *tok, Obj *var) {
   Initializer *init = initializer(rest, tok, var->ty, &var->ty);
   InitDesg desg = {NULL, 0, NULL, var};
 
+  if (has_drop(var->ty) && init->expr)
+    move_raii_value(init->expr);
+
   // If a partial initializer list is given, the standard requires
   // that unspecified elements are set to 0. Here, we simply
   // zero-initialize the entire memory region of a variable before
@@ -1510,7 +1835,9 @@ static bool is_typename(Token *tok) {
       hashmap_put(&map, kw[i], (void *)1);
   }
 
-  return hashmap_get2(&map, tok->loc, tok->len) || find_typedef(tok);
+  return hashmap_get2(&map, tok->loc, tok->len) ||
+         (current_impl_ty && equal(tok, "self")) ||
+         find_type_by_name(tok);
 }
 
 // asm-stmt = "asm" ("volatile" | "inline")* "(" string-literal ")"
@@ -1590,7 +1917,7 @@ static Node *stmt(Token **rest, Token *tok) {
   if (equal(tok, "return")) {
     Node *node = new_node(ND_RETURN, tok);
     if (consume(rest, tok->next, ";"))
-      return node;
+      return return_with_cleanup(node, NULL, tok);
 
     Node *exp = expr(&tok, tok->next);
     *rest = skip(tok, ";");
@@ -1600,8 +1927,7 @@ static Node *stmt(Token **rest, Token *tok) {
     if (ty->kind != TY_STRUCT && ty->kind != TY_UNION)
       exp = new_cast(exp, current_fn->ty->return_ty);
 
-    node->lhs = exp;
-    return node;
+    return return_with_cleanup(node, exp, node->tok);
   }
 
   if (equal(tok, "if")) {
@@ -1626,12 +1952,15 @@ static Node *stmt(Token **rest, Token *tok) {
     current_switch = node;
 
     char *brk = brk_label;
+    int brk_depth = brk_drop_depth;
     brk_label = node->brk_label = new_unique_name();
+    brk_drop_depth = drop_depth;
 
     node->then = stmt(rest, tok);
 
     current_switch = sw;
     brk_label = brk;
+    brk_drop_depth = brk_depth;
     return node;
   }
 
@@ -1679,11 +2008,16 @@ static Node *stmt(Token **rest, Token *tok) {
     tok = skip(tok->next, "(");
 
     enter_scope();
+    enter_drop_scope();
 
     char *brk = brk_label;
     char *cont = cont_label;
+    int brk_depth = brk_drop_depth;
+    int cont_depth = cont_drop_depth;
     brk_label = node->brk_label = new_unique_name();
     cont_label = node->cont_label = new_unique_name();
+    brk_drop_depth = drop_depth - 1;
+    cont_drop_depth = drop_depth;
 
     if (is_typename(tok)) {
       Type *basety = declspec(&tok, tok, NULL);
@@ -1702,10 +2036,14 @@ static Node *stmt(Token **rest, Token *tok) {
 
     node->then = stmt(rest, tok);
 
+    Node *ret = append_cleanup(node, drop_depth - 1, node->tok);
     leave_scope();
+    leave_drop_scope();
     brk_label = brk;
     cont_label = cont;
-    return node;
+    brk_drop_depth = brk_depth;
+    cont_drop_depth = cont_depth;
+    return ret;
   }
 
   if (equal(tok, "while")) {
@@ -1716,13 +2054,19 @@ static Node *stmt(Token **rest, Token *tok) {
 
     char *brk = brk_label;
     char *cont = cont_label;
+    int brk_depth = brk_drop_depth;
+    int cont_depth = cont_drop_depth;
     brk_label = node->brk_label = new_unique_name();
     cont_label = node->cont_label = new_unique_name();
+    brk_drop_depth = drop_depth;
+    cont_drop_depth = drop_depth;
 
     node->then = stmt(rest, tok);
 
     brk_label = brk;
     cont_label = cont;
+    brk_drop_depth = brk_depth;
+    cont_drop_depth = cont_depth;
     return node;
   }
 
@@ -1731,13 +2075,19 @@ static Node *stmt(Token **rest, Token *tok) {
 
     char *brk = brk_label;
     char *cont = cont_label;
+    int brk_depth = brk_drop_depth;
+    int cont_depth = cont_drop_depth;
     brk_label = node->brk_label = new_unique_name();
     cont_label = node->cont_label = new_unique_name();
+    brk_drop_depth = drop_depth;
+    cont_drop_depth = drop_depth;
 
     node->then = stmt(&tok, tok->next);
 
     brk_label = brk;
     cont_label = cont;
+    brk_drop_depth = brk_depth;
+    cont_drop_depth = cont_depth;
 
     tok = skip(tok, "while");
     tok = skip(tok, "(");
@@ -1751,6 +2101,9 @@ static Node *stmt(Token **rest, Token *tok) {
     return asm_stmt(rest, tok);
 
   if (equal(tok, "goto")) {
+    if (cleanup_to_depth(0, tok)->body)
+      error_tok(tok, "goto is not allowed in a scope with RAII variables");
+
     if (equal(tok->next, "*")) {
       // [GNU] `goto *ptr` jumps to the address specified by `ptr`.
       Node *node = new_node(ND_GOTO_EXPR, tok);
@@ -1773,7 +2126,7 @@ static Node *stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_GOTO, tok);
     node->unique_label = brk_label;
     *rest = skip(tok->next, ";");
-    return node;
+    return prepend_cleanup(node, brk_drop_depth, tok);
   }
 
   if (equal(tok, "continue")) {
@@ -1782,7 +2135,7 @@ static Node *stmt(Token **rest, Token *tok) {
     Node *node = new_node(ND_GOTO, tok);
     node->unique_label = cont_label;
     *rest = skip(tok->next, ";");
-    return node;
+    return prepend_cleanup(node, cont_drop_depth, tok);
   }
 
   if (tok->kind == TK_IDENT && equal(tok->next, ":")) {
@@ -1808,6 +2161,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
   Node *cur = &head;
 
   enter_scope();
+  enter_drop_scope();
 
   while (!equal(tok, "}")) {
     if (is_typename(tok) && !equal(tok->next, ":")) {
@@ -1836,7 +2190,12 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     add_type(cur);
   }
 
+  Node *cleanup = cleanup_to_depth(drop_depth - 1, tok);
+  if (cleanup->body)
+    cur = cur->next = cleanup;
+
   leave_scope();
+  leave_drop_scope();
 
   node->body = head.next;
   *rest = tok->next;
@@ -2187,8 +2546,14 @@ static Node *to_assign(Node *binary) {
 static Node *assign(Token **rest, Token *tok) {
   Node *node = conditional(&tok, tok);
 
-  if (equal(tok, "="))
-    return new_binary(ND_ASSIGN, node, assign(rest, tok->next), tok);
+  if (equal(tok, "=")) {
+    Node *rhs = assign(rest, tok->next);
+    add_type(node);
+    add_type(rhs);
+    if (has_drop(node->ty))
+      return raii_assign(node, rhs, tok);
+    return new_binary(ND_ASSIGN, node, rhs, tok);
+  }
 
   if (equal(tok, "+="))
     return to_assign(new_add(node, assign(rest, tok->next), tok));
@@ -2448,7 +2813,7 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
   // ptr - ptr, which returns how many elements are between the two.
   if (lhs->ty->base && rhs->ty->base) {
     Node *node = new_binary(ND_SUB, lhs, rhs, tok);
-    node->ty = ty_long;
+    node->ty = opt_target_shy ? ty_int : ty_long;
     return new_binary(ND_DIV, node, new_num(lhs->ty->base->size, tok), tok);
   }
 
@@ -2808,17 +3173,23 @@ static Member *get_struct_member(Type *ty, Token *tok) {
 // member "a" of the anonymous struct as "x.a".
 //
 // This function takes care of anonymous structs.
-static Node *struct_ref(Node *node, Token *tok) {
+static Node *try_struct_ref(Node *node, Token *tok) {
   add_type(node);
+  if (node->ty->kind == TY_PTR &&
+      (node->ty->base->kind == TY_STRUCT || node->ty->base->kind == TY_UNION)) {
+    node = new_unary(ND_DEREF, node, tok);
+    add_type(node);
+  }
+
   if (node->ty->kind != TY_STRUCT && node->ty->kind != TY_UNION)
-    error_tok(node->tok, "not a struct nor a union");
+    return NULL;
 
   Type *ty = node->ty;
 
   for (;;) {
     Member *mem = get_struct_member(ty, tok);
     if (!mem)
-      error_tok(tok, "no such member");
+      return NULL;
     node = new_unary(ND_MEMBER, node, tok);
     node->member = mem;
     if (mem->name)
@@ -2826,6 +3197,120 @@ static Node *struct_ref(Node *node, Token *tok) {
     ty = mem->ty;
   }
   return node;
+}
+
+static Node *struct_ref(Node *node, Token *tok) {
+  Node *ref = try_struct_ref(node, tok);
+  if (!ref) {
+    add_type(node);
+    if (node->ty->kind != TY_STRUCT && node->ty->kind != TY_UNION &&
+        !(node->ty->kind == TY_PTR &&
+          (node->ty->base->kind == TY_STRUCT || node->ty->base->kind == TY_UNION)))
+      error_tok(node->tok, "not a struct nor a union");
+    error_tok(tok, "no such member");
+  }
+  return ref;
+}
+
+static Type *receiver_struct_type(Node *node) {
+  add_type(node);
+  if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION)
+    return node->ty;
+  if (node->ty->kind == TY_PTR &&
+      (node->ty->base->kind == TY_STRUCT || node->ty->base->kind == TY_UNION))
+    return node->ty->base;
+  return NULL;
+}
+
+static Node *receiver_arg(Node *node, Token *tok) {
+  add_type(node);
+  if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION)
+    return new_unary(ND_ADDR, node, tok);
+  return node;
+}
+
+static Node *prepare_func_arg(Token *tok, Type *func_ty, Type **param_ty,
+                              Node *arg) {
+  add_type(arg);
+
+  if (!*param_ty && !func_ty->is_variadic)
+    error_tok(tok, "too many arguments");
+
+  if (*param_ty) {
+    Type *pty = *param_ty;
+    consume_by_value_arg(pty, arg);
+    if (pty->kind != TY_STRUCT && pty->kind != TY_UNION)
+      arg = new_cast(arg, pty);
+    *param_ty = pty->next;
+    return arg;
+  }
+
+  // If parameter type is omitted (e.g. in "..."), float arguments are
+  // promoted to double, and arrays/functions decay to pointers.
+  if (arg->ty->kind == TY_ARRAY)
+    return new_cast(arg, pointer_to(arg->ty->base));
+  if (arg->ty->kind == TY_FUNC)
+    return new_cast(arg, pointer_to(arg->ty));
+  if (arg->ty->kind == TY_FLOAT)
+    return new_cast(arg, ty_double);
+  return arg;
+}
+
+static Node *parse_func_args(Token **rest, Token **end, Token *tok, Type *ty,
+                             Type *param_ty, Node *prefix_args) {
+  Node head = {};
+  head.next = prefix_args;
+
+  Node *cur = &head;
+  while (cur->next)
+    cur = cur->next;
+
+  bool first = true;
+  while (!equal(tok, ")")) {
+    if (!first)
+      tok = skip(tok, ",");
+    first = false;
+
+    Node *arg = assign(&tok, tok);
+    cur = cur->next = prepare_func_arg(tok, ty, &param_ty, arg);
+  }
+
+  if (param_ty)
+    error_tok(tok, "too few arguments");
+
+  *end = tok;
+  *rest = skip(tok, ")");
+  return head.next;
+}
+
+static Node *method_funcall(Token **rest, Token *tok, Method *method, Node *recv) {
+  Type *ty = method->fn->ty;
+  Type *param_ty = ty->params;
+
+  if (!strcmp(method->name, "drop") && recv->kind == ND_VAR && recv->var->is_local)
+    deactivate_drop_var(recv->var);
+
+  Node head = {};
+  Node *cur = &head;
+
+  if (!param_ty)
+    error_tok(tok, "method has no self parameter");
+
+  Node *arg = receiver_arg(recv, tok);
+  add_type(arg);
+  cur = cur->next = new_cast(arg, param_ty);
+  param_ty = param_ty->next;
+
+  Token *end;
+  Node *args = parse_func_args(rest, &end, tok, ty, param_ty, head.next);
+  return new_funcall_node(method->fn, args, end);
+}
+
+static Node *static_method_funcall(Token **rest, Token *tok, Method *method) {
+  Type *ty = method->fn->ty;
+  Token *end;
+  Node *args = parse_func_args(rest, &end, tok, ty, ty->params, NULL);
+  return new_funcall_node(method->fn, args, end);
 }
 
 // Convert A++ to `(typeof A)((A += 1) - 1)`
@@ -2883,8 +3368,23 @@ static Node *postfix(Token **rest, Token *tok) {
     }
 
     if (equal(tok, ".")) {
-      node = struct_ref(node, tok->next);
-      tok = tok->next->next;
+      Token *name = tok->next;
+      Node *field = try_struct_ref(node, name);
+      if (field) {
+        node = field;
+        tok = name->next;
+        continue;
+      }
+
+      Type *recv_ty = receiver_struct_type(node);
+      Method *method = recv_ty ? find_method(recv_ty, name) : NULL;
+      if (method && equal(name->next, "(")) {
+        node = method_funcall(&tok, name->next->next, method, node);
+        continue;
+      }
+
+      node = struct_ref(node, name);
+      tok = name->next;
       continue;
     }
 
@@ -2922,43 +3422,13 @@ static Node *funcall(Token **rest, Token *tok, Node *fn) {
     error_tok(fn->tok, "not a function");
 
   Type *ty = (fn->ty->kind == TY_FUNC) ? fn->ty : fn->ty->base;
-  Type *param_ty = ty->params;
+  Token *end;
+  Node *args = parse_func_args(rest, &end, tok, ty, ty->params, NULL);
 
-  Node head = {};
-  Node *cur = &head;
-
-  while (!equal(tok, ")")) {
-    if (cur != &head)
-      tok = skip(tok, ",");
-
-    Node *arg = assign(&tok, tok);
-    add_type(arg);
-
-    if (!param_ty && !ty->is_variadic)
-      error_tok(tok, "too many arguments");
-
-    if (param_ty) {
-      if (param_ty->kind != TY_STRUCT && param_ty->kind != TY_UNION)
-        arg = new_cast(arg, param_ty);
-      param_ty = param_ty->next;
-    } else if (arg->ty->kind == TY_FLOAT) {
-      // If parameter type is omitted (e.g. in "..."), float
-      // arguments are promoted to double.
-      arg = new_cast(arg, ty_double);
-    }
-
-    cur = cur->next = arg;
-  }
-
-  if (param_ty)
-    error_tok(tok, "too few arguments");
-
-  *rest = skip(tok, ")");
-
-  Node *node = new_unary(ND_FUNCALL, fn, tok);
+  Node *node = new_unary(ND_FUNCALL, fn, end);
   node->func_ty = ty;
   node->ty = ty->return_ty;
-  node->args = head.next;
+  node->args = args;
 
   // If a function returns a struct, it is caller's responsibility
   // to allocate a space for the return value.
@@ -3052,7 +3522,7 @@ static Node *primary(Token **rest, Token *tok) {
       return new_binary(ND_COMMA, lhs, rhs, tok);
     }
 
-    return new_ulong(ty->size, start);
+    return new_size_t(ty->size, start);
   }
 
   if (equal(tok, "sizeof")) {
@@ -3060,19 +3530,19 @@ static Node *primary(Token **rest, Token *tok) {
     add_type(node);
     if (node->ty->kind == TY_VLA)
       return new_var_node(node->ty->vla_size, tok);
-    return new_ulong(node->ty->size, tok);
+    return new_size_t(node->ty->size, tok);
   }
 
   if (equal(tok, "_Alignof") && equal(tok->next, "(") && is_typename(tok->next->next)) {
     Type *ty = typename(&tok, tok->next->next);
     *rest = skip(tok, ")");
-    return new_ulong(ty->align, tok);
+    return new_size_t(ty->align, tok);
   }
 
   if (equal(tok, "_Alignof")) {
     Node *node = unary(rest, tok->next);
     add_type(node);
-    return new_ulong(node->ty->align, tok);
+    return new_size_t(node->ty->align, tok);
   }
 
   if (equal(tok, "_Generic"))
@@ -3121,6 +3591,25 @@ static Node *primary(Token **rest, Token *tok) {
     return node;
   }
 
+  if (tok->kind == TK_IDENT && equal(tok->next, "::")) {
+    Type *ty = find_type_by_name(tok);
+    if (!ty)
+      error_tok(tok, "unknown type for static method call");
+
+    Token *name = tok->next->next;
+    if (name->kind != TK_IDENT)
+      error_tok(name, "expected a static method name");
+
+    Method *method = find_method(ty, name);
+    if (!method)
+      error_tok(name, "no such static method");
+
+    if (!equal(name->next, "("))
+      error_tok(name->next, "expected a static method call");
+
+    return static_method_funcall(rest, name->next->next, method);
+  }
+
   if (tok->kind == TK_IDENT) {
     // Variable or enum constant
     VarScope *sc = find_var(tok);
@@ -3135,8 +3624,11 @@ static Node *primary(Token **rest, Token *tok) {
     }
 
     if (sc) {
-      if (sc->var)
+      if (sc->var) {
+        if (is_moved_raii_var(sc->var))
+          error_tok(tok, "use of moved RAII value");
         return new_var_node(sc->var, tok);
+      }
       if (sc->enum_ty)
         return new_num(sc->enum_val, tok);
     }
@@ -3190,7 +3682,8 @@ static void create_param_lvars(Type *param) {
     create_param_lvars(param->next);
     if (!param->name)
       error_tok(param->name_pos, "parameter name omitted");
-    new_lvar(get_ident(param->name), param);
+    Obj *var = new_lvar(get_ident(param->name), param);
+    add_drop_var(var);
   }
 }
 
@@ -3226,6 +3719,149 @@ static Obj *find_func(char *name) {
   return NULL;
 }
 
+static Type *impl_target_type(Token *tok) {
+  if (tok->kind != TK_IDENT)
+    error_tok(tok, "expected a type name after impl");
+
+  Type *ty = find_type_by_name(tok);
+  if (!ty || (ty->kind != TY_STRUCT && ty->kind != TY_UNION))
+    error_tok(tok, "impl target must be a struct or union type");
+  return ty;
+}
+
+static void enter_impl(Type *ty, char *type_name, Type **old_ty,
+                       char **old_type_name) {
+  *old_ty = current_impl_ty;
+  *old_type_name = current_impl_type_name;
+  current_impl_ty = ty;
+  current_impl_type_name = type_name;
+}
+
+static void leave_impl(Type *old_ty, char *old_type_name) {
+  current_impl_ty = old_ty;
+  current_impl_type_name = old_type_name;
+}
+
+static Token *skip_block(Token *tok) {
+  tok = skip(tok, "{");
+  int depth = 1;
+
+  while (depth > 0) {
+    if (tok->kind == TK_EOF)
+      error_tok(tok, "unclosed block");
+    if (equal(tok, "{"))
+      depth++;
+    else if (equal(tok, "}"))
+      depth--;
+    tok = tok->next;
+  }
+  return tok;
+}
+
+static Token *skip_to_semicolon(Token *tok) {
+  int paren = 0;
+  int bracket = 0;
+  int brace = 0;
+
+  for (;;) {
+    if (tok->kind == TK_EOF)
+      error_tok(tok, "expected ';'");
+    if (equal(tok, ";") && paren == 0 && bracket == 0 && brace == 0)
+      return tok->next;
+
+    if (equal(tok, "("))
+      paren++;
+    else if (equal(tok, ")"))
+      paren--;
+    else if (equal(tok, "["))
+      bracket++;
+    else if (equal(tok, "]"))
+      bracket--;
+    else if (equal(tok, "{"))
+      brace++;
+    else if (equal(tok, "}"))
+      brace--;
+
+    tok = tok->next;
+  }
+}
+
+static Token *predeclare_function(Token *tok, Type *basety, VarAttr *attr) {
+  Type *ty = declarator(&tok, tok, basety);
+  if (!ty->name)
+    error_tok(ty->name_pos, "function name omitted");
+
+  char *orig_name = get_ident(ty->name);
+  char *name_str = current_function_symbol_name(orig_name);
+
+  Obj *fn = find_func(name_str);
+  if (fn) {
+    if (!fn->is_function)
+      error_tok(tok, "redeclared as a different kind of symbol");
+    if (!fn->is_static && attr->is_static)
+      error_tok(tok, "static declaration follows a non-static declaration");
+  } else {
+    fn = new_gvar(name_str, ty);
+    fn->is_function = true;
+    fn->is_definition = false;
+    fn->is_static = attr->is_static || (attr->is_inline && !attr->is_extern);
+    fn->is_inline = attr->is_inline;
+    fn->is_root = !(fn->is_static && fn->is_inline);
+  }
+
+  register_current_impl_method(orig_name, fn);
+
+  if (consume(&tok, tok, ";"))
+    return tok;
+  if (equal(tok, "{"))
+    return skip_block(tok);
+  error_tok(tok, "expected a function body or declaration");
+}
+
+static Token *predeclare_impl_decl(Token *tok) {
+  Token *type_tok = tok->next;
+  Type *old_ty = current_impl_ty;
+  char *old_type_name = current_impl_type_name;
+  enter_impl(impl_target_type(type_tok), get_ident(type_tok), &old_ty,
+             &old_type_name);
+
+  tok = skip(type_tok->next, "{");
+  while (!equal(tok, "}")) {
+    VarAttr attr = {};
+    Type *basety = declspec(&tok, tok, &attr);
+    if (!is_function(tok))
+      error_tok(tok, "impl items must be function definitions");
+    tok = predeclare_function(tok, basety, &attr);
+  }
+
+  leave_impl(old_ty, old_type_name);
+  return tok->next;
+}
+
+static void predeclare_globals(Token *tok) {
+  while (tok->kind != TK_EOF) {
+    if (equal(tok, "impl")) {
+      tok = predeclare_impl_decl(tok);
+      continue;
+    }
+
+    VarAttr attr = {};
+    Type *basety = declspec(&tok, tok, &attr);
+
+    if (attr.is_typedef) {
+      tok = parse_typedef(tok, basety);
+      continue;
+    }
+
+    if (is_function(tok)) {
+      tok = predeclare_function(tok, basety, &attr);
+      continue;
+    }
+
+    tok = skip_to_semicolon(tok);
+  }
+}
+
 static void mark_live(Obj *var) {
   if (!var->is_function || var->is_live)
     return;
@@ -3242,7 +3878,8 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
   Type *ty = declarator(&tok, tok, basety);
   if (!ty->name)
     error_tok(ty->name_pos, "function name omitted");
-  char *name_str = get_ident(ty->name);
+  char *orig_name = get_ident(ty->name);
+  char *name_str = current_function_symbol_name(orig_name);
 
   Obj *fn = find_func(name_str);
   if (fn) {
@@ -3262,6 +3899,8 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
     fn->is_inline = attr->is_inline;
   }
 
+  register_current_impl_method(orig_name, fn);
+
   fn->is_root = !(fn->is_static && fn->is_inline);
 
   if (consume(&tok, tok, ";"))
@@ -3270,6 +3909,7 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
   current_fn = fn;
   locals = NULL;
   enter_scope();
+  enter_drop_scope();
   create_param_lvars(ty->params);
 
   // A buffer for a struct/union return value is passed
@@ -3297,10 +3937,32 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
     new_string_literal(fn->name, array_of(ty_char, strlen(fn->name) + 1));
 
   fn->body = compound_stmt(&tok, tok);
+  fn->body = append_cleanup(fn->body, 0, tok);
   fn->locals = locals;
+  leave_drop_scope();
   leave_scope();
   resolve_goto_labels();
   return tok;
+}
+
+static Token *impl_decl(Token *tok) {
+  Token *type_tok = tok->next;
+  Type *old_ty = current_impl_ty;
+  char *old_type_name = current_impl_type_name;
+  enter_impl(impl_target_type(type_tok), get_ident(type_tok), &old_ty,
+             &old_type_name);
+
+  tok = skip(type_tok->next, "{");
+  while (!equal(tok, "}")) {
+    VarAttr attr = {};
+    Type *basety = declspec(&tok, tok, &attr);
+    if (!is_function(tok))
+      error_tok(tok, "impl items must be function definitions");
+    tok = function(tok, basety, &attr);
+  }
+
+  leave_impl(old_ty, old_type_name);
+  return tok->next;
 }
 
 static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
@@ -3379,8 +4041,15 @@ static void declare_builtin_functions(void) {
 Obj *parse(Token *tok) {
   declare_builtin_functions();
   globals = NULL;
+  methods = NULL;
+  predeclare_globals(tok);
 
   while (tok->kind != TK_EOF) {
+    if (equal(tok, "impl")) {
+      tok = impl_decl(tok);
+      continue;
+    }
+
     VarAttr attr = {};
     Type *basety = declspec(&tok, tok, &attr);
 

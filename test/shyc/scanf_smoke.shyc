@@ -1,0 +1,9 @@
+#include <stdio.h>
+
+int main(void) {
+  int n = 0;
+  char word[16];
+  scanf("%d %s", &n, word);
+  printf("n=%d word=%s\n", n, word);
+  return 0;
+}

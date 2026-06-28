@@ -1,0 +1,172 @@
+{
+  "name": "shyc-vscode",
+  "displayName": "ShyC",
+  "description": "ShyC language support for ShyProject.",
+  "version": "0.1.0",
+  "publisher": "shyproject",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:shyc",
+    "onLanguage:shyasm"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "shyc",
+        "aliases": [
+          "ShyC",
+          "shyc"
+        ],
+        "extensions": [
+          ".shyc",
+          ".shyh"
+        ],
+        "configuration": "./language/shyc.configuration.json"
+      },
+      {
+        "id": "shyasm",
+        "aliases": [
+          "Shy Assembly",
+          "shyasm"
+        ],
+        "extensions": [
+          ".shy"
+        ],
+        "configuration": "./language/shyasm.configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "shyc",
+        "scopeName": "source.shyc",
+        "path": "./syntaxes/shyc.tmLanguage.json"
+      },
+      {
+        "language": "shyasm",
+        "scopeName": "source.shyasm",
+        "path": "./syntaxes/shyasm.tmLanguage.json"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "shyc",
+        "scopes": {
+          "type": [
+            "storage.type.shyc",
+            "entity.name.type.shyc"
+          ],
+          "function": [
+            "entity.name.function.shyc",
+            "support.function.shyc"
+          ],
+          "method": [
+            "entity.name.function.member.shyc",
+            "entity.name.function.shyc",
+            "support.function.shyc"
+          ],
+          "variable": [
+            "variable.other.local.shyc",
+            "variable.other.shyc"
+          ],
+          "macro": [
+            "entity.name.function.preprocessor.shyc",
+            "keyword.control.directive.shyc"
+          ],
+          "property": [
+            "variable.other.property.shyc"
+          ],
+          "namespace": [
+            "entity.name.namespace.shyc"
+          ]
+        }
+      }
+    ],
+    "configuration": {
+      "title": "ShyC",
+      "properties": {
+        "shyc.diagnostics.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run shycc to produce diagnostics for ShyC files."
+        },
+        "shyc.diagnostics.onSaveOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Only run diagnostics when a ShyC file is saved."
+        },
+        "shyc.shyccPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to shycc. Empty means cargo run -q -p shycc -- from the workspace root."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "shyc.checkFile",
+        "title": "ShyC: Check Current File"
+      }
+    ],
+    "configurationDefaults": {
+      "editor.semanticHighlighting.enabled": true,
+      "editor.semanticTokenColorCustomizations": {
+        "enabled": true,
+        "rules": {
+          "type:shyc": "#4EC9B0",
+          "function:shyc": "#DCDCAA",
+          "method:shyc": "#DCDCAA",
+          "variable:shyc": "#9CDCFE",
+          "property:shyc": "#9CDCFE"
+        }
+      },
+      "editor.tokenColorCustomizations": {
+        "textMateRules": [
+          {
+            "scope": [
+              "storage.type.shyc",
+              "entity.name.type.shyc"
+            ],
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": [
+              "entity.name.function.shyc",
+              "entity.name.function.member.shyc",
+              "support.function.shyc"
+            ],
+            "settings": {
+              "foreground": "#DCDCAA"
+            }
+          },
+          {
+            "scope": [
+              "variable.other.local.shyc",
+              "variable.other.property.shyc",
+              "variable.other.shyc"
+            ],
+            "settings": {
+              "foreground": "#9CDCFE"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}

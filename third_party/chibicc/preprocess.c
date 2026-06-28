@@ -1059,21 +1059,23 @@ static char *format_time(struct tm *tm) {
 
 void init_macros(void) {
   // Define predefined macros
-  define_macro("_LP64", "1");
+  if (!opt_target_shy)
+    define_macro("_LP64", "1");
   define_macro("__C99_MACRO_WITH_VA_ARGS", "1");
   define_macro("__ELF__", "1");
-  define_macro("__LP64__", "1");
+  if (!opt_target_shy)
+    define_macro("__LP64__", "1");
   define_macro("__SIZEOF_DOUBLE__", "8");
   define_macro("__SIZEOF_FLOAT__", "4");
   define_macro("__SIZEOF_INT__", "4");
   define_macro("__SIZEOF_LONG_DOUBLE__", "8");
   define_macro("__SIZEOF_LONG_LONG__", "8");
   define_macro("__SIZEOF_LONG__", "8");
-  define_macro("__SIZEOF_POINTER__", "8");
-  define_macro("__SIZEOF_PTRDIFF_T__", "8");
+  define_macro("__SIZEOF_POINTER__", opt_target_shy ? "4" : "8");
+  define_macro("__SIZEOF_PTRDIFF_T__", opt_target_shy ? "4" : "8");
   define_macro("__SIZEOF_SHORT__", "2");
-  define_macro("__SIZEOF_SIZE_T__", "8");
-  define_macro("__SIZE_TYPE__", "unsigned long");
+  define_macro("__SIZEOF_SIZE_T__", opt_target_shy ? "4" : "8");
+  define_macro("__SIZE_TYPE__", opt_target_shy ? "unsigned int" : "unsigned long");
   define_macro("__STDC_HOSTED__", "1");
   define_macro("__STDC_NO_COMPLEX__", "1");
   define_macro("__STDC_UTF_16__", "1");

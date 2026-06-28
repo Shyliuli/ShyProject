@@ -1,0 +1,32 @@
+#ifndef __SHY_STDARG_H
+#define __SHY_STDARG_H
+
+#ifndef __shy__
+#error "libshy stdarg.shyh only supports the Shy target"
+#endif
+
+typedef char *va_list;
+
+#define va_start(ap, last) ((ap) = (char *)__va_area__)
+#define va_end(ap)
+#define va_arg(ap, ty)                                                     \
+  ({                                                                       \
+    ty __v;                                                                \
+    unsigned int *__src = (unsigned int *)(ap);                            \
+    unsigned int *__dst = (unsigned int *)&__v;                            \
+    if (sizeof(ty) > 4) {                                                  \
+      __dst[0] = __src[1];                                                 \
+      __dst[1] = __src[0];                                                 \
+      (ap) += 8;                                                           \
+    } else {                                                               \
+      __dst[0] = __src[0];                                                 \
+      (ap) += 4;                                                           \
+    }                                                                      \
+    __v;                                                                   \
+  })
+#define va_copy(dest, src) ((dest) = (src))
+
+#define __GNUC_VA_LIST 1
+typedef va_list __gnuc_va_list;
+
+#endif

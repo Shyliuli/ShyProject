@@ -1,0 +1,13 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+  char buf[64];
+  char copy[64];
+  sprintf(buf, "%s %d %x", "ok", atoi("42"), 255);
+  char *ret = strcpy(copy, buf);
+  printf("%s ret=%d ", copy, ret == copy);
+  printf("len=%u f=%.2f\n", strlen(copy), 3.75);
+  return 0;
+}

@@ -1,0 +1,113 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Shy Assembly",
+  "scopeName": "source.shyasm",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#sections"
+    },
+    {
+      "include": "#directives"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#registers"
+    },
+    {
+      "include": "#instructions"
+    },
+    {
+      "include": "#labels"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.shyasm",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.shyasm",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.shyasm",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.shyasm",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "sections": {
+      "patterns": [
+        {
+          "name": "keyword.control.section.shyasm",
+          "match": "\\b(___DEFINE___|___DATA___|___CODE___)\\b"
+        }
+      ]
+    },
+    "directives": {
+      "patterns": [
+        {
+          "name": "keyword.other.directive.shyasm",
+          "match": "^\\s*\\.(section|symbol)\\b"
+        },
+        {
+          "name": "meta.attribute.shyasm",
+          "match": "#!\\[(mem|stack)\\([^\\]]*\\)\\]"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.shyasm",
+          "match": "\\b(0[xX][0-9a-fA-F]+|[01]+b|[0-9]+)\\b"
+        }
+      ]
+    },
+    "registers": {
+      "patterns": [
+        {
+          "name": "variable.language.register.shyasm",
+          "match": "\\b([1-9]x|ax|bx|cx|dx|sp|bp)\\b"
+        }
+      ]
+    },
+    "instructions": {
+      "patterns": [
+        {
+          "name": "keyword.mnemonic.shyasm",
+          "match": "^\\s*\\b[a-z][a-z0-9]*\\b"
+        }
+      ]
+    },
+    "labels": {
+      "patterns": [
+        {
+          "name": "entity.name.label.shyasm",
+          "match": "^\\s*[A-Za-z_.$][A-Za-z0-9_.$]*:"
+        }
+      ]
+    }
+  }
+}

@@ -706,9 +706,10 @@ static FileType get_file_type(char *filename) {
     return FILE_DSO;
   if (endswith(filename, ".o"))
     return FILE_OBJ;
-  if (endswith(filename, ".c"))
+  if (endswith(filename, ".shyc") || endswith(filename, ".shyh") ||
+      endswith(filename, ".c") || endswith(filename, ".h"))
     return FILE_C;
-  if (endswith(filename, ".s"))
+  if (endswith(filename, ".shy"))
     return FILE_ASM;
 
   error("<command line>: unknown file extension: %s", filename);

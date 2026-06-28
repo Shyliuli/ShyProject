@@ -1,0 +1,52 @@
+___DEFINE___
+
+___DATA___
+
+.section data..L.shy.__main_shyc._L__2
+.symbol .L.shy.__main_shyc._L__2
+.L.shy.__main_shyc._L__2(0) [104,101,108,108,111,32,119,111,114,108,100,0]
+.section data..L.shy.__main_shyc._L__1
+.symbol .L.shy.__main_shyc._L__1
+.L.shy.__main_shyc._L__1(0) [109,97,105,110,0]
+.section data..L.shy.__main_shyc._L__0
+.symbol .L.shy.__main_shyc._L__0
+.L.shy.__main_shyc._L__0(0) [109,97,105,110,0]
+
+___CODE___
+
+.section text._start
+.symbol _start
+setn sp 0x00fff000
+calln main
+seta exit 1x
+.section text.main
+.symbol main
+pusha fx
+seta fx sp
+addn sp 8
+setn 1x .L.shy.__main_shyc._L__2
+setn 2x 0
+seta 2x 1x
+rsn 2x 31
+equn 2x 0
+jmpn .L.cast.pos.1
+setn 2x 0xffffffff
+ujmpn .L.cast.end.1
+.L.cast.pos.1:
+setn 2x 0
+.L.cast.end.1:
+pusha 2x
+pusha 1x
+popa 4x
+popa 5x
+calln println
+setn 1x 0
+setn 2x 0
+setn 2x 0
+ujmpn .L.return.main
+setn 1x 0
+setn 2x 0
+.L.return.main:
+seta sp fx
+popa fx
+ret

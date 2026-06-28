@@ -6,3 +6,6 @@ test/testc/*.shy
 test/testc/*.sobj
 test/testc/*.sfs
 test/testc/*.sym
+vscode-shyc/node_modules/
+vscode-shyc/out/
+vscode-shyc/*.vsix

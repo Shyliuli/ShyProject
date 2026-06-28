@@ -7,8 +7,8 @@
 // ShyProject's own asm/linker can produce .sobj/.sfs.
 //
 // ABI v0:
-// - LP64 frontend model is preserved: long and pointer are 64-bit C values.
-// - Machine addresses use the low 32 bits. High 32 bits of a pointer must be 0.
+// - Shy uses ILP32-style pointers: int and pointer are 32-bit, long remains
+//   64-bit.
 // - Scalar return: 1x=low32, 2x=high32 when the value is 64-bit.
 // - Integer/pointer args consume one 32-bit slot for <=32-bit values and two
 //   slots for 64-bit values. Slots are registers 4x..bx.
@@ -97,7 +97,7 @@ static void unsupported(Node *node, char *what) {
 }
 
 static bool is_64bit(Type *ty) {
-  return ty->size == 8 || ty->kind == TY_PTR;
+  return ty->size == 8;
 }
 
 static VInfo vinfo(Type *ty) {
@@ -199,6 +199,20 @@ static void gen_addr(Node *node) {
     if (node->member->offset)
       println("addn 1x %d", node->member->offset);
     return;
+  case ND_FUNCALL:
+    if (node->ret_buffer) {
+      gen_expr(node);
+      gen_var_addr(node->ret_buffer);
+      return;
+    }
+    break;
+  case ND_ASSIGN:
+    if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
+      gen_expr(node);
+      gen_addr(node->lhs);
+      return;
+    }
+    break;
   default:
     unsupported(node, "address expression");
   }
@@ -211,10 +225,28 @@ static void load(Type *ty) {
   switch (ty->size) {
   case 1:
     println("get8a 1x 1x");
+    if (!ty->is_unsigned && ty->kind != TY_BOOL) {
+      int c = count();
+      println("bign 1x 127");
+      println("jmpn .L.load.sign8.%d", c);
+      println("ujmpn .L.load.end8.%d", c);
+      println(".L.load.sign8.%d:", c);
+      println("orn 1x 0xffffff00");
+      println(".L.load.end8.%d:", c);
+    }
     println("setn 2x 0");
     return;
   case 2:
     println("get16a 1x 1x");
+    if (!ty->is_unsigned) {
+      int c = count();
+      println("bign 1x 32767");
+      println("jmpn .L.load.sign16.%d", c);
+      println("ujmpn .L.load.end16.%d", c);
+      println(".L.load.sign16.%d:", c);
+      println("orn 1x 0xffff0000");
+      println(".L.load.end16.%d:", c);
+    }
     println("setn 2x 0");
     return;
   case 4:
@@ -253,6 +285,67 @@ static void store(Type *ty) {
   default:
     error("Shy backend cannot store scalar of size %d", ty->size);
   }
+}
+
+static void copy_bytes(Type *ty) {
+  int c = count();
+  int words = ty->size / 4;
+  int tail = ty->size % 4;
+
+  if (words) {
+    println("setn cx %d", words);
+    println(".L.copy.words.%d:", c);
+    println("equn cx 0");
+    println("jmpn .L.copy.words.done.%d", c);
+    println("geta dx 1x");
+    println("puta 3x dx");
+    println("addn 1x 4");
+    println("addn 3x 4");
+    println("subn cx 1");
+    println("ujmpn .L.copy.words.%d", c);
+    println(".L.copy.words.done.%d:", c);
+  }
+
+  if (tail & 2) {
+    println("get16a dx 1x");
+    println("put16a 3x dx");
+    if (tail & 1) {
+      println("addn 1x 2");
+      println("addn 3x 2");
+    }
+  }
+
+  if (tail & 1) {
+    println("get8a dx 1x");
+    println("put8a 3x dx");
+  }
+}
+
+static void copy_struct_return_to_hidden_buffer(Node *expr) {
+  Type *ty = current_fn->ty->return_ty;
+  Obj *retptr = current_fn->params;
+  if (!retptr || !retptr->ty || retptr->ty->kind != TY_PTR)
+    error_tok(expr->tok, "missing hidden return buffer");
+
+  gen_addr(expr);
+  println("seta 4x 1x");
+  println("setn dx %d", retptr->offset);
+  println("adda dx fx");
+  println("geta dx dx");
+  println("seta 3x dx");
+  println("seta 1x 4x");
+  copy_bytes(ty);
+}
+
+static void copy_struct_assignment(Node *node) {
+  gen_addr(node->lhs);
+  push32("1x");
+  gen_addr(node->rhs);
+  pop32("3x");
+  println("seta 4x 3x");
+  copy_bytes(node->lhs->ty);
+  println("seta 1x 4x");
+  println("setn 2x 0");
 }
 
 static void cmp_zero(VInfo vi) {
@@ -374,6 +467,104 @@ static void gen_64_mul(void) {
   println("seta 2x 5x");
 }
 
+static void gen_64_shl(void) {
+  // lhs: 1x/2x, rhs shift count: 3x/cx. Result: 1x/2x.
+  int c = count();
+
+  println("equn cx 0");
+  println("jmpn .L.u64.shl.check.%d", c);
+  println("setn 1x 0");
+  println("setn 2x 0");
+  println("ujmpn .L.u64.shl.done.%d", c);
+
+  println(".L.u64.shl.check.%d:", c);
+  println("smaequn 3x 63");
+  println("jmpn .L.u64.shl.loop.%d", c);
+  println("setn 1x 0");
+  println("setn 2x 0");
+  println("ujmpn .L.u64.shl.done.%d", c);
+
+  println(".L.u64.shl.loop.%d:", c);
+  println("equn 3x 0");
+  println("jmpn .L.u64.shl.done.%d", c);
+  println("seta dx 1x");
+  println("rsn dx 31");
+  println("lsn 1x 1");
+  println("lsn 2x 1");
+  println("ora 2x dx");
+  println("subn 3x 1");
+  println("ujmpn .L.u64.shl.loop.%d", c);
+  println(".L.u64.shl.done.%d:", c);
+}
+
+static void gen_64_shr(bool is_unsigned) {
+  // lhs: 1x/2x, rhs shift count: 3x/cx. Result: 1x/2x.
+  int c = count();
+
+  println("equn cx 0");
+  println("jmpn .L.u64.shr.check.%d", c);
+  if (is_unsigned) {
+    println("setn 1x 0");
+    println("setn 2x 0");
+  } else {
+    println("seta dx 2x");
+    println("rsn dx 31");
+    println("equn dx 0");
+    println("jmpn .L.u64.shr.big_pos.%d", c);
+    println("setn 1x 0xffffffff");
+    println("setn 2x 0xffffffff");
+    println("ujmpn .L.u64.shr.done.%d", c);
+    println(".L.u64.shr.big_pos.%d:", c);
+    println("setn 1x 0");
+    println("setn 2x 0");
+  }
+  println("ujmpn .L.u64.shr.done.%d", c);
+
+  println(".L.u64.shr.check.%d:", c);
+  println("smaequn 3x 63");
+  println("jmpn .L.u64.shr.loop.%d", c);
+  if (is_unsigned) {
+    println("setn 1x 0");
+    println("setn 2x 0");
+  } else {
+    println("seta dx 2x");
+    println("rsn dx 31");
+    println("equn dx 0");
+    println("jmpn .L.u64.shr.large_pos.%d", c);
+    println("setn 1x 0xffffffff");
+    println("setn 2x 0xffffffff");
+    println("ujmpn .L.u64.shr.done.%d", c);
+    println(".L.u64.shr.large_pos.%d:", c);
+    println("setn 1x 0");
+    println("setn 2x 0");
+  }
+  println("ujmpn .L.u64.shr.done.%d", c);
+
+  println(".L.u64.shr.loop.%d:", c);
+  println("equn 3x 0");
+  println("jmpn .L.u64.shr.done.%d", c);
+  println("seta dx 2x");
+  println("andn dx 1");
+  println("lsn dx 31");
+  if (!is_unsigned) {
+    println("seta 4x 2x");
+    println("andn 4x 0x80000000");
+  }
+  println("rsn 2x 1");
+  if (!is_unsigned) {
+    println("equn 4x 0");
+    println("jmpn .L.u64.shr.sign_done.%d", c);
+    println("setn 4x 0x80000000");
+    println("ora 2x 4x");
+    println(".L.u64.shr.sign_done.%d:", c);
+  }
+  println("rsn 1x 1");
+  println("ora 1x dx");
+  println("subn 3x 1");
+  println("ujmpn .L.u64.shr.loop.%d", c);
+  println(".L.u64.shr.done.%d:", c);
+}
+
 static void gen_binary(Node *node) {
   VInfo lvi = vinfo(node->lhs->ty);
   VInfo rvi = vinfo(node->rhs->ty);
@@ -473,6 +664,12 @@ static void gen_binary(Node *node) {
     case ND_BITXOR:
       println("xora 1x 3x");
       println("xora 2x cx");
+      return;
+    case ND_SHL:
+      gen_64_shl();
+      return;
+    case ND_SHR:
+      gen_64_shr(node->ty->is_unsigned);
       return;
     case ND_EQ: {
       println("xora 1x 3x");
@@ -577,6 +774,13 @@ static int count_arg_slots(Node *args) {
   return n;
 }
 
+static int count_funcall_slots(Node *node) {
+  int n = count_arg_slots(node->args);
+  if (node->ret_buffer && node->ty->size > 16)
+    n += vinfo(pointer_to(node->ty)).is64 ? 2 : 1;
+  return n;
+}
+
 static void push_args_reverse(Node *arg) {
   if (!arg)
     return;
@@ -606,6 +810,14 @@ static void gen_expr(Node *node) {
     return;
   case ND_NEG:
     gen_expr(node->lhs);
+    if (node->ty->kind == TY_FLOAT) {
+      println("xorn 1x 0x80000000");
+      return;
+    }
+    if (node->ty->kind == TY_DOUBLE) {
+      println("xorn 2x 0x80000000");
+      return;
+    }
     if (vinfo(node->ty).is64) {
       println("nota 1x");
       println("nota 2x");
@@ -630,6 +842,8 @@ static void gen_expr(Node *node) {
     return;
   case ND_MEMBER:
     gen_addr(node);
+    if (node->ty->kind == TY_ARRAY)
+      return;
     load(node->ty);
     return;
   case ND_DEREF:
@@ -640,6 +854,10 @@ static void gen_expr(Node *node) {
     gen_addr(node->lhs);
     return;
   case ND_ASSIGN:
+    if (node->lhs->ty->kind == TY_STRUCT || node->lhs->ty->kind == TY_UNION) {
+      copy_struct_assignment(node);
+      return;
+    }
     gen_addr(node->lhs);
     push32("1x");
     gen_expr(node->rhs);
@@ -751,11 +969,16 @@ static void gen_expr(Node *node) {
     return;
   }
   case ND_FUNCALL: {
-    int slots = count_arg_slots(node->args);
+    int slots = count_funcall_slots(node);
     if (slots > argreg_len)
       unsupported(node, "function calls with too many register arguments");
 
     push_args_reverse(node->args);
+    if (node->ret_buffer && node->ty->size > 16) {
+      VInfo vi = vinfo(pointer_to(node->ty));
+      gen_var_addr(node->ret_buffer);
+      push_value(vi);
+    }
 
     for (int i = 0; i < slots; i++)
       pop32(argreg[i]);
@@ -886,8 +1109,15 @@ static void gen_stmt(Node *node) {
     gen_stmt(node->lhs);
     return;
   case ND_RETURN:
-    if (node->lhs)
-      gen_expr(node->lhs);
+    if (node->lhs) {
+      Type *ty = node->lhs->ty;
+      if ((ty->kind == TY_STRUCT || ty->kind == TY_UNION) && ty->size > 16)
+        copy_struct_return_to_hidden_buffer(node->lhs);
+      else if (ty->kind == TY_STRUCT || ty->kind == TY_UNION)
+        unsupported(node, "returning small struct/union values");
+      else
+        gen_expr(node->lhs);
+    }
     println("ujmpn .L.return.%s", current_fn->name);
     return;
   case ND_EXPR_STMT:
@@ -978,12 +1208,12 @@ static void copy_init_bytes(Type *ty, char *src, uint8_t *dst, int off) {
   case TY_INT:
   case TY_ENUM:
   case TY_FLOAT:
+  case TY_PTR:
     for (int i = 0; i < 4; i++)
       dst[off + i] = src[off + 3 - i];
     return;
   case TY_LONG:
   case TY_DOUBLE:
-  case TY_PTR:
     for (int i = 0; i < 8; i++)
       dst[off + i] = src[off + 7 - i];
     return;
@@ -1027,16 +1257,15 @@ static void emit_data(Obj *prog) {
       emit_byte_array(var->name, off, bytes, MIN(32, var->ty->size - off));
 
     for (Relocation *rel = var->rel; rel; rel = rel->next) {
-      if (rel->offset < 0 || rel->offset + 8 > var->ty->size)
+      if (rel->offset < 0 || rel->offset + 4 > var->ty->size)
         error_tok(var->tok, "Shy backend cannot emit out-of-range relocation");
       if (rel->addend < 0 || rel->addend > UINT32_MAX)
         error_tok(var->tok, "Shy backend supports only non-negative 32-bit relocation addends");
 
-      println("%s(%d) 0", var->name, rel->offset);
       if (rel->addend)
-        println("%s(%d) %s(%ld)", var->name, rel->offset + 4, *rel->label, rel->addend);
+        println("%s(%d) %s(%ld)", var->name, rel->offset, *rel->label, rel->addend);
       else
-        println("%s(%d) %s", var->name, rel->offset + 4, *rel->label);
+        println("%s(%d) %s", var->name, rel->offset, *rel->label);
     }
   }
 }
@@ -1079,7 +1308,8 @@ static void emit_text(Obj *prog) {
         error_tok(var->tok, "Shy bare _start cannot have parameters");
       VInfo vi = vinfo(var->ty);
       if (slot + (vi.is64 ? 2 : 1) > argreg_len)
-        error_tok(var->tok, "Shy backend supports at most eight argument slots");
+        error_tok(var->tok ? var->tok : fn->tok,
+                  "Shy backend supports at most eight argument slots");
       println("setn 3x %d", var->offset);
       println("adda 3x fx");
       if (vi.is64) {

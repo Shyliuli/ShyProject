@@ -1,0 +1,43 @@
+struct Counter {
+  int value;
+  int dropped;
+};
+
+int main(){
+  putc('0'+func());
+  putc('\n');
+}
+int func(void) {
+  Counter c = Counter::new(3);
+  Counter *p = &c;
+  c.add(4);
+  p.add(1);
+  return c.get();
+}
+void putc(int a){
+    asm!(a){
+        "oututfa {a}"
+    };
+}
+
+impl Counter {
+  void drop(self *s) {
+    s.dropped = 1;
+  }
+
+  Counter new(int value) {
+    Counter c;
+    c.value = value;
+    c.dropped = 0;
+    return c;
+  }
+
+  int add(self *s, int n) {
+    s.value = s.value + n;
+    return s.value;
+  }
+
+  int get(const self *s) {
+    return s.value;
+  }
+}

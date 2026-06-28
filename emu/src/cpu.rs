@@ -3,24 +3,23 @@
 //! 实现要点（见 `ShyISA.md`）：
 //! - 16 个 32 位通用寄存器 + PC/SEGS/SP/TM/STATUS/TRAP/EPC/CAUSE/KSP/SEGE/RS/EXIT/M1-M4。
 //! - 32 位字节寻址，大端序，普通内存 32 位访问要求 4 字节对齐。
-//! - `0x00000000-0x000FFFFF` 直通；用户窗口 `0x00100000` 及以上按 SEGS/SEGE 做段转换。
+//! - 内核态普通内存全局直通；用户态普通内存按 SEGS/SEGE 做段转换。
 //! - 统一 trap：保存 STATUS 到内部栈，写 EPC/CAUSE，用户态交换 SP/KSP，切内核态关中断，跳 TRAP。
 //! - 定时器 TM：非 0 时每 10ms 减 1，减到 1 时清零并产生可屏蔽中断请求。
 //! - `wait` 仅内核态且中断使能时有效，唤醒时 EPC=PC+12。
 //! - 致命状态（未初始化 TRAP 时 trap、trap 栈溢出、空栈 iret）直接 panic。
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Stdout, Write, stdout, stdin};
 use std::time::{Duration, Instant};
 
 use shy_isa_lib::address::Address;
 use shy_isa_lib::op::OpType;
 
-/// 普通内存大小：16MiB，覆盖内核区与用户区。
+/// 普通内存大小：16MiB。
 const MEM_SIZE: usize = 0x0100_0000;
 /// 程序入口地址。
 const ENTRY: u32 = 0x0000_0100;
-/// 用户区起始地址。
-const USER_BASE: u32 = 0x0010_0000;
 /// 特殊映射区上界（不含），低于此地址不是普通内存。
 const SPECIAL_TOP: u32 = 0x0000_0100;
 
@@ -68,6 +67,7 @@ pub struct Emu {
     last_tick: Instant,
     exit_code: Option<u32>,
     input: BufReader<std::io::Stdin>,
+    input_chars: VecDeque<char>,
     output: Stdout,
     debug: bool,
 }
@@ -78,7 +78,7 @@ impl Emu {
         Self {
             regs: [0; 16],
             pc: ENTRY,
-            segs: USER_BASE,
+            segs: 0,
             sp: 0,
             tm: 0,
             status: 0,
@@ -95,6 +95,7 @@ impl Emu {
             last_tick: Instant::now(),
             exit_code: None,
             input: BufReader::new(stdin()),
+            input_chars: VecDeque::new(),
             output: stdout(),
             debug,
         }
@@ -192,19 +193,15 @@ impl Emu {
         if addr < SPECIAL_TOP {
             return Err(TrapCause::IllegalAddr);
         }
-        if self.is_user() && addr < USER_BASE {
-            return Err(TrapCause::Permission);
-        }
-        let (phys, limit) = if addr < USER_BASE {
-            (addr, MEM_SIZE as u32)
-        } else {
-            let offset = addr - USER_BASE;
+        let (phys, limit) = if self.is_user() {
             (
                 self.segs
-                    .checked_add(offset)
+                    .checked_add(addr)
                     .ok_or(TrapCause::IllegalAddr)?,
                 self.sege,
             )
+        } else {
+            (addr, MEM_SIZE as u32)
         };
         let end = phys
             .checked_add(size as u32)
@@ -372,6 +369,16 @@ impl Emu {
         }
     }
 
+    fn read_input_char(&mut self) -> Option<char> {
+        loop {
+            if let Some(ch) = self.input_chars.pop_front() {
+                return Some(ch);
+            }
+            let line = self.read_input_line()?;
+            self.input_chars.extend(line.chars());
+        }
+    }
+
     /// `ina`：从标准输入读取十六进制文本，解析为 u32。
     fn op_ina(&mut self, addr: u32, cur: u32) -> Flow {
         let Some(line) = self.read_input_line() else {
@@ -391,10 +398,7 @@ impl Emu {
 
     /// `inutfa`：从标准输入读取一个 UTF-8 字符，解码为 code point 写入地址。
     fn op_inutfa(&mut self, addr: u32, cur: u32) -> Flow {
-        let Some(line) = self.read_input_line() else {
-            return Flow::Exit(0);
-        };
-        let Some(ch) = line.chars().next() else {
+        let Some(ch) = self.read_input_char() else {
             return Flow::Exit(0);
         };
         match self.w(addr, ch as u32) {
@@ -469,9 +473,6 @@ impl Emu {
     // ── 取指 ──────────────────────────────────────────────────────
 
     fn fetch(&self) -> Result<(OpType, u32, u32), FetchErr> {
-        if self.is_user() && self.pc < USER_BASE && self.pc >= SPECIAL_TOP {
-            return Err(TrapCause::Permission);
-        }
         if self.pc % 4 != 0 {
             return Err(TrapCause::IllegalAddr);
         }
@@ -1011,12 +1012,12 @@ mod tests {
     #[test]
     fn getn_putn_memory_indirect() {
         let mut e = emu();
-        // setn 1x 0x00200000
-        put(&mut e, 0x100, &encode(0x3E, 0x01, 0x00200000));
+        // setn 1x 0x2000
+        put(&mut e, 0x100, &encode(0x3E, 0x01, 0x2000));
         // putn 1x 0x12345678
         put(&mut e, 0x10C, &encode(0x42, 0x01, 0x12345678));
-        // getn 2x 0x00200000
-        put(&mut e, 0x118, &encode(0x40, 0x02, 0x00200000));
+        // getn 2x 0x2000
+        put(&mut e, 0x118, &encode(0x40, 0x02, 0x2000));
         put(&mut e, 0x124, &encode(0x3E, 0x1B, 0));
         e.run();
         assert_eq!(e.regs[2], 0x12345678);
@@ -1025,11 +1026,14 @@ mod tests {
     #[test]
     fn user_memory_uses_segment_offset() {
         let mut e = emu();
-        put(&mut e, 0x00300000, &0x12345678u32.to_be_bytes());
         e.segs = 0x00300000;
-        e.sege = 0x00300004;
-        put(&mut e, 0x100, &encode(0x40, 0x01, USER_BASE)); // getn 1x 0x00100000
-        put(&mut e, 0x10C, &encode(0x3E, 0x1B, 0));
+        e.sege = 0x00300204;
+        e.status = 0b01;
+        e.sp = 0x100;
+        e.ksp = 0x100000;
+        put(&mut e, 0x00300200, &0x12345678u32.to_be_bytes());
+        put(&mut e, 0x00300100, &encode(0x40, 0x01, 0x200)); // getn 1x 0x200
+        put(&mut e, 0x0030010C, &encode(0x3E, 0x1B, 0));
         e.run();
         assert_eq!(e.regs[1], 0x12345678);
     }
@@ -1039,9 +1043,12 @@ mod tests {
         let mut e = emu();
         e.trap = 0x200;
         e.segs = 0x00300000;
-        e.sege = 0x00300002;
-        put(&mut e, 0x100, &encode(0x40, 0x01, USER_BASE)); // 32-bit read crosses SEGE
-        put(&mut e, 0x10C, &encode(0x3E, 0x1B, 0));
+        e.sege = 0x00300202;
+        e.status = 0b01;
+        e.sp = 0x100;
+        e.ksp = 0x100000;
+        put(&mut e, 0x00300100, &encode(0x40, 0x01, 0x200)); // 32-bit read crosses SEGE
+        put(&mut e, 0x0030010C, &encode(0x3E, 0x1B, 0));
         put(&mut e, 0x200, &encode(0x3E, 0x1B, 4));
         let code = e.run();
         assert_eq!(code, 4);
@@ -1049,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn kernel_window_bypasses_segment_translation() {
+    fn kernel_mode_bypasses_segment_translation() {
         let mut e = emu();
         e.segs = 0x00300000;
         e.sege = 0x00300004;
@@ -1065,13 +1072,13 @@ mod tests {
         let mut e = emu();
         e.trap = 0x200;
         e.segs = 0x00300000;
-        e.sege = 0x00300018;
-        e.pc = USER_BASE;
+        e.sege = 0x00300118;
+        e.pc = 0x100;
         e.status = 0b01;
-        e.sp = 0x100000;
+        e.sp = 0x100;
         e.ksp = 0x100000;
-        put(&mut e, 0x00300000, &encode(0x3D, 0x01, 0x11)); // seta 1x segs
-        put(&mut e, 0x0030000C, &encode(0x3E, 0x1B, 0));
+        put(&mut e, 0x00300100, &encode(0x3D, 0x01, 0x11)); // seta 1x segs
+        put(&mut e, 0x0030010C, &encode(0x3E, 0x1B, 0));
         put(&mut e, 0x200, &encode(0x3E, 0x1B, 5));
         let code = e.run();
         assert_eq!(code, 5);
@@ -1101,12 +1108,12 @@ mod tests {
     #[test]
     fn get8n_put8n_byte_access() {
         let mut e = emu();
-        // setn 1x 0x00200000
-        put(&mut e, 0x100, &encode(0x3E, 0x01, 0x00200000));
+        // setn 1x 0x2000
+        put(&mut e, 0x100, &encode(0x3E, 0x01, 0x2000));
         // put8n 1x 0xAB
         put(&mut e, 0x10C, &encode(0x5B, 0x01, 0xAB));
-        // get8n 2x 0x00200000
-        put(&mut e, 0x118, &encode(0x57, 0x02, 0x00200000));
+        // get8n 2x 0x2000
+        put(&mut e, 0x118, &encode(0x57, 0x02, 0x2000));
         put(&mut e, 0x124, &encode(0x3E, 0x1B, 0));
         e.run();
         assert_eq!(e.regs[2], 0xAB);
@@ -1115,10 +1122,10 @@ mod tests {
     #[test]
     fn atoma_atomic_swap() {
         let mut e = emu();
-        // 准备内存 0x00200000 = 0x11111111
-        put(&mut e, 0x00200000, &0x11111111u32.to_be_bytes());
-        // setn 1x 0x00200000
-        put(&mut e, 0x100, &encode(0x3E, 0x01, 0x00200000));
+        // 准备内存 0x2000 = 0x11111111
+        put(&mut e, 0x2000, &0x11111111u32.to_be_bytes());
+        // setn 1x 0x2000
+        put(&mut e, 0x100, &encode(0x3E, 0x01, 0x2000));
         // setn 2x 0x22222222
         put(&mut e, 0x10C, &encode(0x3E, 0x02, 0x22222222));
         // atoma 1x 2x
@@ -1127,10 +1134,10 @@ mod tests {
         e.run();
         // 内存被写入新值，2x 得到旧值。
         let mem_val = u32::from_be_bytes([
-            e.mem[0x00200000],
-            e.mem[0x00200001],
-            e.mem[0x00200002],
-            e.mem[0x00200003],
+            e.mem[0x2000],
+            e.mem[0x2001],
+            e.mem[0x2002],
+            e.mem[0x2003],
         ]);
         assert_eq!(mem_val, 0x22222222);
         assert_eq!(e.regs[2], 0x11111111);
@@ -1181,20 +1188,19 @@ mod tests {
     }
 
     #[test]
-    fn user_mode_permission_trap_on_kernel_memory() {
+    fn user_mode_low_memory_is_segment_relative() {
         let mut e = emu();
-        e.trap = 0x200;
-        e.status = 0b11; // 用户态 + 中断使能
-        e.sp = 0x100000;
+        e.segs = 0x00300000;
+        e.sege = 0x00300204;
+        e.status = 0b01;
+        e.sp = 0x100;
         e.ksp = 0x100000;
-        // 尝试读内核区内存 0x100：getn 1x 0x100
-        put(&mut e, 0x100, &encode(0x40, 0x01, 0x100));
-        put(&mut e, 0x10C, &encode(0x3E, 0x1B, 0));
-        // trap handler: setn exit 5
-        put(&mut e, 0x200, &encode(0x3E, 0x1B, 5));
-        let code = e.run();
-        assert_eq!(code, 5);
-        assert_eq!(e.cause, 5);
+        put(&mut e, 0x00000200, &0xDEADBEEFu32.to_be_bytes());
+        put(&mut e, 0x00300200, &0xCAFEBABEu32.to_be_bytes());
+        put(&mut e, 0x00300100, &encode(0x40, 0x01, 0x200));
+        put(&mut e, 0x0030010C, &encode(0x3E, 0x1B, 0));
+        e.run();
+        assert_eq!(e.regs[1], 0xCAFEBABE);
     }
 
     #[test]

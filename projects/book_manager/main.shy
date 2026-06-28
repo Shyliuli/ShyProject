@@ -1,0 +1,360 @@
+___DEFINE___
+
+___DATA___
+
+.section data..L.shy.__main_shyc._L__11
+.symbol .L.shy.__main_shyc._L__11
+.L.shy.__main_shyc._L__11(0) [37,115,0]
+.section data..L.shy.__main_shyc._L__10
+.symbol .L.shy.__main_shyc._L__10
+.L.shy.__main_shyc._L__10(0) [231,186,162,230,152,159,231,133,167,232,128,128,228,184,173,229,155,189,0]
+.section data..L.shy.__main_shyc._L__9
+.symbol .L.shy.__main_shyc._L__9
+.L.shy.__main_shyc._L__9(0) [109,97,105,110,0]
+.section data..L.shy.__main_shyc._L__8
+.symbol .L.shy.__main_shyc._L__8
+.L.shy.__main_shyc._L__8(0) [109,97,105,110,0]
+.section data..L.shy.__main_shyc._L__7
+.symbol .L.shy.__main_shyc._L__7
+.L.shy.__main_shyc._L__7(0) [95,95,95,95,98,111,111,107,95,95,100,114,111,112,0]
+.section data..L.shy.__main_shyc._L__6
+.symbol .L.shy.__main_shyc._L__6
+.L.shy.__main_shyc._L__6(0) [95,95,95,95,98,111,111,107,95,95,100,114,111,112,0]
+.section data..L.shy.__main_shyc._L__5
+.symbol .L.shy.__main_shyc._L__5
+.L.shy.__main_shyc._L__5(0) [91,98,111,111,107,105,100,93,32,37,115,58,37,100,0]
+.section data..L.shy.__main_shyc._L__4
+.symbol .L.shy.__main_shyc._L__4
+.L.shy.__main_shyc._L__4(0) [95,95,95,95,98,111,111,107,95,95,112,114,105,110,116,0]
+.section data..L.shy.__main_shyc._L__3
+.symbol .L.shy.__main_shyc._L__3
+.L.shy.__main_shyc._L__3(0) [95,95,95,95,98,111,111,107,95,95,112,114,105,110,116,0]
+.section data..L.shy.__main_shyc._L__2
+.symbol .L.shy.__main_shyc._L__2
+.L.shy.__main_shyc._L__2(0) [101,114,114,111,114,58,98,111,111,107,32,110,97,109,101,32,116,111,111,32,108,111,110,103,0]
+.section data..L.shy.__main_shyc._L__1
+.symbol .L.shy.__main_shyc._L__1
+.L.shy.__main_shyc._L__1(0) [95,95,95,95,98,111,111,107,95,95,110,101,119,0]
+.section data..L.shy.__main_shyc._L__0
+.symbol .L.shy.__main_shyc._L__0
+.L.shy.__main_shyc._L__0(0) [95,95,95,95,98,111,111,107,95,95,110,101,119,0]
+
+___CODE___
+
+.section text._start
+.symbol _start
+setn sp 0x00fff000
+calln main
+seta exit 1x
+.section text.main
+.symbol main
+pusha fx
+seta fx sp
+addn sp 144
+setn 3x 72
+adda 3x fx
+putn 3x 0
+setn 3x 76
+adda 3x fx
+putn 3x 0
+setn 3x 80
+adda 3x fx
+putn 3x 0
+setn 3x 84
+adda 3x fx
+putn 3x 0
+setn 3x 88
+adda 3x fx
+putn 3x 0
+setn 3x 92
+adda 3x fx
+putn 3x 0
+setn 3x 96
+adda 3x fx
+putn 3x 0
+setn 3x 100
+adda 3x fx
+putn 3x 0
+setn 3x 104
+adda 3x fx
+putn 3x 0
+setn 3x 108
+adda 3x fx
+putn 3x 0
+setn 3x 112
+adda 3x fx
+putn 3x 0
+setn 3x 116
+adda 3x fx
+putn 3x 0
+setn 3x 120
+adda 3x fx
+putn 3x 0
+setn 3x 124
+adda 3x fx
+putn 3x 0
+setn 3x 128
+adda 3x fx
+putn 3x 0
+setn 3x 132
+adda 3x fx
+putn 3x 0
+setn 3x 136
+adda 3x fx
+putn 3x 0
+setn 1x 0
+setn 2x 0
+setn 1x 72
+adda 1x fx
+setn 2x 0
+pusha 1x
+setn 1x .L.shy.__main_shyc._L__10
+setn 2x 0
+setn 2x 0
+pusha 1x
+setn 1x 10
+setn 2x 0
+setn 2x 0
+pusha 1x
+setn 1x 4
+adda 1x fx
+setn 2x 0
+pusha 1x
+popa 4x
+popa 5x
+popa 6x
+calln ____book__new
+setn 1x 4
+adda 1x fx
+setn 2x 0
+popa 3x
+seta 4x 3x
+setn cx 17
+.L.copy.words.1:
+equn cx 0
+jmpn .L.copy.words.done.1
+geta dx 1x
+puta 3x dx
+addn 1x 4
+addn 3x 4
+subn cx 1
+ujmpn .L.copy.words.1
+.L.copy.words.done.1:
+seta 1x 4x
+setn 2x 0
+setn 3x 0
+adda 3x fx
+putn 3x 0
+setn 1x 0
+setn 2x 0
+setn 1x 0
+adda 1x fx
+setn 2x 0
+pusha 1x
+setn 1x 72
+adda 1x fx
+setn 2x 0
+setn 2x 0
+popa 3x
+puta 3x 1x
+setn 1x 0
+adda 1x fx
+setn 2x 0
+geta 1x 1x
+setn 2x 0
+setn 2x 0
+pusha 1x
+popa 4x
+calln ____book__print
+setn 1x 0
+adda 1x fx
+setn 2x 0
+geta 1x 1x
+setn 2x 0
+setn 2x 0
+pusha 1x
+setn 1x .L.shy.__main_shyc._L__11
+setn 2x 0
+setn 2x 0
+pusha 1x
+popa 4x
+popa 5x
+calln println
+setn 1x 72
+adda 1x fx
+setn 2x 0
+pusha 1x
+popa 4x
+calln ____book__drop
+setn 1x 0
+setn 2x 0
+.L.return.main:
+seta sp fx
+popa fx
+ret
+.section text.____book__drop
+.symbol ____book__drop
+pusha fx
+seta fx sp
+addn sp 8
+setn 3x 4
+adda 3x fx
+puta 3x 4x
+setn 1x 4
+adda 1x fx
+setn 2x 0
+geta 1x 1x
+setn 2x 0
+setn 2x 0
+.L.return.____book__drop:
+seta sp fx
+popa fx
+ret
+.section text.____book__print
+.symbol ____book__print
+pusha fx
+seta fx sp
+addn sp 8
+setn 3x 4
+adda 3x fx
+puta 3x 4x
+setn 1x 4
+adda 1x fx
+setn 2x 0
+geta 1x 1x
+setn 2x 0
+addn 1x 64
+geta 1x 1x
+setn 2x 0
+pusha 1x
+setn 1x 4
+adda 1x fx
+setn 2x 0
+geta 1x 1x
+setn 2x 0
+setn 2x 0
+pusha 1x
+setn 1x .L.shy.__main_shyc._L__5
+setn 2x 0
+setn 2x 0
+pusha 1x
+popa 4x
+popa 5x
+popa 6x
+calln println
+.L.return.____book__print:
+seta sp fx
+popa fx
+ret
+.section text.____book__new
+.symbol ____book__new
+pusha fx
+seta fx sp
+addn sp 84
+setn 3x 72
+adda 3x fx
+puta 3x 4x
+setn 3x 76
+adda 3x fx
+puta 3x 5x
+setn 3x 80
+adda 3x fx
+puta 3x 6x
+setn 1x 80
+adda 1x fx
+setn 2x 0
+geta 1x 1x
+setn 2x 0
+setn 2x 0
+pusha 1x
+popa 4x
+calln strlen
+setn 2x 0
+pusha 1x
+setn 1x 64
+setn 2x 0
+setn 2x 0
+popa 3x
+smaa 1x 3x
+setn 1x 0
+jmpn .L.true.3
+ujmpn .L.end.3
+.L.true.3:
+setn 1x 1
+.L.end.3:
+setn 2x 0
+equn 1x 0
+jmpn .L.else.2
+setn 1x .L.shy.__main_shyc._L__2
+setn 2x 0
+setn 2x 0
+pusha 1x
+popa 4x
+calln println
+setn 1x 1
+setn 2x 0
+setn 2x 0
+setn 3x 0
+suba 3x 1x
+seta 1x 3x
+setn 2x 0
+setn 2x 0
+pusha 1x
+popa 4x
+calln exit
+ujmpn .L.end.2
+.L.else.2:
+setn 1x 80
+adda 1x fx
+setn 2x 0
+geta 1x 1x
+setn 2x 0
+setn 2x 0
+pusha 1x
+setn 1x 0
+adda 1x fx
+setn 2x 0
+setn 2x 0
+pusha 1x
+popa 4x
+popa 5x
+calln strcpy
+setn 1x 0
+adda 1x fx
+setn 2x 0
+addn 1x 64
+pusha 1x
+setn 1x 76
+adda 1x fx
+setn 2x 0
+geta 1x 1x
+setn 2x 0
+setn 2x 0
+popa 3x
+puta 3x 1x
+setn 1x 0
+adda 1x fx
+setn 2x 0
+seta 4x 1x
+setn dx 72
+adda dx fx
+geta dx dx
+seta 3x dx
+seta 1x 4x
+setn cx 17
+.L.copy.words.4:
+equn cx 0
+jmpn .L.copy.words.done.4
+geta dx 1x
+puta 3x dx
+addn 1x 4
+addn 3x 4
+subn cx 1
+ujmpn .L.copy.words.4
+.L.copy.words.done.4:
+ujmpn .L.return.____book__new
+.L.end.2:
+.L.return.____book__new:
+seta sp fx
+popa fx
+ret

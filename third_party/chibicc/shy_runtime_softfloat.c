@@ -152,39 +152,147 @@ u32 __shy_f32_div(u32 a, u32 b) {
 }
 
 i32 __shy_f32_eq(u32 a, u32 b) {
+  if ((a & 0x7fffffffU) == 0 && (b & 0x7fffffffU) == 0)
+    return 1;
   return a == b;
 }
 
 i32 __shy_f32_ne(u32 a, u32 b) {
-  return a != b;
+  return !__shy_f32_eq(a, b);
+}
+
+static u32 f32_order_key(u32 x) {
+  return (x & SIGN) ? ~x : (x | SIGN);
 }
 
 i32 __shy_f32_lt(u32 a, u32 b) {
-  i32 ia = (i32)__shy_f32_to_i64(a);
-  i32 ib = (i32)__shy_f32_to_i64(b);
-  return ia < ib;
+  if (__shy_f32_eq(a, b))
+    return 0;
+  return f32_order_key(a) < f32_order_key(b);
 }
 
 i32 __shy_f32_le(u32 a, u32 b) {
-  i32 ia = (i32)__shy_f32_to_i64(a);
-  i32 ib = (i32)__shy_f32_to_i64(b);
-  return ia <= ib;
+  return __shy_f32_eq(a, b) || __shy_f32_lt(a, b);
 }
 
-// Minimal double bridge. These preserve linkability for double-heavy code.
-// They intentionally degrade through int/float-like behavior until a real
-// f64 implementation is added.
-u64 __shy_f32_to_f64(u32 x) { return __shy_f32_to_i64(x); }
-u32 __shy_f64_to_f32(u64 x) { return __shy_i64_to_f32((i64)x); }
-i64 __shy_f64_to_i64(u64 x) { return (i64)x; }
-u64 __shy_f64_to_u64(u64 x) { return x; }
-u64 __shy_i64_to_f64(i64 x) { return (u64)x; }
-u64 __shy_u64_to_f64(u64 x) { return x; }
-u64 __shy_f64_add(u64 a, u64 b) { return a + b; }
-u64 __shy_f64_sub(u64 a, u64 b) { return a - b; }
-u64 __shy_f64_mul(u64 a, u64 b) { return a; }
-u64 __shy_f64_div(u64 a, u64 b) { return a; }
-i32 __shy_f64_eq(u64 a, u64 b) { return a == b; }
-i32 __shy_f64_ne(u64 a, u64 b) { return a != b; }
-i32 __shy_f64_lt(u64 a, u64 b) { return 0; }
-i32 __shy_f64_le(u64 a, u64 b) { return a == b; }
+// Minimal double bridge. It handles finite normal values well enough for
+// casts and printf("%f") while still avoiding a full IEEE754 runtime.
+#define F64_SIGN 0x8000000000000000UL
+#define F64_FRAC 0x000fffffffffffffUL
+#define F64_HIDDEN 0x0010000000000000UL
+
+u64 __shy_f32_to_f64(u32 x) {
+  u64 sign = (u64)(x & SIGN) << 32;
+  u32 exp = (x >> 23) & 255;
+  u32 frac = x & FRAC;
+
+  if (exp == 0) {
+    return sign;
+  } else if (exp == 255) {
+    return sign | 0x7ff0000000000000UL | ((u64)frac << 29);
+  }
+
+  u64 exp64 = (u64)((i32)exp - 127 + 1023);
+  return sign | (exp64 << 52) | ((u64)frac << 29);
+}
+
+u32 __shy_f64_to_f32(u64 x) {
+  u32 sign = (u32)(x >> 32) & SIGN;
+  int exp = (int)((x >> 52) & 0x7ff);
+  u64 frac = x & F64_FRAC;
+
+  if (exp == 0)
+    return sign;
+  if (exp == 0x7ff)
+    return sign | 0x7f800000U | (u32)(frac >> 29);
+
+  exp = exp - 1023 + 127;
+  if (exp <= 0)
+    return sign;
+  if (exp >= 255)
+    return sign | 0x7f800000U;
+
+  return sign | ((u32)exp << 23) | (u32)(frac >> 29);
+}
+
+static u64 abs_f64_to_u64(u64 x) {
+  int exp = (int)((x >> 52) & 0x7ff) - 1023;
+  u64 mant = (x & F64_FRAC) | F64_HIDDEN;
+
+  if ((x & ~F64_SIGN) == 0 || exp < 0)
+    return 0;
+  if (exp >= 63)
+    return 0x7fffffffffffffffUL;
+  if (exp >= 52)
+    return mant << (exp - 52);
+  return mant >> (52 - exp);
+}
+
+i64 __shy_f64_to_i64(u64 x) {
+  u64 n = abs_f64_to_u64(x);
+  i64 v = (i64)n;
+  return (x & F64_SIGN) ? -v : v;
+}
+
+u64 __shy_f64_to_u64(u64 x) {
+  if (x & F64_SIGN)
+    return 0;
+  return abs_f64_to_u64(x);
+}
+
+static u64 u64_to_f64_bits(u64 n, int sign) {
+  if (n == 0)
+    return sign ? F64_SIGN : 0;
+
+  int bit = 63;
+  while (((n >> bit) & 1) == 0)
+    bit = bit - 1;
+
+  u64 frac;
+  if (bit > 52)
+    frac = n >> (bit - 52);
+  else
+    frac = n << (52 - bit);
+
+  return (sign ? F64_SIGN : 0) | ((u64)(bit + 1023) << 52) | (frac & F64_FRAC);
+}
+
+u64 __shy_i64_to_f64(i64 x) {
+  u64 ux = (u64)x;
+  int sign = (int)(ux >> 63);
+  u64 n = sign ? (~ux + 1) : ux;
+  return u64_to_f64_bits(n, sign);
+}
+
+u64 __shy_u64_to_f64(u64 x) { return u64_to_f64_bits(x, 0); }
+u64 __shy_f64_add(u64 a, u64 b) {
+  return __shy_f32_to_f64(__shy_f32_add(__shy_f64_to_f32(a), __shy_f64_to_f32(b)));
+}
+
+u64 __shy_f64_sub(u64 a, u64 b) {
+  return __shy_f32_to_f64(__shy_f32_sub(__shy_f64_to_f32(a), __shy_f64_to_f32(b)));
+}
+
+u64 __shy_f64_mul(u64 a, u64 b) {
+  return __shy_f32_to_f64(__shy_f32_mul(__shy_f64_to_f32(a), __shy_f64_to_f32(b)));
+}
+
+u64 __shy_f64_div(u64 a, u64 b) {
+  return __shy_f32_to_f64(__shy_f32_div(__shy_f64_to_f32(a), __shy_f64_to_f32(b)));
+}
+
+i32 __shy_f64_eq(u64 a, u64 b) {
+  return __shy_f32_eq(__shy_f64_to_f32(a), __shy_f64_to_f32(b));
+}
+
+i32 __shy_f64_ne(u64 a, u64 b) {
+  return !__shy_f64_eq(a, b);
+}
+
+i32 __shy_f64_lt(u64 a, u64 b) {
+  return __shy_f32_lt(__shy_f64_to_f32(a), __shy_f64_to_f32(b));
+}
+
+i32 __shy_f64_le(u64 a, u64 b) {
+  return __shy_f32_le(__shy_f64_to_f32(a), __shy_f64_to_f32(b));
+}

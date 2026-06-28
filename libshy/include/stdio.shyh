@@ -1,0 +1,27 @@
+#ifndef __SHY_STDIO_H
+#define __SHY_STDIO_H
+
+#include <stdarg.shyh>
+#include <stddef.shyh>
+
+#define EOF (-1)
+
+int putchar(int c);
+int getchar(void);
+int puts(const char *s);
+
+int printf(const char *fmt, ...);
+int println(const char *fmt, ...);
+int vprintf(const char *fmt, va_list ap);
+
+int sprintf(char *s, const char *fmt, ...);
+int snprintf(char *s, size_t n, const char *fmt, ...);
+int vsprintf(char *s, const char *fmt, va_list ap);
+int vsnprintf(char *s, size_t n, const char *fmt, va_list ap);
+
+int scanf(const char *fmt, ...);
+int vscanf(const char *fmt, va_list ap);
+int sscanf(const char *s, const char *fmt, ...);
+int vsscanf(const char *s, const char *fmt, va_list ap);
+
+#endif

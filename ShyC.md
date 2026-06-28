@@ -3,6 +3,9 @@
 ShyC is the current bare-metal C ABI and language subset for ShyISA. The
 frontend is the local chibicc fork under `third_party/chibicc`.
 
+Implementation notes for maintaining the local fork are in
+`third_party/chibicc/SHY_FORK.md`.
+
 ## Goals
 
 - Compile C source files to Shy assembly (`.shy`).
@@ -98,7 +101,7 @@ void _start(void) {
 
 ## Data Model
 
-ShyC currently uses an LP64-style C data model at the frontend level:
+ShyC uses an ILP32-style pointer model with 64-bit `long`:
 
 | C type | Size |
 | --- | ---: |
@@ -106,10 +109,33 @@ ShyC currently uses an LP64-style C data model at the frontend level:
 | `short` | 16 bits |
 | `int` | 32 bits |
 | `long` | 64 bits |
-| pointer | 64 bits |
+| pointer | 32 bits |
+| `size_t` | 32 bits |
+| `ptrdiff_t` | 32 bits |
 
-ShyISA addresses are currently 32-bit. Pointer values are represented as 64-bit
-C values, with the low 32 bits used as the machine address.
+ShyISA addresses are 32-bit, so pointer values are represented directly as
+32-bit machine addresses. `long` remains 64-bit for code that needs a wider
+integer type. This means ShyC is not LP64 even when a host compiler used to
+build tools is LP64:
+
+- `sizeof(void *) == 4`;
+- `sizeof(size_t) == 4`;
+- `sizeof(ptrdiff_t) == 4`;
+- `sizeof(long) == 8`.
+
+The libshy headers follow this model. `<stdint.h>` provides fixed-width
+integer names such as `int32_t`, `uint64_t`, `intptr_t`, and `uintptr_t`.
+`intptr_t` is `int`, and `uintptr_t` is `unsigned int`. `<stdtype.h>` provides
+Rust-style aliases:
+
+| Alias | Type |
+| --- | --- |
+| `i8`, `i16`, `i32`, `i64` | signed fixed-width integers |
+| `u8`, `u16`, `u32`, `u64` | unsigned fixed-width integers |
+| `isize` | `ptrdiff_t` |
+| `usize` | `size_t` |
+| `f32` | `float` |
+| `f64` | `double` |
 
 ## Calling Convention
 
@@ -168,6 +194,88 @@ Unsupported or intentionally incomplete:
 - full C11/C17 atomics semantics;
 - arbitrary ABI spill arguments;
 - strict compatibility with another platform ABI.
+
+## ShyC Source Extensions
+
+Native ShyC source files use `.shyc`; native ShyC headers use `.shyh`. The
+driver still accepts `.c` and `.h` for C-compatible inputs.
+
+ShyC performs a top-level pre-scan before parsing function bodies. The pre-scan
+registers global typedefs, struct/union/enum tags, global functions, and `impl`
+methods for the whole translation unit. This means calls can target functions or
+methods that are written later in the file:
+
+```c
+int main(void) {
+  return add1(2);
+}
+
+int add1(int x) {
+  return x + 1;
+}
+```
+
+Unknown names are still rejected. The pre-scan does not parse function bodies and
+does not generate code for global initializers.
+
+Struct and union tags are also usable as type names in ShyC. This removes the
+usual C boilerplate `typedef struct Name Name;`:
+
+```c
+struct Counter {
+  int value;
+};
+
+Counter c;
+```
+
+Methods are written in an `impl` block:
+
+```c
+impl Counter {
+  Counter new(int value) {
+    Counter c;
+    c.value = value;
+    return c;
+  }
+
+  int add(self *s, int n) {
+    s.value = s.value + n;
+    return s.value;
+  }
+}
+```
+
+`self` is valid only inside an `impl` block and names the implemented type.
+Method symbols are lowered as:
+
+```text
+____TYPE__method
+```
+
+For example, `Counter::new` lowers to `____Counter__new`.
+
+Static-style calls use `Type::method(args...)`. Instance calls use dot syntax and
+pass the receiver as the first `self` argument:
+
+```c
+Counter c = Counter::new(3);
+c.add(4);
+
+Counter *p = &c;
+p.add(5);
+```
+
+The dot operator also auto-dereferences struct and union pointers for both field
+access and method calls.
+
+If a type implements `drop(self *s)`, local values of that type are treated as
+RAII values. ShyC inserts `drop` at scope exits, `return`, `break`, and
+`continue`. Passing or assigning such a value by value moves it; using a moved
+value is an error. Calling `.drop()` manually disables the automatic drop for
+that local value.
+
+`goto` out of a scope containing active RAII locals is rejected.
 
 ## Floating Point
 

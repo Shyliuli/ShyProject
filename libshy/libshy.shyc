@@ -1,0 +1,809 @@
+#include <ctype.shyh>
+#include <stdarg.shyh>
+#include <stddef.shyh>
+#include <stdio.shyh>
+#include <stdlib.shyh>
+#include <string.shyh>
+
+void *memcpy(void *dest, const void *src, size_t n) {
+  unsigned char *d = dest;
+  const unsigned char *s = src;
+  for (size_t i = 0; i < n; i++)
+    d[i] = s[i];
+  return dest;
+}
+
+void *memmove(void *dest, const void *src, size_t n) {
+  unsigned char *d = dest;
+  const unsigned char *s = src;
+  if (d < s) {
+    for (size_t i = 0; i < n; i++)
+      d[i] = s[i];
+  } else if (d > s) {
+    while (n) {
+      n = n - 1;
+      d[n] = s[n];
+    }
+  }
+  return dest;
+}
+
+void *memset(void *s, int c, size_t n) {
+  unsigned char *p = s;
+  for (size_t i = 0; i < n; i++)
+    p[i] = (unsigned char)c;
+  return s;
+}
+
+int memcmp(const void *s1, const void *s2, size_t n) {
+  const unsigned char *a = s1;
+  const unsigned char *b = s2;
+  for (size_t i = 0; i < n; i++)
+    if (a[i] != b[i])
+      return (int)a[i] - (int)b[i];
+  return 0;
+}
+
+size_t strlen(const char *s) {
+  size_t n = 0;
+  while (s[n])
+    n = n + 1;
+  return n;
+}
+
+int strcmp(const char *s1, const char *s2) {
+  while (*s1 && *s1 == *s2) {
+    s1 = s1 + 1;
+    s2 = s2 + 1;
+  }
+  return (unsigned char)*s1 - (unsigned char)*s2;
+}
+
+int strncmp(const char *s1, const char *s2, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    unsigned char a = s1[i];
+    unsigned char b = s2[i];
+    if (a != b)
+      return (int)a - (int)b;
+    if (!a)
+      return 0;
+  }
+  return 0;
+}
+
+char *strcpy(char *dest, const char *src) {
+  char *d = dest;
+  while ((*d = *src)) {
+    d = d + 1;
+    src = src + 1;
+  }
+  return dest;
+}
+
+char *strncpy(char *dest, const char *src, size_t n) {
+  size_t i = 0;
+  for (; i < n && src[i]; i++)
+    dest[i] = src[i];
+  for (; i < n; i++)
+    dest[i] = 0;
+  return dest;
+}
+
+char *strcat(char *dest, const char *src) {
+  strcpy(dest + strlen(dest), src);
+  return dest;
+}
+
+char *strchr(const char *s, int c) {
+  char ch = (char)c;
+  for (;; s = s + 1) {
+    if (*s == ch)
+      return (char *)s;
+    if (!*s)
+      return NULL;
+  }
+}
+
+char *strrchr(const char *s, int c) {
+  const char *last = NULL;
+  char ch = (char)c;
+  for (;; s = s + 1) {
+    if (*s == ch)
+      last = s;
+    if (!*s)
+      return (char *)last;
+  }
+}
+
+int isdigit(int c) { return '0' <= c && c <= '9'; }
+int islower(int c) { return 'a' <= c && c <= 'z'; }
+int isupper(int c) { return 'A' <= c && c <= 'Z'; }
+int isalpha(int c) { return islower(c) || isupper(c); }
+int isalnum(int c) { return isalpha(c) || isdigit(c); }
+int isxdigit(int c) {
+  return isdigit(c) || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F');
+}
+int isspace(int c) {
+  return c == ' ' || c == '\f' || c == '\n' || c == '\r' || c == '\t' ||
+         c == '\v';
+}
+int isprint(int c) { return 32 <= c && c < 127; }
+int tolower(int c) { return isupper(c) ? c + ('a' - 'A') : c; }
+int toupper(int c) { return islower(c) ? c - ('a' - 'A') : c; }
+
+static int digit_value(int c) {
+  if ('0' <= c && c <= '9')
+    return c - '0';
+  if ('a' <= c && c <= 'z')
+    return c - 'a' + 10;
+  if ('A' <= c && c <= 'Z')
+    return c - 'A' + 10;
+  return -1;
+}
+
+unsigned long strtoul(const char *nptr, char **endptr, int base) {
+  const char *s = nptr;
+  while (isspace(*s))
+    s = s + 1;
+
+  int neg = 0;
+  if (*s == '+' || *s == '-') {
+    neg = *s == '-';
+    s = s + 1;
+  }
+
+  if ((base == 0 || base == 16) && s[0] == '0' &&
+      (s[1] == 'x' || s[1] == 'X')) {
+    base = 16;
+    s = s + 2;
+  } else if (base == 0 && s[0] == '0') {
+    base = 8;
+  } else if (base == 0) {
+    base = 10;
+  }
+
+  unsigned long val = 0;
+  const char *start = s;
+  for (;;) {
+    int d = digit_value(*s);
+    if (d < 0 || d >= base)
+      break;
+    val = val * (unsigned long)base + (unsigned long)d;
+    s = s + 1;
+  }
+
+  if (endptr)
+    *endptr = (char *)(s == start ? nptr : s);
+  return neg ? 0 - val : val;
+}
+
+long strtol(const char *nptr, char **endptr, int base) {
+  return (long)strtoul(nptr, endptr, base);
+}
+
+int atoi(const char *nptr) { return (int)strtol(nptr, NULL, 10); }
+long atol(const char *nptr) { return strtol(nptr, NULL, 10); }
+
+void exit(int status) {
+  asm!(status) {
+    "seta exit {status}"
+  };
+  for (;;)
+    ;
+}
+
+void abort(void) { exit(EXIT_FAILURE); }
+
+int putchar(int c) {
+  // 0x70 is the ShyISA UART data register; writes emit the low 8 bits.
+  // C putchar is byte-oriented, so this preserves UTF-8 strings byte by byte.
+  asm!(c) {
+    "seta 0x70 {c}"
+  };
+  return c;
+}
+
+int getchar(void) {
+  int c = 0;
+  asm!(c) {
+    "inutfa {c}"
+  };
+  return c;
+}
+
+int puts(const char *s) {
+  int n = 0;
+  while (*s) {
+    putchar(*s);
+    s = s + 1;
+    n = n + 1;
+  }
+  putchar('\n');
+  return n + 1;
+}
+
+typedef struct {
+  char *buf;
+  size_t cap;
+  size_t pos;
+  int count;
+} Out;
+
+static void out_ch(Out *out, int c) {
+  if (out.buf && out.cap) {
+    if (out.cap == (size_t)-1 || out.pos + 1 < out.cap)
+      out.buf[out.pos] = (char)c;
+    else if (out.pos + 1 == out.cap)
+      out.buf[out.pos] = 0;
+  }
+  out.pos = out.pos + 1;
+  out.count = out.count + 1;
+  if (!out.buf)
+    putchar(c);
+}
+
+static void out_strn(Out *out, const char *s, int len) {
+  for (int i = 0; i < len; i++)
+    out_ch(out, s[i]);
+}
+
+static void out_padding(Out *out, int n, int zero) {
+  for (int i = 0; i < n; i++)
+    out_ch(out, zero ? '0' : ' ');
+}
+
+static int utoa_rev(char *buf, unsigned long val, int base, int upper) {
+  char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+  int n = 0;
+  do {
+    buf[n] = digits[val % (unsigned long)base];
+    n = n + 1;
+    val = val / (unsigned long)base;
+  } while (val);
+  return n;
+}
+
+#define F_NEG 1
+#define F_ZERO 2
+#define F_LEFT 4
+#define F_UPPER 8
+#define F_HEX_PREFIX 16
+#define F_OCT_PREFIX 32
+
+static void emit_number(Out *out, unsigned long val, int base, int width,
+                        int flags) {
+  char tmp[65];
+  int n = utoa_rev(tmp, val, base, flags & F_UPPER);
+  const char *prefix = NULL;
+  if ((flags & F_HEX_PREFIX) && val)
+    prefix = (flags & F_UPPER) ? "0X" : "0x";
+  else if (flags & F_OCT_PREFIX)
+    prefix = "0";
+
+  int prefix_len = prefix ? (int)strlen(prefix) : 0;
+  int sign_len = (flags & F_NEG) ? 1 : 0;
+  int total = n + prefix_len + sign_len;
+  int pad = width > total ? width - total : 0;
+
+  if (!(flags & F_LEFT) && !(flags & F_ZERO))
+    out_padding(out, pad, 0);
+  if (flags & F_NEG)
+    out_ch(out, '-');
+  if (prefix)
+    out_strn(out, prefix, prefix_len);
+  if (!(flags & F_LEFT) && (flags & F_ZERO))
+    out_padding(out, pad, 1);
+  while (n)
+    out_ch(out, tmp[--n]);
+  if (flags & F_LEFT)
+    out_padding(out, pad, 0);
+}
+
+static void emit_fixed_double(Out *out, double value, int precision, int width,
+                              int left) {
+  union {
+    double d;
+    unsigned long u;
+  } conv;
+  conv.d = value;
+
+  unsigned long bits = conv.u;
+  int neg = (int)(bits >> 63);
+  int exp = (int)((bits >> 52) & 0x7ff);
+  unsigned long frac = bits & 0x000fffffffffffffUL;
+
+  if (precision == -1)
+    precision = 6;
+  if (precision > 9)
+    precision = 9;
+
+  if (exp == 0x7ff) {
+    const char *s = frac ? "nan" : "inf";
+    int len = (int)strlen(s) + (neg && !frac ? 1 : 0);
+    if (!left)
+      out_padding(out, width > len ? width - len : 0, 0);
+    if (neg && !frac)
+      out_ch(out, '-');
+    out_strn(out, s, (int)strlen(s));
+    if (left)
+      out_padding(out, width > len ? width - len : 0, 0);
+    return;
+  }
+
+  unsigned long mant = frac;
+  int e2_bias;
+  if (exp) {
+    mant = mant | (1UL << 52);
+    e2_bias = exp;
+  } else {
+    e2_bias = 1;
+  }
+
+  unsigned long intpart = 0;
+  unsigned long rem = 0;
+  int shift = 0;
+  if (e2_bias >= 1075) {
+    int left_shift = e2_bias - 1075;
+    if (left_shift < 12)
+      intpart = mant << left_shift;
+    else
+      intpart = 0xffffffffffffffffUL;
+  } else {
+    shift = 1075 - e2_bias;
+    if (shift < 64) {
+      intpart = mant >> shift;
+      rem = mant - (intpart << shift);
+    }
+  }
+
+  char digits[96];
+  int len = utoa_rev(digits, intpart, 10, 0);
+  int total = len + (neg ? 1 : 0) + (precision ? precision + 1 : 0);
+  if (!left)
+    out_padding(out, width > total ? width - total : 0, 0);
+  if (neg)
+    out_ch(out, '-');
+  while (len)
+    out_ch(out, digits[--len]);
+  if (precision) {
+    out_ch(out, '.');
+    for (int i = 0; i < precision; i++) {
+      int digit = 0;
+      if (shift > 0 && shift < 61) {
+        rem = rem * 10;
+        digit = (int)(rem >> shift);
+        rem = rem - ((unsigned long)digit << shift);
+      }
+      out_ch(out, '0' + digit);
+    }
+  }
+  if (left)
+    out_padding(out, width > total ? width - total : 0, 0);
+}
+
+int vsnprintf(char *s, size_t n, const char *fmt, va_list ap) {
+  Out out = {s, n, 0, 0};
+
+  for (; *fmt; fmt = fmt + 1) {
+    if (*fmt != '%') {
+      out_ch(&out, *fmt);
+      continue;
+    }
+    fmt = fmt + 1;
+    if (*fmt == '%') {
+      out_ch(&out, '%');
+      continue;
+    }
+
+    int left = 0;
+    int zero = 0;
+    int alt = 0;
+    for (;;) {
+      if (*fmt == '-') {
+        left = 1;
+        fmt = fmt + 1;
+      } else if (*fmt == '0') {
+        zero = 1;
+        fmt = fmt + 1;
+      } else if (*fmt == '#') {
+        alt = 1;
+        fmt = fmt + 1;
+      } else {
+        break;
+      }
+    }
+
+    int width = 0;
+    while (isdigit(*fmt)) {
+      width = width * 10 + (*fmt - '0');
+      fmt = fmt + 1;
+    }
+
+    int precision = -1;
+    if (*fmt == '.') {
+      fmt = fmt + 1;
+      precision = 0;
+      while (isdigit(*fmt)) {
+        precision = precision * 10 + (*fmt - '0');
+        fmt = fmt + 1;
+      }
+    }
+
+    int long_arg = 0;
+    if (*fmt == 'l') {
+      long_arg = 1;
+      fmt = fmt + 1;
+      if (*fmt == 'l')
+        fmt = fmt + 1;
+    }
+
+    if (*fmt == 'd' || *fmt == 'i') {
+      long v = long_arg ? va_arg(ap, long) : va_arg(ap, int);
+      unsigned long u = v < 0 ? (unsigned long)(0 - v) : (unsigned long)v;
+      int flags = (v < 0 ? F_NEG : 0) | (zero && !left ? F_ZERO : 0) |
+                  (left ? F_LEFT : 0);
+      emit_number(&out, u, 10, width, flags);
+    } else if (*fmt == 'u') {
+      unsigned long v = long_arg ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int);
+      int flags = (zero && !left ? F_ZERO : 0) | (left ? F_LEFT : 0);
+      emit_number(&out, v, 10, width, flags);
+    } else if (*fmt == 'x' || *fmt == 'X') {
+      unsigned long v = long_arg ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int);
+      int flags = (*fmt == 'X' ? F_UPPER : 0) | (alt ? F_HEX_PREFIX : 0) |
+                  (zero && !left ? F_ZERO : 0) | (left ? F_LEFT : 0);
+      emit_number(&out, v, 16, width, flags);
+    } else if (*fmt == 'o') {
+      unsigned long v = long_arg ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int);
+      int flags = (alt ? F_OCT_PREFIX : 0) | (zero && !left ? F_ZERO : 0) |
+                  (left ? F_LEFT : 0);
+      emit_number(&out, v, 8, width, flags);
+    } else if (*fmt == 'p') {
+      unsigned long v = (unsigned long)va_arg(ap, void *);
+      int flags = F_HEX_PREFIX | (zero && !left ? F_ZERO : 0) |
+                  (left ? F_LEFT : 0);
+      emit_number(&out, v, 16, width, flags);
+    } else if (*fmt == 'c') {
+      int ch = va_arg(ap, int);
+      if (!left)
+        out_padding(&out, width > 1 ? width - 1 : 0, 0);
+      out_ch(&out, ch);
+      if (left)
+        out_padding(&out, width > 1 ? width - 1 : 0, 0);
+    } else if (*fmt == 's') {
+      const char *str = va_arg(ap, const char *);
+      if (!str)
+        str = "(null)";
+      int len = (int)strlen(str);
+      if (precision >= 0 && len > precision)
+        len = precision;
+      if (!left)
+        out_padding(&out, width > len ? width - len : 0, 0);
+      out_strn(&out, str, len);
+      if (left)
+        out_padding(&out, width > len ? width - len : 0, 0);
+    } else if (*fmt == 'f') {
+      emit_fixed_double(&out, va_arg(ap, double), precision, width, left);
+    } else {
+      out_ch(&out, '%');
+      if (*fmt)
+        out_ch(&out, *fmt);
+    }
+  }
+
+  if (s && n) {
+    if (out.pos < n)
+      s[out.pos] = 0;
+    else
+      s[n - 1] = 0;
+  }
+  return out.count;
+}
+
+int vsprintf(char *s, const char *fmt, va_list ap) {
+  return vsnprintf(s, (size_t)-1, fmt, ap);
+}
+
+int snprintf(char *s, size_t n, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int r = vsnprintf(s, n, fmt, ap);
+  va_end(ap);
+  return r;
+}
+
+int sprintf(char *s, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int r = vsprintf(s, fmt, ap);
+  va_end(ap);
+  return r;
+}
+
+int vprintf(const char *fmt, va_list ap) {
+  return vsnprintf(NULL, 0, fmt, ap);
+}
+
+int printf(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int r = vprintf(fmt, ap);
+  va_end(ap);
+  return r;
+}
+int println(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int r = vprintf(fmt, ap);
+  va_end(ap);
+  putchar('\n');
+  return r;
+}
+typedef struct {
+  const char *s;
+  int from_string;
+  int has_ungot;
+  int ungot;
+  int count;
+} ScanIn;
+
+typedef struct {
+  int width;
+  int base;
+  int sign;
+  int neg;
+  unsigned long val;
+} ScanNum;
+
+static int scan_get(ScanIn *in) {
+  if (in.has_ungot) {
+    in.has_ungot = 0;
+    return in.ungot;
+  }
+
+  int c;
+  if (in.from_string) {
+    if (!*in.s)
+      return EOF;
+    c = (unsigned char)*in.s;
+    in.s = in.s + 1;
+  } else {
+    c = getchar();
+  }
+  in.count = in.count + 1;
+  return c;
+}
+
+static void scan_unget(ScanIn *in, int c) {
+  if (c == EOF)
+    return;
+  in.has_ungot = 1;
+  in.ungot = c;
+  in.count = in.count - 1;
+}
+
+static void scan_skip_space(ScanIn *in) {
+  int c;
+  do {
+    c = scan_get(in);
+  } while (isspace(c));
+  scan_unget(in, c);
+}
+
+static int scan_digit_value(int c) {
+  if ('0' <= c && c <= '9')
+    return c - '0';
+  if ('a' <= c && c <= 'z')
+    return c - 'a' + 10;
+  if ('A' <= c && c <= 'Z')
+    return c - 'A' + 10;
+  return -1;
+}
+
+static int scan_number(ScanIn *in, ScanNum *num) {
+  int c = scan_get(in);
+  int consumed = 0;
+  num.neg = 0;
+  num.val = 0;
+
+  if (num.sign && (c == '+' || c == '-')) {
+    num.neg = c == '-';
+    consumed = consumed + 1;
+    c = scan_get(in);
+  }
+
+  if ((num.base == 0 || num.base == 16) && c == '0') {
+    int x = scan_get(in);
+    if (x == 'x' || x == 'X') {
+      num.base = 16;
+      consumed = consumed + 2;
+      c = scan_get(in);
+    } else {
+      scan_unget(in, x);
+      if (num.base == 0)
+        num.base = 8;
+    }
+  } else if (num.base == 0) {
+    num.base = 10;
+  }
+
+  int digits = 0;
+  while (c != EOF) {
+    if (num.width && consumed >= num.width)
+      break;
+    int d = scan_digit_value(c);
+    if (d < 0 || d >= num.base)
+      break;
+    num.val = num.val * (unsigned long)num.base + (unsigned long)d;
+    consumed = consumed + 1;
+    digits = digits + 1;
+    c = scan_get(in);
+  }
+
+  scan_unget(in, c);
+  return digits > 0;
+}
+
+static int scan_format(ScanIn *input, const char *fmt, va_list ap) {
+  ScanIn *in = input;
+  int assigned = 0;
+
+  for (; *fmt; fmt = fmt + 1) {
+    if (isspace(*fmt)) {
+      while (isspace(*fmt))
+        fmt = fmt + 1;
+      fmt = fmt - 1;
+      scan_skip_space(in);
+      continue;
+    }
+
+    if (*fmt != '%') {
+      int c = scan_get(in);
+      if (c != *fmt) {
+        scan_unget(in, c);
+        return assigned ? assigned : EOF;
+      }
+      continue;
+    }
+
+    fmt = fmt + 1;
+    if (*fmt == '%') {
+      int c = scan_get(in);
+      if (c != '%') {
+        scan_unget(in, c);
+        return assigned ? assigned : EOF;
+      }
+      continue;
+    }
+
+    int suppress = 0;
+    if (*fmt == '*') {
+      suppress = 1;
+      fmt = fmt + 1;
+    }
+
+    int width = 0;
+    while (isdigit(*fmt)) {
+      width = width * 10 + (*fmt - '0');
+      fmt = fmt + 1;
+    }
+
+    int long_arg = 0;
+    if (*fmt == 'l') {
+      long_arg = 1;
+      fmt = fmt + 1;
+      if (*fmt == 'l')
+        fmt = fmt + 1;
+    } else if (*fmt == 'h') {
+      fmt = fmt + 1;
+      if (*fmt == 'h')
+        fmt = fmt + 1;
+    }
+
+    if (*fmt == 'd' || *fmt == 'i' || *fmt == 'u' || *fmt == 'x' ||
+        *fmt == 'X' || *fmt == 'o') {
+      scan_skip_space(in);
+      ScanNum num = {width, 10, *fmt == 'd' || *fmt == 'i', 0, 0};
+      if (*fmt == 'i')
+        num.base = 0;
+      else if (*fmt == 'x' || *fmt == 'X')
+        num.base = 16;
+      else if (*fmt == 'o')
+        num.base = 8;
+
+      if (!scan_number(in, &num))
+        return assigned ? assigned : EOF;
+
+      unsigned long val = num.neg ? 0 - num.val : num.val;
+      if (!suppress) {
+        if (long_arg) {
+          unsigned long *p = va_arg(ap, unsigned long *);
+          *p = val;
+        } else {
+          unsigned int *p = va_arg(ap, unsigned int *);
+          *p = (unsigned int)val;
+        }
+        assigned = assigned + 1;
+      }
+      continue;
+    }
+
+    if (*fmt == 's') {
+      scan_skip_space(in);
+      char *out = suppress ? NULL : va_arg(ap, char *);
+      int n = 0;
+      int c = scan_get(in);
+      while (c != EOF && !isspace(c) && (!width || n < width)) {
+        if (!suppress)
+          out[n] = (char)c;
+        n = n + 1;
+        c = scan_get(in);
+      }
+      scan_unget(in, c);
+      if (!n)
+        return assigned ? assigned : EOF;
+      if (!suppress) {
+        out[n] = 0;
+        assigned = assigned + 1;
+      }
+      continue;
+    }
+
+    if (*fmt == 'c') {
+      int n = width ? width : 1;
+      char *out = suppress ? NULL : va_arg(ap, char *);
+      for (int i = 0; i < n; i++) {
+        int c = scan_get(in);
+        if (c == EOF)
+          return assigned ? assigned : EOF;
+        if (!suppress)
+          out[i] = (char)c;
+      }
+      if (!suppress)
+        assigned = assigned + 1;
+      continue;
+    }
+
+    if (*fmt == 'n') {
+      if (!suppress) {
+        if (long_arg) {
+          long *p = va_arg(ap, long *);
+          *p = in.count;
+        } else {
+          int *p = va_arg(ap, int *);
+          *p = in.count;
+        }
+      }
+      continue;
+    }
+
+    return assigned;
+  }
+
+  return assigned;
+}
+
+int vsscanf(const char *s, const char *fmt, va_list ap) {
+  ScanIn in = {s, 1, 0, 0, 0};
+  return scan_format(&in, fmt, ap);
+}
+
+int sscanf(const char *s, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int r = vsscanf(s, fmt, ap);
+  va_end(ap);
+  return r;
+}
+
+int vscanf(const char *fmt, va_list ap) {
+  ScanIn in = {NULL, 0, 0, 0, 0};
+  return scan_format(&in, fmt, ap);
+}
+
+int scanf(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int r = vscanf(fmt, ap);
+  va_end(ap);
+  return r;
+}

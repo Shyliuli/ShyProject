@@ -1,0 +1,16 @@
+#ifndef __SHY_STDLIB_H
+#define __SHY_STDLIB_H
+
+#include <stddef.shyh>
+
+#define EXIT_SUCCESS 0
+#define EXIT_FAILURE 1
+
+void abort(void);
+void exit(int status);
+int atoi(const char *nptr);
+long atol(const char *nptr);
+long strtol(const char *nptr, char **endptr, int base);
+unsigned long strtoul(const char *nptr, char **endptr, int base);
+
+#endif

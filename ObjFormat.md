@@ -263,7 +263,7 @@ addend  = 12
 
 - `text._start` 必须存在，并放到 `0x00000100`。
 - 其他 `text.*` section 接在 `text._start` 后面。
-- `data` 和 `data.*` section 从 `0x00200000` 开始依次放置。
+- `data` 和 `data.*` section 接在所有 `text.*` section 后面。
 - 其他 section 名暂不定义默认布局，链接器可以报错。
 - section 起始地址按 4 字节对齐。
 
@@ -288,7 +288,7 @@ addend  = 12
 ```text
 _start 0x00000100
 main 0x00000118
-message 0x00200000
+message 0x00000140
 ```
 
 `.sym` 不影响程序执行。

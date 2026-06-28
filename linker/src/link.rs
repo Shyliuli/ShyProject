@@ -4,7 +4,7 @@
 //! 默认布局规则：
 //! - `text._start` 必须存在，放到程序入口地址 `0x00000100`。
 //! - 其他 `text.*` section 接在 `text._start` 后面，按输入顺序依次放置。
-//! - `data` 和 `data.*` section 从 `0x00200000` 开始依次放置。
+//! - `data` 和 `data.*` section 接在所有 `text.*` section 后面，按输入顺序依次放置。
 //! - 其他 section 名暂不定义默认布局，链接器报错。
 //! - section 起始地址按 4 字节对齐。
 
@@ -16,8 +16,6 @@ use crate::obj::{ObjectFile, RelocTarget};
 
 /// 程序入口地址，`text._start` 必须放到这里。
 pub const ENTRY: u32 = 0x00000100;
-/// `data` / `data.*` section 的起始地址。
-pub const DATA_BASE: u32 = 0x0020_0000;
 /// 没有任何 object 声明 `#![mem(...)]` 时写入 `.sfs` 的默认内存提示。
 pub const DEFAULT_MEM_HINT: u32 = 32 * 1024 * 1024;
 /// 没有任何 object 声明 `#![stack(...)]` 时写入 `.sfs` 的默认栈提示。
@@ -89,7 +87,6 @@ pub fn link(files: Vec<ObjectFile>) -> Result<LinkedOutput> {
     // 2. 按默认规则为每个 section 分配最终地址。
     let mut bases: HashMap<String, u32> = HashMap::new();
     let mut text_cur: u32;
-    let mut data_cur = DATA_BASE;
 
     // text._start 必须存在并放到入口地址。
     let has_start = sections.iter().any(|s| s.name == "text._start");
@@ -106,20 +103,29 @@ pub fn link(files: Vec<ObjectFile>) -> Result<LinkedOutput> {
     }
 
     for s in &sections {
+        if s.name != "text._start" && !is_text(&s.name) && !is_data(&s.name) {
+            bail!(
+                "no default layout for section `{}`: only `text.*` and `data`/`data.*` are supported",
+                s.name
+            );
+        }
+    }
+
+    for s in &sections {
         if s.name == "text._start" {
             continue;
         }
         if is_text(&s.name) {
             bases.insert(s.name.clone(), text_cur);
             text_cur = align4(text_cur + s.bytes.len() as u32);
-        } else if is_data(&s.name) {
+        }
+    }
+
+    let mut data_cur = text_cur;
+    for s in &sections {
+        if is_data(&s.name) {
             bases.insert(s.name.clone(), data_cur);
             data_cur = align4(data_cur + s.bytes.len() as u32);
-        } else {
-            bail!(
-                "no default layout for section `{}`: only `text.*` and `data`/`data.*` are supported",
-                s.name
-            );
         }
     }
 
@@ -310,15 +316,15 @@ mod tests {
         );
 
         let out = link(vec![s]).unwrap();
-        // text._start 在 0x100，data.message 在 0x00200000。
+        // text._start 在 0x100，data.message 紧跟在 text 后。
         assert_eq!(&out.image[0x100..0x10C], &[
             0x3E, 0x00, 0x00, 0x00,
-            0x00, 0x20, 0x00, 0x00, // message 地址 0x00200000 大端序
+            0x00, 0x00, 0x01, 0x0C, // message 地址 0x0000010C 大端序
             0x00, 0x00, 0x00, 0x01,
         ]);
-        assert_eq!(&out.image[0x00200000..0x00200003], b"Hi\0");
+        assert_eq!(&out.image[0x10C..0x10F], b"Hi\0");
         assert!(out.symbols.iter().any(|(n, a)| n == "_start" && *a == 0x100));
-        assert!(out.symbols.iter().any(|(n, a)| n == "message" && *a == 0x00200000));
+        assert!(out.symbols.iter().any(|(n, a)| n == "message" && *a == 0x10C));
         assert_eq!(&out.image[0x04..0x08], &DEFAULT_MEM_HINT.to_be_bytes());
         assert_eq!(&out.image[0x08..0x0C], &DEFAULT_STACK_HINT.to_be_bytes());
     }
@@ -425,24 +431,27 @@ mod tests {
     }
 
     #[test]
-    fn data_sections_start_at_data_base() {
+    fn data_sections_follow_all_text_sections() {
         let s = obj(
             vec![
                 sec("text._start", &[0; 12]),
+                sec("text.main", &[0; 8]),
                 sec("data", &[0; 4]),
                 sec("data.extra", &[0; 8]),
             ],
             vec![
                 sym("text._start", "text._start", 0),
+                sym("text.main", "text.main", 0),
                 sym("data", "data", 0),
                 sym("data.extra", "data.extra", 0),
             ],
             vec![],
         );
         let out = link(vec![s]).unwrap();
-        assert!(out.symbols.iter().any(|(n, a)| n == "data" && *a == 0x00200000));
-        // data len 4 -> align4(0x00200004) = 0x00200004
-        assert!(out.symbols.iter().any(|(n, a)| n == "data.extra" && *a == 0x00200004));
+        assert!(out.symbols.iter().any(|(n, a)| n == "text.main" && *a == 0x10C));
+        assert!(out.symbols.iter().any(|(n, a)| n == "data" && *a == 0x114));
+        // data len 4 -> align4(0x00000118) = 0x00000118
+        assert!(out.symbols.iter().any(|(n, a)| n == "data.extra" && *a == 0x118));
     }
 
     #[test]
@@ -476,8 +485,8 @@ mod tests {
             vec![reloc_symbol("text._start", 8, "message", 4)],
         );
         let out = link(vec![s]).unwrap();
-        // message 在 0x00200000，+4 = 0x00200004
-        assert_eq!(&out.image[0x108..0x10C], &0x00200004u32.to_be_bytes());
+        // message 在 0x10C，+4 = 0x110
+        assert_eq!(&out.image[0x108..0x10C], &0x00000110u32.to_be_bytes());
     }
 
     #[test]

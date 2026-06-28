@@ -4,6 +4,7 @@ void print(char* c,int len){
         putc(c[i]);
     }
 }
+
 int main(){
     print("hello world\n",11);
     return 0;

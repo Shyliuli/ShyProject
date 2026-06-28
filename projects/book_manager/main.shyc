@@ -1,0 +1,37 @@
+#include <stdio.shyh>
+#include <string.shyh>
+#include <stdlib.shyh>
+#include <stdtype.shyh>
+struct book{
+    char name[64];
+    i32 id;
+};
+impl book{
+    book new(i32 id,char* name){
+        if (strlen(name)>64){
+            println("error:book name too long");
+            exit(-1);
+        }
+        else{
+            book b;
+            strcpy(b.name,name);
+            b.id=id;
+            return b;
+        }
+    }
+    void print(const self* s){
+        println("[bookid] %s:%d", s.name,s.id);
+    }
+    void drop(const self* s){
+        (void*)s;
+        //仅仅是标注这个是RAII变量
+        //没什么好清理的，都是栈上变量
+    }
+}
+
+i32 main(void) {
+    book b1=book::new(10,"红星照耀中国");   
+    book* b2=&b1;
+    b2.print();
+    println("%s", b2.name);
+}

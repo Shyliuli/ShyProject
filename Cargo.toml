@@ -3,5 +3,5 @@ members = [
     "shy_isa_lib",
     "asm",
     "emu"
-, "linker"]
+, "linker", "shycc"]
 resolver = "2"

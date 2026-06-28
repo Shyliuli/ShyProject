@@ -1,0 +1,211 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ShyC",
+  "scopeName": "source.shyc",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#preprocessor"
+    },
+    {
+      "include": "#shy-extensions"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#variables"
+    },
+    {
+      "include": "#functions"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.shyc",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.shyc",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.shyc",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.shyc",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.shyc",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.shyc",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.shyc",
+          "match": "\\b(0[xX][0-9a-fA-F]+|[0-9]+(\\.[0-9]+)?([eEpP][+-]?[0-9]+)?[uUlLfF]*)\\b"
+        }
+      ]
+    },
+    "preprocessor": {
+      "patterns": [
+        {
+          "name": "keyword.control.directive.shyc",
+          "match": "^\\s*#\\s*(include|define|undef|if|ifdef|ifndef|elif|else|endif|pragma|error|warning)\\b"
+        },
+        {
+          "name": "string.quoted.other.include.shyc",
+          "match": "<[^>]+\\.(shyh|h)>"
+        }
+      ]
+    },
+    "shy-extensions": {
+      "patterns": [
+        {
+          "name": "keyword.other.impl.shyc",
+          "match": "\\bimpl\\b"
+        },
+        {
+          "name": "storage.type.self.shyc",
+          "match": "\\bself\\b"
+        },
+        {
+          "name": "keyword.operator.scope.shyc",
+          "match": "::"
+        },
+        {
+          "name": "support.function.asm.shyc",
+          "match": "\\basm!"
+        },
+        {
+          "name": "meta.attribute.shyc",
+          "match": "#!\\[(no_main|mem\\([^\\]]*\\)|stack\\([^\\]]*\\))\\]"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.shyc",
+          "match": "\\b(return|if|else|for|while|do|switch|case|default|break|continue|goto)\\b"
+        },
+        {
+          "name": "storage.modifier.shyc",
+          "match": "\\b(typedef|static|extern|inline|const|volatile|restrict|auto|register|_Noreturn|_Atomic|_Thread_local|__thread)\\b"
+        },
+        {
+          "name": "keyword.operator.word.shyc",
+          "match": "\\b(sizeof|typeof|_Alignof|_Alignas)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.shyc",
+          "match": "\\b(void|_Bool|char|short|int|long|float|double|signed|unsigned|struct|union|enum|i8|i16|i32|i64|u8|u16|u32|u64|isize|usize|f32|f64|int8_t|int16_t|int32_t|int64_t|uint8_t|uint16_t|uint32_t|uint64_t|intptr_t|uintptr_t|size_t|ptrdiff_t)\\b"
+        },
+        {
+          "name": "entity.name.type.shyc",
+          "match": "(?<=\\bstruct\\s)\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "entity.name.type.shyc",
+          "match": "(?<=\\bimpl\\s)\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "variables": {
+      "patterns": [
+        {
+          "match": "^(?!\\s*#)\\s*(?:[A-Za-z_][A-Za-z0-9_]*|(?:const|volatile|signed|unsigned|long|short|struct|union|enum)\\b(?:\\s+[A-Za-z_][A-Za-z0-9_]*)?)\\s*(?:\\*\\s*)+([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*(?:=|;|,|\\[))",
+          "captures": {
+            "1": {
+              "name": "variable.other.local.shyc"
+            }
+          }
+        },
+        {
+          "match": "^(?!\\s*#)\\s*(?:[A-Za-z_][A-Za-z0-9_]*|(?:const|volatile|signed|unsigned|long|short|struct|union|enum)\\b(?:\\s+[A-Za-z_][A-Za-z0-9_]*)?)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*(?:=|;|,|\\[))",
+          "captures": {
+            "1": {
+              "name": "variable.other.local.shyc"
+            }
+          }
+        },
+        {
+          "match": "(?<=&)\\s*([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "variable.other.local.shyc"
+            }
+          }
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "match": "^(?!\\s*#).*?(::)\\s*([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "2": {
+              "name": "entity.name.function.member.shyc"
+            }
+          }
+        },
+        {
+          "match": "^(?!\\s*#).*?(\\.)\\s*([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\()",
+          "captures": {
+            "2": {
+              "name": "entity.name.function.member.shyc"
+            }
+          }
+        },
+        {
+          "match": "^(?!\\s*#).*?(\\.)\\s*([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "2": {
+              "name": "variable.other.property.shyc"
+            }
+          }
+        },
+        {
+          "name": "entity.name.function.shyc",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*\\()"
+        }
+      ]
+    }
+  }
+}

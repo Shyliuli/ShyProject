@@ -1,0 +1,22 @@
+#include <stdint.h>
+#include <stdio.h>
+#include <stdtype.h>
+
+int main(void) {
+  int8_t a = -1;
+  uint16_t b = UINT16_MAX;
+  intptr_t p = (intptr_t)(void *)0x1234;
+  usize n = sizeof(void *);
+  isize d = (char *)0x1010 - (char *)0x1000;
+  f32 x = 1.5f;
+  int scaled = (int)(x * 2.0f);
+
+  printf("%d %u %x\n", (int)a, (unsigned int)b, (unsigned int)p);
+  printf("%u %d %d\n", n, d, scaled);
+
+  return (sizeof(i8) == 1 && sizeof(u16) == 2 && sizeof(i32) == 4 &&
+          sizeof(u64) == 8 && sizeof(usize) == 4 && sizeof(isize) == 4 &&
+          sizeof(f32) == 4 && sizeof(f64) == 8 && scaled == 3)
+             ? 0
+             : 1;
+}

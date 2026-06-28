@@ -111,8 +111,7 @@ impl Address {
             0x70 => Address::Reg(UartData),
             0x71 => Address::Reg(UartStatus),
             // ── 普通内存 ──
-            addr @ 0x00000100..=0x000FFFFF => Address::Memory(addr, MemType::Kernel),
-            addr => Address::Memory(addr, MemType::User),
+            addr => Address::Memory(addr, MemType::Ordinary),
         }
     }
 
