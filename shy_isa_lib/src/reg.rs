@@ -2,6 +2,7 @@
 pub enum RegType {
     Regular(u32), // 0x00-0x0F，存储地址值（即寄存器编号）
     PC,
+    SegmentStart,
     SP,
     TM,
     Status,
@@ -12,6 +13,7 @@ pub enum RegType {
     EPC,
     Cause,
     KernelSP,
+    SegmentEnd,
     UartData,
     UartStatus,
 }
@@ -57,6 +59,7 @@ impl RegType {
             "ex" => RegType::Regular(0xE),
             "fx" => RegType::Regular(0xF),
             "pc" => RegType::PC,
+            "segs" => RegType::SegmentStart,
             "sp" => RegType::SP,
             "tm" => RegType::TM,
             "status" => RegType::Status,
@@ -70,6 +73,7 @@ impl RegType {
             "epc" => RegType::EPC,
             "cause" => RegType::Cause,
             "ksp" => RegType::KernelSP,
+            "sege" => RegType::SegmentEnd,
             "uart_data" => RegType::UartData,
             "uart_status" => RegType::UartStatus,
             _ => return Err(ParseRegError::new(s)),
@@ -82,6 +86,7 @@ impl RegType {
         match self {
             RegType::Regular(v) => *v,
             RegType::PC => 0x10,
+            RegType::SegmentStart => 0x11,
             RegType::SP => 0x12,
             RegType::TM => 0x13,
             RegType::Status => 0x14,
@@ -92,6 +97,7 @@ impl RegType {
             RegType::EPC => 0x1C,
             RegType::Cause => 0x1D,
             RegType::KernelSP => 0x1E,
+            RegType::SegmentEnd => 0x1F,
             RegType::UartData => 0x70,
             RegType::UartStatus => 0x71,
         }
@@ -116,6 +122,8 @@ mod tests {
         assert_eq!(RegType::from_str("AX"), Ok(RegType::Regular(0xA)));
         assert_eq!(RegType::from_str("  sp  "), Ok(RegType::SP));
         assert_eq!("ksp".parse::<RegType>(), Ok(RegType::KernelSP));
+        assert_eq!("segs".parse::<RegType>(), Ok(RegType::SegmentStart));
+        assert_eq!("sege".parse::<RegType>(), Ok(RegType::SegmentEnd));
         assert_eq!(RegType::from_str("uart_data"), Ok(RegType::UartData));
         assert!(RegType::from_str("unknown").is_err());
     }
@@ -123,7 +131,9 @@ mod tests {
     #[test]
     fn register_names_map_to_addresses() {
         assert_eq!(RegType::from_str("fx").unwrap().to_u32(), 0x0F);
+        assert_eq!(RegType::from_str("segs").unwrap().to_u32(), 0x11);
         assert_eq!(RegType::from_str("m4").unwrap().to_u32(), 0x19);
+        assert_eq!(RegType::from_str("sege").unwrap().to_u32(), 0x1F);
         assert_eq!(RegType::from_str("uart_status").unwrap().to_u32(), 0x71);
     }
 }

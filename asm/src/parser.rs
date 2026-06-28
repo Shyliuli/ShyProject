@@ -8,6 +8,10 @@ use std::{collections::HashMap, vec};
 /// - 将 DEFINE 段解析为 `name → value` 的常量映射表
 #[derive(Debug)]
 pub struct ParsedSource {
+    /// 显式 `#![mem(...)]` 声明的内存需求，单位字节。
+    pub mem_hint: Option<u32>,
+    /// 显式 `#![stack(...)]` 声明的栈需求，单位字节。
+    pub stack_hint: Option<u32>,
     /// `___DEFINE___` 段的解析结果：名字 → 32 位值。
     pub defines: HashMap<String, u32>,
     /// 删除注释后，`___DATA___` 段中的非空源码行。
@@ -48,6 +52,42 @@ pub fn parse_u32_literal(raw: &str) -> Result<u32> {
         .with_context(|| format!("无效的数字常量: {raw}"))
 }
 
+/// 解析 `#![mem(10M)]` / `#![stack(4K)]` 中的大小字面量。
+///
+/// 支持无后缀字节数，以及 `k`/`K` 和 `m`/`M` 后缀。
+pub fn parse_size_literal(raw: &str) -> Result<u32> {
+    let raw = raw.trim();
+    let Some(last) = raw.chars().last() else {
+        bail!("空的大小常量");
+    };
+    let (digits, multiplier) = match last {
+        'k' | 'K' => (&raw[..raw.len() - 1], 1024u32),
+        'm' | 'M' => (&raw[..raw.len() - 1], 1024u32 * 1024),
+        _ => (raw, 1),
+    };
+    let value = parse_u32_literal(digits)?;
+    if value == 0 {
+        bail!("大小常量必须大于 0: {raw}");
+    }
+    value
+        .checked_mul(multiplier)
+        .with_context(|| format!("大小常量溢出 u32: {raw}"))
+}
+
+fn parse_metadata_directive(line: &str) -> Result<Option<(&str, u32)>> {
+    let Some(inner) = line.strip_prefix("#![").and_then(|s| s.strip_suffix("]")) else {
+        return Ok(None);
+    };
+    let Some((name, value)) = inner.strip_suffix(")").and_then(|s| s.split_once("(")) else {
+        bail!("无效的元数据声明: {line}");
+    };
+    match name.trim() {
+        "mem" => Ok(Some(("mem", parse_size_literal(value)?))),
+        "stack" => Ok(Some(("stack", parse_size_literal(value)?))),
+        _ => bail!("未知的元数据声明: {line}"),
+    }
+}
+
 /// 将 DEFINE 行的 value 部分解析为 u32。
 fn resolve_define_value(raw: &str) -> u32 {
     parse_u32_literal(raw).unwrap_or_else(|err| panic!("{err}"))
@@ -73,6 +113,7 @@ fn is_register_name(name: &str) -> bool {
             | "ex"
             | "fx"
             | "pc"
+            | "segs"
             | "sp"
             | "tm"
             | "status"
@@ -86,6 +127,7 @@ fn is_register_name(name: &str) -> bool {
             | "epc"
             | "cause"
             | "ksp"
+            | "sege"
     )
 }
 
@@ -102,10 +144,30 @@ impl ParsedSource {
         let mut defines_raw: Vec<String> = Vec::new();
         let mut data: Vec<String> = Vec::new();
         let mut code: Vec<String> = Vec::new();
+        let mut mem_hint = None;
+        let mut stack_hint = None;
 
         // ShyISA 汇编文件按 DEFINE -> DATA -> CODE 的顺序组织。
         // 这里用一个小状态机记录当前所在段，并把普通源码行放入对应 Vec。
         for l in src.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            if let Some((name, value)) =
+                parse_metadata_directive(l).unwrap_or_else(|err| panic!("{err}"))
+            {
+                match name {
+                    "mem" => {
+                        if mem_hint.replace(value).is_some() {
+                            panic!("mem 元数据重复声明");
+                        }
+                    }
+                    "stack" => {
+                        if stack_hint.replace(value).is_some() {
+                            panic!("stack 元数据重复声明");
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+                continue;
+            }
             match state {
                 SectionState::Start => {
                     if ParsedSource::is_section_marker(l, "___DEFINE___") {
@@ -133,6 +195,8 @@ impl ParsedSource {
         }
 
         ParsedSource {
+            mem_hint,
+            stack_hint,
             defines: ParsedSource::parse_defines(defines_raw),
             data,
             code,
@@ -580,6 +644,8 @@ impl Obj {
         }
 
         Ok(Self {
+            mem_hint: source.mem_hint,
+            stack_hint: source.stack_hint,
             section: sections,
             symbol: symbols,
             relocation: reloc,
@@ -588,7 +654,7 @@ impl Obj {
     /*AIGC:codex*/
     pub fn to_file(self, mut f: shyfile::File) -> Result<()> {
         const MAGIC: u32 = 0x66CCFF00;
-        const HEADER_SIZE: usize = 16;
+        const HEADER_SIZE: usize = 24;
 
         if !f.is_empty() {
             bail!("output object file must be empty");
@@ -634,6 +700,8 @@ impl Obj {
         push_u32(&mut buf, section_start);
         push_u32(&mut buf, 0);
         push_u32(&mut buf, 0);
+        push_u32(&mut buf, self.mem_hint.unwrap_or(0));
+        push_u32(&mut buf, self.stack_hint.unwrap_or(0));
 
         for (index, section) in self.section.iter().enumerate() {
             let node_len = 4 + section.name.len() + 1 + 4 + section.bytes.len();
@@ -726,6 +794,8 @@ pub struct ObjRelocation {
 /// 输出格式
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Obj {
+    pub mem_hint: Option<u32>,
+    pub stack_hint: Option<u32>,
     pub section: Vec<ObjSection>,
     pub symbol: Vec<ObjSymbol>,
     pub relocation: Vec<ObjRelocation>,
@@ -738,7 +808,8 @@ pub enum RelocTarget {
 #[cfg(test)]
 mod tests {
     use super::{
-        Obj, ObjRelocation, ObjSection, ObjSymbol, ParsedSource, RelocTarget, parse_u32_literal,
+        Obj, ObjRelocation, ObjSection, ObjSymbol, ParsedSource, RelocTarget, parse_size_literal,
+        parse_u32_literal,
     };
     use shy_isa_lib::file::shyfile;
 
@@ -760,6 +831,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_size_literals() {
+        assert_eq!(parse_size_literal("4K").unwrap(), 4 * 1024);
+        assert_eq!(parse_size_literal("4k").unwrap(), 4 * 1024);
+        assert_eq!(parse_size_literal("10M").unwrap(), 10 * 1024 * 1024);
+        assert_eq!(parse_size_literal("10m").unwrap(), 10 * 1024 * 1024);
+        assert_eq!(parse_size_literal("128").unwrap(), 128);
+    }
+
+    #[test]
     fn writes_sobj_binary_format() {
         let path = format!(
             "target/test-{}-{}.sobj",
@@ -770,6 +850,8 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let obj = Obj {
+            mem_hint: Some(10 * 1024 * 1024),
+            stack_hint: Some(4 * 1024),
             section: vec![ObjSection {
                 name: "text._start".to_string(),
                 bytes: vec![0xAA, 0xBB, 0xCC, 0xDD],
@@ -794,17 +876,19 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(&bytes[0..4], &0x66CCFF00u32.to_be_bytes());
-        assert_eq!(&bytes[4..8], &16u32.to_be_bytes());
+        assert_eq!(&bytes[4..8], &24u32.to_be_bytes());
+        assert_eq!(&bytes[16..20], &(10 * 1024 * 1024u32).to_be_bytes());
+        assert_eq!(&bytes[20..24], &(4 * 1024u32).to_be_bytes());
 
         let symbol_start = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
         let relocation_start = u32::from_be_bytes(bytes[12..16].try_into().unwrap()) as usize;
         assert!(symbol_start > 16);
         assert!(relocation_start > symbol_start);
 
-        assert_eq!(&bytes[16..20], &0u32.to_be_bytes());
-        assert_eq!(&bytes[20..32], b"text._start\0");
-        assert_eq!(&bytes[32..36], &4u32.to_be_bytes());
-        assert_eq!(&bytes[36..40], &[0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_eq!(&bytes[24..28], &0u32.to_be_bytes());
+        assert_eq!(&bytes[28..40], b"text._start\0");
+        assert_eq!(&bytes[40..44], &4u32.to_be_bytes());
+        assert_eq!(&bytes[44..48], &[0xAA, 0xBB, 0xCC, 0xDD]);
 
         assert_eq!(&bytes[symbol_start..symbol_start + 4], &0u32.to_be_bytes());
         assert_eq!(
@@ -876,6 +960,41 @@ mod tests {
             }
         );
         assert_eq!(obj.relocation[1].addend, 12);
+    }
+
+    #[test]
+    fn parses_metadata_directives() {
+        let source = ParsedSource::new(
+            r#"
+            #![mem(10M)]
+            #![stack(4K)]
+            ___DEFINE___
+            ___DATA___
+            ___CODE___
+            .section text._start
+            .symbol _start
+            setn exit 0
+            "#
+            .to_owned(),
+        );
+
+        assert_eq!(source.mem_hint, Some(10 * 1024 * 1024));
+        assert_eq!(source.stack_hint, Some(4 * 1024));
+    }
+
+    #[test]
+    #[should_panic(expected = "mem 元数据重复声明")]
+    fn duplicate_mem_metadata_panics() {
+        ParsedSource::new(
+            r#"
+            #![mem(10M)]
+            #![mem(2M)]
+            ___DEFINE___
+            ___DATA___
+            ___CODE___
+            "#
+            .to_owned(),
+        );
     }
 
     #[test]

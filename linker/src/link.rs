@@ -18,6 +18,10 @@ use crate::obj::{ObjectFile, RelocTarget};
 pub const ENTRY: u32 = 0x00000100;
 /// `data` / `data.*` section 的起始地址。
 pub const DATA_BASE: u32 = 0x0020_0000;
+/// 没有任何 object 声明 `#![mem(...)]` 时写入 `.sfs` 的默认内存提示。
+pub const DEFAULT_MEM_HINT: u32 = 32 * 1024 * 1024;
+/// 没有任何 object 声明 `#![stack(...)]` 时写入 `.sfs` 的默认栈提示。
+pub const DEFAULT_STACK_HINT: u32 = 4 * 1024;
 
 /// 链接输出。
 pub struct LinkedOutput {
@@ -47,8 +51,24 @@ pub fn link(files: Vec<ObjectFile>) -> Result<LinkedOutput> {
     let mut relocations = Vec::new();
     let mut seen_section: HashMap<String, ()> = HashMap::new();
     let mut seen_symbol: HashMap<String, ()> = HashMap::new();
+    let mut mem_hint_sum = 0u32;
+    let mut stack_hint_sum = 0u32;
+    let mut has_mem_hint = false;
+    let mut has_stack_hint = false;
 
     for file in &files {
+        if let Some(v) = file.mem_hint {
+            has_mem_hint = true;
+            mem_hint_sum = mem_hint_sum
+                .checked_add(v)
+                .context("combined mem hint exceeds u32::MAX")?;
+        }
+        if let Some(v) = file.stack_hint {
+            has_stack_hint = true;
+            stack_hint_sum = stack_hint_sum
+                .checked_add(v)
+                .context("combined stack hint exceeds u32::MAX")?;
+        }
         for s in &file.sections {
             if seen_section.insert(s.name.clone(), ()).is_some() {
                 bail!("duplicate section: {}", s.name);
@@ -160,6 +180,18 @@ pub fn link(files: Vec<ObjectFile>) -> Result<LinkedOutput> {
         }
     }
     let mut image = vec![0u8; max_end as usize];
+    let mem_hint = if has_mem_hint {
+        mem_hint_sum
+    } else {
+        DEFAULT_MEM_HINT
+    };
+    let stack_hint = if has_stack_hint {
+        stack_hint_sum
+    } else {
+        DEFAULT_STACK_HINT
+    };
+    image[4..8].copy_from_slice(&mem_hint.to_be_bytes());
+    image[8..12].copy_from_slice(&stack_hint.to_be_bytes());
     for s in &sections {
         let base = *bases.get(&s.name).expect("every section has a base address") as usize;
         image[base..base + s.bytes.len()].copy_from_slice(&s.bytes);
@@ -229,6 +261,24 @@ mod tests {
         relocations: Vec<ObjRelocation>,
     ) -> ObjectFile {
         ObjectFile {
+            mem_hint: None,
+            stack_hint: None,
+            sections,
+            symbols,
+            relocations,
+        }
+    }
+
+    fn obj_with_hints(
+        mem_hint: Option<u32>,
+        stack_hint: Option<u32>,
+        sections: Vec<ObjSection>,
+        symbols: Vec<ObjSymbol>,
+        relocations: Vec<ObjRelocation>,
+    ) -> ObjectFile {
+        ObjectFile {
+            mem_hint,
+            stack_hint,
             sections,
             symbols,
             relocations,
@@ -269,6 +319,33 @@ mod tests {
         assert_eq!(&out.image[0x00200000..0x00200003], b"Hi\0");
         assert!(out.symbols.iter().any(|(n, a)| n == "_start" && *a == 0x100));
         assert!(out.symbols.iter().any(|(n, a)| n == "message" && *a == 0x00200000));
+        assert_eq!(&out.image[0x04..0x08], &DEFAULT_MEM_HINT.to_be_bytes());
+        assert_eq!(&out.image[0x08..0x0C], &DEFAULT_STACK_HINT.to_be_bytes());
+    }
+
+    #[test]
+    fn metadata_hints_sum_across_objects() {
+        let a = obj_with_hints(
+            Some(10 * 1024 * 1024),
+            None,
+            vec![sec("text._start", &[0; 12])],
+            vec![sym("text._start", "text._start", 0)],
+            vec![],
+        );
+        let b = obj_with_hints(
+            Some(2 * 1024 * 1024),
+            Some(8 * 1024),
+            vec![sec("text.main", &[0; 12])],
+            vec![sym("text.main", "text.main", 0)],
+            vec![],
+        );
+
+        let out = link(vec![a, b]).unwrap();
+        assert_eq!(
+            &out.image[0x04..0x08],
+            &(12 * 1024 * 1024u32).to_be_bytes()
+        );
+        assert_eq!(&out.image[0x08..0x0C], &(8 * 1024u32).to_be_bytes());
     }
 
     #[test]

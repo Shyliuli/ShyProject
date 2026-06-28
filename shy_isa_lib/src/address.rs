@@ -18,7 +18,8 @@ impl Address {
             reg @ 0x00..=0x0F => Address::Reg(Regular(reg)),
             // ── 特殊寄存器 0x10-0x1F ──
             0x10 => Address::Reg(PC),
-            0x11 | 0x1F | 0x60..=0x6F | 0x72..=0x7F | 0x80..=0xFF => Address::Reserved(addr),
+            0x11 => Address::Reg(SegmentStart),
+            0x60..=0x6F | 0x72..=0x7F | 0x80..=0xFF => Address::Reserved(addr),
             0x12 => Address::Reg(SP),
             0x13 => Address::Reg(TM),
             0x14 => Address::Reg(Status),
@@ -29,6 +30,7 @@ impl Address {
             0x1C => Address::Reg(EPC),
             0x1D => Address::Reg(Cause),
             0x1E => Address::Reg(KernelSP),
+            0x1F => Address::Reg(SegmentEnd),
             // ── 算术运算 0x20-0x27 ──
             0x20 => Address::Opcode(Adda),
             0x21 => Address::Opcode(Addn),

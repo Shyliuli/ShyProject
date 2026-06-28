@@ -10,6 +10,8 @@ bool opt_fpic;
 bool opt_target_shy;
 bool opt_shy_link_runtime;
 bool opt_shy_no_main;
+char *opt_shy_mem_hint;
+char *opt_shy_stack_hint;
 
 static FileType opt_x;
 static StringArray opt_include;

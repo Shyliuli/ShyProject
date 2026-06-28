@@ -38,6 +38,8 @@ pub struct ObjRelocation {
 /// 解析后的 object 文件，对应 `ObjFormat.md` 中的 `ObjectFile`。
 #[derive(Debug, Clone)]
 pub struct ObjectFile {
+    pub mem_hint: Option<u32>,
+    pub stack_hint: Option<u32>,
     pub sections: Vec<ObjSection>,
     pub symbols: Vec<ObjSymbol>,
     pub relocations: Vec<ObjRelocation>,
@@ -74,6 +76,23 @@ impl ObjectFile {
         let section_start = read_u32(buf, 4)? as usize;
         let symbol_start = read_u32(buf, 8)? as usize;
         let relocation_start = read_u32(buf, 12)? as usize;
+        let has_metadata = section_start == 0 || section_start >= 24;
+        let mem_hint = if has_metadata && buf.len() >= 24 {
+            match read_u32(buf, 16)? {
+                0 => None,
+                v => Some(v),
+            }
+        } else {
+            None
+        };
+        let stack_hint = if has_metadata && buf.len() >= 24 {
+            match read_u32(buf, 20)? {
+                0 => None,
+                v => Some(v),
+            }
+        } else {
+            None
+        };
 
         let mut sections = Vec::new();
         let mut cur = section_start as u32;
@@ -140,6 +159,8 @@ impl ObjectFile {
         }
 
         Ok(Self {
+            mem_hint,
+            stack_hint,
             sections,
             symbols,
             relocations,
@@ -153,6 +174,8 @@ mod tests {
 
     /// 测试辅助：把内存中的 section/symbol/relocation 序列化为 `.sobj` 字节流。
     fn build_sobj(
+        mem_hint: Option<u32>,
+        stack_hint: Option<u32>,
         sections: &[ObjSection],
         symbols: &[ObjSymbol],
         relocations: &[ObjRelocation],
@@ -170,6 +193,8 @@ mod tests {
         push_u32(&mut buf, 0); // section_start placeholder
         push_u32(&mut buf, 0); // symbol_start placeholder
         push_u32(&mut buf, 0); // relocation_start placeholder
+        push_u32(&mut buf, mem_hint.unwrap_or(0));
+        push_u32(&mut buf, stack_hint.unwrap_or(0));
 
         let section_start = if sections.is_empty() { 0 } else { buf.len() as u32 };
         for (i, s) in sections.iter().enumerate() {
@@ -242,8 +267,10 @@ mod tests {
 
     #[test]
     fn parses_empty_object() {
-        let buf = build_sobj(&[], &[], &[]);
+        let buf = build_sobj(None, None, &[], &[], &[]);
         let obj = ObjectFile::from_bytes(&buf).unwrap();
+        assert_eq!(obj.mem_hint, None);
+        assert_eq!(obj.stack_hint, None);
         assert!(obj.sections.is_empty());
         assert!(obj.symbols.is_empty());
         assert!(obj.relocations.is_empty());
@@ -251,7 +278,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_magic() {
-        let mut buf = build_sobj(&[], &[], &[]);
+        let mut buf = build_sobj(None, None, &[], &[], &[]);
         buf[0..4].copy_from_slice(&0xDEADBEEFu32.to_be_bytes());
         assert!(ObjectFile::from_bytes(&buf).is_err());
     }
@@ -303,9 +330,11 @@ mod tests {
             },
         ];
 
-        let buf = build_sobj(&sections, &symbols, &relocations);
+        let buf = build_sobj(Some(10 * 1024 * 1024), Some(4 * 1024), &sections, &symbols, &relocations);
         let obj = ObjectFile::from_bytes(&buf).unwrap();
 
+        assert_eq!(obj.mem_hint, Some(10 * 1024 * 1024));
+        assert_eq!(obj.stack_hint, Some(4 * 1024));
         assert_eq!(obj.sections, sections);
         assert_eq!(obj.symbols, symbols);
         assert_eq!(obj.relocations, relocations);

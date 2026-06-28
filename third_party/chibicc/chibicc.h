@@ -467,4 +467,6 @@ extern bool opt_fcommon;
 extern bool opt_target_shy;
 extern bool opt_shy_link_runtime;
 extern bool opt_shy_no_main;
+extern char *opt_shy_mem_hint;
+extern char *opt_shy_stack_hint;
 extern char *base_file;

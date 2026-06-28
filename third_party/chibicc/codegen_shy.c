@@ -1413,6 +1413,10 @@ void codegen_shy(Obj *prog, FILE *out) {
   rename_private_symbols(prog);
   assign_lvar_offsets(prog);
 
+  if (opt_shy_mem_hint)
+    println("#![mem(%s)]", opt_shy_mem_hint);
+  if (opt_shy_stack_hint)
+    println("#![stack(%s)]", opt_shy_stack_hint);
   println("___DEFINE___");
   fputc('\n', output_file);
   println("___DATA___");

@@ -789,10 +789,44 @@ Token *tokenize_file(char *path) {
 
   canonicalize_newline(p);
 
-  if (opt_target_shy && base_file && !strcmp(path, base_file) &&
-      !strncmp(p, "#![no_main]", 11)) {
-    opt_shy_no_main = true;
-    memset(p, ' ', 11);
+  if (opt_target_shy && base_file && !strcmp(path, base_file)) {
+    for (char *q = p; *q;) {
+      char *line = q;
+      while (*q == ' ' || *q == '\t')
+        q++;
+
+      if (!strncmp(q, "#![no_main]", 11)) {
+        opt_shy_no_main = true;
+        memset(q, ' ', 11);
+        q += 11;
+      } else if (!strncmp(q, "#![mem(", 7)) {
+        char *end = strchr(q, ']');
+        if (!end || end[-1] != ')')
+          error_at(q, "invalid Shy mem metadata");
+        if (opt_shy_mem_hint)
+          error_at(q, "duplicate Shy mem metadata");
+        opt_shy_mem_hint = strndup(q + 7, end - q - 8);
+        memset(q, ' ', end - q + 1);
+        q = end + 1;
+      } else if (!strncmp(q, "#![stack(", 9)) {
+        char *end = strchr(q, ']');
+        if (!end || end[-1] != ')')
+          error_at(q, "invalid Shy stack metadata");
+        if (opt_shy_stack_hint)
+          error_at(q, "duplicate Shy stack metadata");
+        opt_shy_stack_hint = strndup(q + 9, end - q - 10);
+        memset(q, ' ', end - q + 1);
+        q = end + 1;
+      }
+
+      while (*q && *q != '\n')
+        q++;
+      if (*q == '\n')
+        q++;
+
+      if (q == line)
+        q++;
+    }
   }
 
   remove_backslash_newline(p);

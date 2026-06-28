@@ -1,9 +1,9 @@
 //! ShyISA 模拟器核心 CPU。
 //!
 //! 实现要点（见 `ShyISA.md`）：
-//! - 16 个 32 位通用寄存器 + PC/SP/TM/STATUS/TRAP/EPC/CAUSE/KSP/RS/EXIT/M1-M4。
+//! - 16 个 32 位通用寄存器 + PC/SEGS/SP/TM/STATUS/TRAP/EPC/CAUSE/KSP/SEGE/RS/EXIT/M1-M4。
 //! - 32 位字节寻址，大端序，普通内存 32 位访问要求 4 字节对齐。
-//! - 内核区 `0x00000100-0x000FFFFF`，用户区 `0x00100000` 及以上。
+//! - `0x00000000-0x000FFFFF` 直通；用户窗口 `0x00100000` 及以上按 SEGS/SEGE 做段转换。
 //! - 统一 trap：保存 STATUS 到内部栈，写 EPC/CAUSE，用户态交换 SP/KSP，切内核态关中断，跳 TRAP。
 //! - 定时器 TM：非 0 时每 10ms 减 1，减到 1 时清零并产生可屏蔽中断请求。
 //! - `wait` 仅内核态且中断使能时有效，唤醒时 EPC=PC+12。
@@ -51,6 +51,7 @@ type FetchErr = TrapCause;
 pub struct Emu {
     regs: [u32; 16],
     pc: u32,
+    segs: u32,
     sp: u32,
     tm: u32,
     status: u32,
@@ -60,6 +61,7 @@ pub struct Emu {
     epc: u32,
     cause: u32,
     ksp: u32,
+    sege: u32,
     mem: Vec<u8>,
     trap_stack: Vec<u32>,
     timer_pending: bool,
@@ -76,6 +78,7 @@ impl Emu {
         Self {
             regs: [0; 16],
             pc: ENTRY,
+            segs: USER_BASE,
             sp: 0,
             tm: 0,
             status: 0,
@@ -85,6 +88,7 @@ impl Emu {
             epc: 0,
             cause: 0,
             ksp: 0,
+            sege: MEM_SIZE as u32,
             mem: vec![0; MEM_SIZE],
             trap_stack: Vec::new(),
             timer_pending: false,
@@ -184,56 +188,74 @@ impl Emu {
 
     // ── 普通内存访问 ──────────────────────────────────────────────
 
-    fn check_mem(&self, addr: u32, aligned: bool, size: usize) -> Result<(), TrapCause> {
+    fn translate_mem(&self, addr: u32, size: usize) -> Result<usize, TrapCause> {
         if addr < SPECIAL_TOP {
-            return Err(TrapCause::IllegalAddr);
-        }
-        if addr as usize + size > MEM_SIZE {
-            return Err(TrapCause::IllegalAddr);
-        }
-        if aligned && addr % 4 != 0 {
             return Err(TrapCause::IllegalAddr);
         }
         if self.is_user() && addr < USER_BASE {
             return Err(TrapCause::Permission);
         }
-        Ok(())
+        let (phys, limit) = if addr < USER_BASE {
+            (addr, MEM_SIZE as u32)
+        } else {
+            let offset = addr - USER_BASE;
+            (
+                self.segs
+                    .checked_add(offset)
+                    .ok_or(TrapCause::IllegalAddr)?,
+                self.sege,
+            )
+        };
+        let end = phys
+            .checked_add(size as u32)
+            .ok_or(TrapCause::IllegalAddr)?;
+        if end > limit || end as usize > MEM_SIZE {
+            return Err(TrapCause::IllegalAddr);
+        }
+        Ok(phys as usize)
+    }
+
+    fn check_mem(&self, addr: u32, aligned: bool, size: usize) -> Result<usize, TrapCause> {
+        if aligned && addr % 4 != 0 {
+            return Err(TrapCause::IllegalAddr);
+        }
+        self.translate_mem(addr, size)
     }
 
     fn read_mem32(&self, addr: u32) -> Result<u32, TrapCause> {
-        self.check_mem(addr, true, 4)?;
-        let s = &self.mem[addr as usize..addr as usize + 4];
+        let phys = self.check_mem(addr, true, 4)?;
+        let s = &self.mem[phys..phys + 4];
         Ok(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
     }
 
     fn write_mem32(&mut self, addr: u32, val: u32) -> Result<(), TrapCause> {
-        self.check_mem(addr, true, 4)?;
-        self.mem[addr as usize..addr as usize + 4].copy_from_slice(&val.to_be_bytes());
+        let phys = self.check_mem(addr, true, 4)?;
+        self.mem[phys..phys + 4].copy_from_slice(&val.to_be_bytes());
         Ok(())
     }
 
     fn read_mem16(&self, addr: u32) -> Result<u32, TrapCause> {
-        self.check_mem(addr, false, 2)?;
-        let s = &self.mem[addr as usize..addr as usize + 2];
+        let phys = self.check_mem(addr, false, 2)?;
+        let s = &self.mem[phys..phys + 2];
         Ok(u32::from(((s[0] as u32) << 8) | s[1] as u32))
     }
 
     fn write_mem16(&mut self, addr: u32, val: u32) -> Result<(), TrapCause> {
-        self.check_mem(addr, false, 2)?;
+        let phys = self.check_mem(addr, false, 2)?;
         let bytes = val.to_be_bytes();
-        self.mem[addr as usize] = bytes[2];
-        self.mem[addr as usize + 1] = bytes[3];
+        self.mem[phys] = bytes[2];
+        self.mem[phys + 1] = bytes[3];
         Ok(())
     }
 
     fn read_mem8(&self, addr: u32) -> Result<u32, TrapCause> {
-        self.check_mem(addr, false, 1)?;
-        Ok(self.mem[addr as usize] as u32)
+        let phys = self.check_mem(addr, false, 1)?;
+        Ok(self.mem[phys] as u32)
     }
 
     fn write_mem8(&mut self, addr: u32, val: u32) -> Result<(), TrapCause> {
-        self.check_mem(addr, false, 1)?;
-        self.mem[addr as usize] = val as u8;
+        let phys = self.check_mem(addr, false, 1)?;
+        self.mem[phys] = val as u8;
         Ok(())
     }
 
@@ -244,6 +266,7 @@ impl Emu {
         match addr {
             0x00..=0x0F => Ok(self.regs[addr as usize]),
             0x10 => Ok(self.pc),
+            0x11 if !self.is_user() => Ok(self.segs),
             0x12 => Ok(self.sp),
             0x13 if !self.is_user() => Ok(self.tm),
             0x14 if !self.is_user() => Ok(self.status),
@@ -254,10 +277,13 @@ impl Emu {
             0x1C if !self.is_user() => Ok(self.epc),
             0x1D if !self.is_user() => Ok(self.cause),
             0x1E if !self.is_user() => Ok(self.ksp),
+            0x1F if !self.is_user() => Ok(self.sege),
             0x70 if !self.is_user() => Ok(self.read_uart_data()),
             0x71 if !self.is_user() => Ok(self.uart_status()),
             // 受保护寄存器在用户态访问 -> 权限错误
-            0x13 | 0x14 | 0x15 | 0x1C | 0x1D | 0x1E | 0x70 | 0x71 if self.is_user() => {
+            0x11 | 0x13 | 0x14 | 0x15 | 0x1C | 0x1D | 0x1E | 0x1F | 0x70 | 0x71
+                if self.is_user() =>
+            {
                 Err(TrapCause::Permission)
             }
             // 保留地址与指令操作码区作为数据读 -> 非法地址
@@ -270,6 +296,7 @@ impl Emu {
         match addr {
             0x00..=0x0F => self.regs[addr as usize] = val,
             0x10 => self.pc = val,
+            0x11 if !self.is_user() => self.segs = val,
             0x12 => self.sp = val,
             0x13 if !self.is_user() => self.tm = val,
             0x14 if !self.is_user() => self.status = val & 0b11,
@@ -283,9 +310,12 @@ impl Emu {
             0x1C if !self.is_user() => self.epc = val,
             0x1D if !self.is_user() => self.cause = val,
             0x1E if !self.is_user() => self.ksp = val,
+            0x1F if !self.is_user() => self.sege = val,
             0x70 if !self.is_user() => self.write_uart_data(val),
             0x71 if !self.is_user() => { /* UART 状态寄存器写入忽略 */ }
-            0x13 | 0x14 | 0x15 | 0x1C | 0x1D | 0x1E | 0x70 | 0x71 if self.is_user() => {
+            0x11 | 0x13 | 0x14 | 0x15 | 0x1C | 0x1D | 0x1E | 0x1F | 0x70 | 0x71
+                if self.is_user() =>
+            {
                 return Err(TrapCause::Permission);
             }
             _ => return Err(TrapCause::IllegalAddr),
@@ -439,17 +469,13 @@ impl Emu {
     // ── 取指 ──────────────────────────────────────────────────────
 
     fn fetch(&self) -> Result<(OpType, u32, u32), FetchErr> {
-        // 取指权限检查：用户态不能执行内核区。
         if self.is_user() && self.pc < USER_BASE && self.pc >= SPECIAL_TOP {
             return Err(TrapCause::Permission);
-        }
-        if self.pc < SPECIAL_TOP || self.pc as usize + 12 > MEM_SIZE {
-            return Err(TrapCause::IllegalAddr);
         }
         if self.pc % 4 != 0 {
             return Err(TrapCause::IllegalAddr);
         }
-        let base = self.pc as usize;
+        let base = self.translate_mem(self.pc, 12)?;
         let opcode_word = u32::from_be_bytes([
             self.mem[base],
             self.mem[base + 1],
@@ -994,6 +1020,62 @@ mod tests {
         put(&mut e, 0x124, &encode(0x3E, 0x1B, 0));
         e.run();
         assert_eq!(e.regs[2], 0x12345678);
+    }
+
+    #[test]
+    fn user_memory_uses_segment_offset() {
+        let mut e = emu();
+        put(&mut e, 0x00300000, &0x12345678u32.to_be_bytes());
+        e.segs = 0x00300000;
+        e.sege = 0x00300004;
+        put(&mut e, 0x100, &encode(0x40, 0x01, USER_BASE)); // getn 1x 0x00100000
+        put(&mut e, 0x10C, &encode(0x3E, 0x1B, 0));
+        e.run();
+        assert_eq!(e.regs[1], 0x12345678);
+    }
+
+    #[test]
+    fn segment_end_bounds_user_memory() {
+        let mut e = emu();
+        e.trap = 0x200;
+        e.segs = 0x00300000;
+        e.sege = 0x00300002;
+        put(&mut e, 0x100, &encode(0x40, 0x01, USER_BASE)); // 32-bit read crosses SEGE
+        put(&mut e, 0x10C, &encode(0x3E, 0x1B, 0));
+        put(&mut e, 0x200, &encode(0x3E, 0x1B, 4));
+        let code = e.run();
+        assert_eq!(code, 4);
+        assert_eq!(e.cause, 4);
+    }
+
+    #[test]
+    fn kernel_window_bypasses_segment_translation() {
+        let mut e = emu();
+        e.segs = 0x00300000;
+        e.sege = 0x00300004;
+        put(&mut e, 0x00000200, &0xCAFEBABEu32.to_be_bytes());
+        put(&mut e, 0x100, &encode(0x40, 0x01, 0x200));
+        put(&mut e, 0x10C, &encode(0x3E, 0x1B, 0));
+        e.run();
+        assert_eq!(e.regs[1], 0xCAFEBABE);
+    }
+
+    #[test]
+    fn segment_registers_are_kernel_only() {
+        let mut e = emu();
+        e.trap = 0x200;
+        e.segs = 0x00300000;
+        e.sege = 0x00300018;
+        e.pc = USER_BASE;
+        e.status = 0b01;
+        e.sp = 0x100000;
+        e.ksp = 0x100000;
+        put(&mut e, 0x00300000, &encode(0x3D, 0x01, 0x11)); // seta 1x segs
+        put(&mut e, 0x0030000C, &encode(0x3E, 0x1B, 0));
+        put(&mut e, 0x200, &encode(0x3E, 0x1B, 5));
+        let code = e.run();
+        assert_eq!(code, 5);
+        assert_eq!(e.cause, 5);
     }
 
     #[test]

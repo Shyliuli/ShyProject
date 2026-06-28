@@ -48,10 +48,25 @@ This startup can be disabled with the ShyC source extension:
 #![no_main]
 ```
 
-When the main input file starts with `#![no_main]`, the backend does not emit
-the automatic `_start`, does not initialize `sp`, does not call `main`, and does
-not install any runtime startup code. The linked image must provide a symbol
-named `_start`.
+The main input file can also declare resource hints for the final `.sfs`:
+
+```c
+#![mem(10M)]
+#![stack(4K)]
+```
+
+`mem` and `stack` each may appear at most once per translation unit, at the
+start of any source line in the main input file, including before or after
+`#include` lines. The suffixes `k`, `K`, `m`, and `M` are supported. The compiler
+forwards these directives to Shy assembly, the assembler stores them in `.sobj`,
+and the linker sums hints across all input objects. If no object declares a
+memory hint the linked image uses `32M`; if no object declares a stack hint it
+uses `4K`.
+
+When the main input file contains `#![no_main]` at the start of a source line,
+the backend does not emit the automatic `_start`, does not initialize `sp`, does
+not call `main`, and does not install any runtime startup code. The linked image
+must provide a symbol named `_start`.
 
 In `#![no_main]` mode, a C function named `_start` is emitted as a bare entry:
 

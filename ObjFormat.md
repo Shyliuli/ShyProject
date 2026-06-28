@@ -27,9 +27,10 @@ source.asm -> asm -> source.sobj
 
 ## 3. 逻辑结构
 
-object 文件包含三类记录：
+object 文件包含资源提示和三类记录：
 
 ```text
+metadata
 sections
 symbols
 relocations
@@ -39,11 +40,15 @@ relocations
 
 ```rust
 pub struct ObjectFile {
+    pub mem_hint: Option<u32>,
+    pub stack_hint: Option<u32>,
     pub sections: Vec<ObjSection>,
     pub symbols: Vec<ObjSymbol>,
     pub relocations: Vec<ObjRelocation>,
 }
 ```
+
+`mem_hint` 和 `stack_hint` 分别来自源码中的 `#![mem(...)]` 与 `#![stack(...)]`。单个源码文件中每类提示最多声明一次；未声明时对应字段为空。
 
 ## 4. Section
 
@@ -269,7 +274,10 @@ addend  = 12
 3. 按默认规则为每个 section 分配最终地址。
 4. 计算所有 symbol 的最终地址。
 5. 处理所有 relocation。
-6. 把 section bytes 写入 `.sfs` raw 内存镜像对应地址。
+6. 汇总 object 资源提示并写入 `.sfs` 的保留 metadata word。
+7. 把 section bytes 写入 `.sfs` raw 内存镜像对应地址。
+
+多个 object 的同类资源提示相加。若所有输入 object 都没有声明内存提示，则 `.sfs` 写入默认 `32M`；若所有输入 object 都没有声明栈提示，则 `.sfs` 写入默认 `4K`。
 
 ## 11. 可选符号表输出
 
@@ -299,7 +307,11 @@ u32 magic = 0x66CCFF00
 u32 section_start      // first SectionNode file offset, 0 means empty
 u32 symbol_start       // first SymbolNode file offset, 0 means empty
 u32 relocation_start   // first RelocationNode file offset, 0 means empty
+u32 mem_hint           // 0 means absent; otherwise bytes
+u32 stack_hint         // 0 means absent; otherwise bytes
 ```
+
+旧版 16 字节 header 不包含 `mem_hint` 和 `stack_hint`，解析器应把二者视为 absent。新版 writer 固定输出 24 字节 header。由于 `0` 表示 absent，源码中的 `#![mem(0)]` 和 `#![stack(0)]` 非法。
 
 `SectionNode` 保存一个 section 的名字和字节内容：
 
