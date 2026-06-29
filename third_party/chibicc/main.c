@@ -10,6 +10,7 @@ bool opt_fpic;
 bool opt_target_shy;
 bool opt_shy_link_runtime;
 bool opt_shy_no_main;
+bool opt_shy_emit_source_lines;
 char *opt_shy_mem_hint;
 char *opt_shy_stack_hint;
 
@@ -40,7 +41,7 @@ static StringArray input_paths;
 static StringArray tmpfiles;
 
 static void usage(int status) {
-  fprintf(stderr, "chibicc [ -o <path> ] <file>\n");
+  fprintf(stderr, "chibicc [ -o <path> ] [ --shy-emit-source-lines ] <file>\n");
   exit(status);
 }
 
@@ -285,6 +286,11 @@ static void parse_args(int argc, char **argv) {
 
     if (!strcmp(argv[i], "--shy-link-runtime")) {
       opt_shy_link_runtime = true;
+      continue;
+    }
+
+    if (!strcmp(argv[i], "--shy-emit-source-lines")) {
+      opt_shy_emit_source_lines = true;
       continue;
     }
 

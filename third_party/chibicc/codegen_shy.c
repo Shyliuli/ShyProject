@@ -40,6 +40,8 @@ static bool need_i64_cmp;
 static char *argreg[] = {"4x", "5x", "6x", "7x", "8x", "9x", "ax", "bx"};
 static int argreg_len = sizeof(argreg) / sizeof(*argreg);
 static Rename *renames;
+static char *last_source_filename;
+static int last_source_line;
 
 __attribute__((format(printf, 1, 2)))
 static void println(char *fmt, ...) {
@@ -48,6 +50,41 @@ static void println(char *fmt, ...) {
   vfprintf(output_file, fmt, ap);
   va_end(ap);
   fprintf(output_file, "\n");
+}
+
+static void emit_source_line(Token *tok) {
+  if (!opt_shy_emit_source_lines || !tok || !tok->file || !tok->loc)
+    return;
+
+  char *filename = tok->filename ? tok->filename :
+                   tok->file->display_name ? tok->file->display_name :
+                   tok->file->name;
+  int line_no = tok->line_no;
+  if (filename == last_source_filename && line_no == last_source_line)
+    return;
+  last_source_filename = filename;
+  last_source_line = line_no;
+
+  uintptr_t file_start = (uintptr_t)tok->file->contents;
+  uintptr_t file_end = file_start + strlen(tok->file->contents);
+  uintptr_t loc = (uintptr_t)tok->loc;
+  if (loc < file_start || file_end < loc) {
+    println("//source %s:%d", filename ? filename : "-", line_no);
+    return;
+  }
+
+  char *line = tok->loc;
+  while (tok->file->contents < line && line[-1] != '\n')
+    line--;
+
+  char *end = tok->loc;
+  while (*end && *end != '\n')
+    end++;
+  if (line < end && end[-1] == '\r')
+    end--;
+
+  println("//source %s:%d %.*s", filename ? filename : "-", line_no,
+          (int)(end - line), line);
 }
 
 static int count(void) {
@@ -1040,6 +1077,8 @@ static void gen_expr(Node *node) {
 }
 
 static void gen_stmt(Node *node) {
+  emit_source_line(node->tok);
+
   switch (node->kind) {
   case ND_IF: {
     int c = count();
@@ -1306,6 +1345,7 @@ static void emit_text(Obj *prog) {
       continue;
     bool bare_start = opt_shy_no_main && !strcmp(fn->name, "_start");
     println(".section text.%s", fn->name);
+    emit_source_line(fn->tok);
     println(".symbol %s", fn->name);
     current_fn = fn;
 
@@ -1654,6 +1694,8 @@ static void emit_runtime(void) {
 
 void codegen_shy(Obj *prog, FILE *out) {
   output_file = out;
+  last_source_filename = NULL;
+  last_source_line = 0;
   rename_private_symbols(prog);
   assign_lvar_offsets(prog);
 

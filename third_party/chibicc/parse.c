@@ -3972,6 +3972,7 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
 
   register_current_impl_method(orig_name, fn);
 
+  fn->tok = ty->name;
   fn->is_root = !(fn->is_static && fn->is_inline);
 
   if (consume(&tok, tok, ";"))

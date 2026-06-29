@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 static TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -153,6 +153,7 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                     }
                 }
             }
+            "--shy-emit-source-lines" => opts.compile_args.push(arg.clone()),
             _ if is_compile_option(arg) => opts.compile_args.push(arg.clone()),
             _ if arg.starts_with('-') => bail!("unknown option: {arg}"),
             _ => opts.inputs.push(arg.clone()),
@@ -544,6 +545,7 @@ fn print_usage() {
         "usage: shycc [options] file...\n\
          stages: -E, -S, -c, or link to a.sfs by default\n\
          outputs: -o <file>, --sym <file>, -save-temps, -###\n\
+         debug: --shy-emit-source-lines\n\
          inputs: .shyc/.c, .shy, .sobj\n\
          libraries: -llibshy, -lfloat"
     );
