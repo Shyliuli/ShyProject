@@ -115,6 +115,7 @@ cargo run -q -p shycc -- test/testc/main.sobj test/testc/put.sobj -o test/testc/
 
 - `-save-temps`：保留中间产物 `.shy` 和 `.sobj`
 - `-###`：只打印将要执行的命令
+- `--shy-emit-source-lines`：生成 `.shy` 时插入 `//source file:line text` 注释，记录 C 源码行与后续汇编的对应关系，供调试信息工具链使用
 - `-lfloat`：链接内部软浮点运行库
 
 ### 分步执行（不通过 shycc）

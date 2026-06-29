@@ -30,6 +30,37 @@ The compiler emits assembly only for this target. Runtime support is not linked
 implicitly. If compiler helper functions are needed, compile and link the
 runtime source explicitly.
 
+## Source Line Annotations
+
+The host Shy toolchain can optionally preserve a lightweight source-to-assembly
+mapping in generated `.shy` files:
+
+```sh
+cargo run -q -p shycc -- --shy-emit-source-lines -S file.shyc -o file.shy
+third_party/chibicc/chibicc --target=shy --shy-emit-source-lines -S -o file.shy file.shyc
+```
+
+When enabled, the Shy backend emits comment lines before the function symbol and
+before generated code for source statements:
+
+```asm
+.section text.main
+//source file.shyc:5 int main(){
+.symbol main
+//source file.shyc:6   return 0;
+setn 1x 0
+```
+
+The format is:
+
+```text
+//source <file>:<line> <source line text>
+```
+
+These lines are ordinary Shy assembly comments, so existing assembly and linking
+behavior is unchanged. They are intended as input for future debug-info
+generation and emulator debugger support. The option is off by default.
+
 ## Execution Model
 
 This is a freestanding, bare-metal target.
