@@ -50,64 +50,7 @@ seta exit 1x
 .symbol main
 pusha fx
 seta fx sp
-addn sp 144
-setn 3x 72
-adda 3x fx
-putn 3x 0
-setn 3x 76
-adda 3x fx
-putn 3x 0
-setn 3x 80
-adda 3x fx
-putn 3x 0
-setn 3x 84
-adda 3x fx
-putn 3x 0
-setn 3x 88
-adda 3x fx
-putn 3x 0
-setn 3x 92
-adda 3x fx
-putn 3x 0
-setn 3x 96
-adda 3x fx
-putn 3x 0
-setn 3x 100
-adda 3x fx
-putn 3x 0
-setn 3x 104
-adda 3x fx
-putn 3x 0
-setn 3x 108
-adda 3x fx
-putn 3x 0
-setn 3x 112
-adda 3x fx
-putn 3x 0
-setn 3x 116
-adda 3x fx
-putn 3x 0
-setn 3x 120
-adda 3x fx
-putn 3x 0
-setn 3x 124
-adda 3x fx
-putn 3x 0
-setn 3x 128
-adda 3x fx
-putn 3x 0
-setn 3x 132
-adda 3x fx
-putn 3x 0
-setn 3x 136
-adda 3x fx
-putn 3x 0
-setn 1x 0
-setn 2x 0
-setn 1x 72
-adda 1x fx
-setn 2x 0
-pusha 1x
+addn sp 76
 setn 1x .L.shy.__main_shyc._L__10
 setn 2x 0
 setn 2x 0
@@ -124,24 +67,6 @@ popa 4x
 popa 5x
 popa 6x
 calln ____book__new
-setn 1x 4
-adda 1x fx
-setn 2x 0
-popa 3x
-seta 4x 3x
-setn cx 17
-.L.copy.words.1:
-equn cx 0
-jmpn .L.copy.words.done.1
-geta dx 1x
-puta 3x dx
-addn 1x 4
-addn 3x 4
-subn cx 1
-ujmpn .L.copy.words.1
-.L.copy.words.done.1:
-seta 1x 4x
-setn 2x 0
 setn 3x 0
 adda 3x fx
 putn 3x 0
@@ -151,7 +76,7 @@ setn 1x 0
 adda 1x fx
 setn 2x 0
 pusha 1x
-setn 1x 72
+setn 1x 4
 adda 1x fx
 setn 2x 0
 setn 2x 0
@@ -180,7 +105,7 @@ pusha 1x
 popa 4x
 popa 5x
 calln println
-setn 1x 72
+setn 1x 4
 adda 1x fx
 setn 2x 0
 pusha 1x
@@ -250,17 +175,17 @@ ret
 .symbol ____book__new
 pusha fx
 seta fx sp
-addn sp 84
-setn 3x 72
+addn sp 16
+setn 3x 4
 adda 3x fx
 puta 3x 4x
-setn 3x 76
+setn 3x 8
 adda 3x fx
 puta 3x 5x
-setn 3x 80
+setn 3x 12
 adda 3x fx
 puta 3x 6x
-setn 1x 80
+setn 1x 12
 adda 1x fx
 setn 2x 0
 geta 1x 1x
@@ -277,14 +202,14 @@ setn 2x 0
 popa 3x
 smaa 1x 3x
 setn 1x 0
-jmpn .L.true.3
-ujmpn .L.end.3
-.L.true.3:
+jmpn .L.true.2
+ujmpn .L.end.2
+.L.true.2:
 setn 1x 1
-.L.end.3:
+.L.end.2:
 setn 2x 0
 equn 1x 0
-jmpn .L.else.2
+jmpn .L.else.1
 setn 1x .L.shy.__main_shyc._L__2
 setn 2x 0
 setn 2x 0
@@ -302,29 +227,31 @@ setn 2x 0
 pusha 1x
 popa 4x
 calln exit
-ujmpn .L.end.2
-.L.else.2:
-setn 1x 80
+ujmpn .L.end.1
+.L.else.1:
+setn 1x 12
 adda 1x fx
 setn 2x 0
 geta 1x 1x
 setn 2x 0
 setn 2x 0
 pusha 1x
-setn 1x 0
+setn 1x 4
 adda 1x fx
+geta 1x 1x
 setn 2x 0
 setn 2x 0
 pusha 1x
 popa 4x
 popa 5x
 calln strcpy
-setn 1x 0
+setn 1x 4
 adda 1x fx
+geta 1x 1x
 setn 2x 0
 addn 1x 64
 pusha 1x
-setn 1x 76
+setn 1x 8
 adda 1x fx
 setn 2x 0
 geta 1x 1x
@@ -332,28 +259,8 @@ setn 2x 0
 setn 2x 0
 popa 3x
 puta 3x 1x
-setn 1x 0
-adda 1x fx
-setn 2x 0
-seta 4x 1x
-setn dx 72
-adda dx fx
-geta dx dx
-seta 3x dx
-seta 1x 4x
-setn cx 17
-.L.copy.words.4:
-equn cx 0
-jmpn .L.copy.words.done.4
-geta dx 1x
-puta 3x dx
-addn 1x 4
-addn 3x 4
-subn cx 1
-ujmpn .L.copy.words.4
-.L.copy.words.done.4:
 ujmpn .L.return.____book__new
-.L.end.2:
+.L.end.1:
 .L.return.____book__new:
 seta sp fx
 popa fx

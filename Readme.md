@@ -4,6 +4,29 @@ ShyProject是一个面向教学的计算机系统，基于ShyISA。
 - 有关项目工程概要设计，请查看[这里](Design.md)。
 - 有关当前裸机C子集和ABI，请查看[这里](ShyC.md)。
 
+## chibicc_shy 自举实验
+
+`projects/chibicc_shy` 是运行在 Shy 上的 chibicc/ShyC 编译器移植实验。它从
+stdin 读取源码，遇到单独一行 `__SHYCC_END__` 后结束输入，并把 Shy 汇编输出到
+stdout。
+
+阶段命令：
+
+```sh
+make -C projects/chibicc_shy build       # 生成 target/chibicc_shy.sfs/.sym/.shy
+make -C projects/chibicc_shy run         # 用 stdin 测试源生成 target/test.shy
+make -C projects/chibicc_shy build_test  # 汇编链接 target/test.shy 为 target/test.sfs
+make -C projects/chibicc_shy run_test    # 运行 target/test.sfs 并比对输出
+```
+
+完整流水线：
+
+```sh
+make -C projects/chibicc_shy test
+```
+
+更多说明见 [projects/chibicc_shy/README.md](projects/chibicc_shy/README.md)。
+
 ## 运行 testc
 
 `test/testc` 是当前 ShyC 裸机 C 前端的最小联调样例。流程是先把两个

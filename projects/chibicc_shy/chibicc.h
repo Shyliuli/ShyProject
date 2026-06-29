@@ -1,29 +1,46 @@
-#define _POSIX_C_SOURCE 200809L
-#include <assert.h>
 #include <ctype.h>
-#include <errno.h>
-#include <glob.h>
-#include <libgen.h>
 #include <stdarg.h>
-#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdnoreturn.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <time.h>
 #include <unistd.h>
 
 #define MAX(x, y) ((x) < (y) ? (y) : (x))
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
+#ifndef bool
+typedef _Bool bool;
+#define true 1
+#define false 0
+#endif
+
+#define noreturn
+#define assert(x) ((x) ? (void)0 : error("assertion failed: %s", #x))
+
 #ifndef __GNUC__
 # define __attribute__(x)
 #endif
+
+typedef struct ShyFile FILE;
+extern FILE *stdout;
+extern FILE *stderr;
+
+int fputc(int c, FILE *out);
+int fputs(const char *s, FILE *out);
+int fprintf(FILE *out, const char *fmt, ...);
+int vfprintf(FILE *out, const char *fmt, va_list ap);
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *out);
+int fclose(FILE *out);
+
+void *malloc(size_t size);
+void *calloc(size_t nmemb, size_t size);
+void *realloc(void *ptr, size_t size);
+void free(void *ptr);
+char *strdup(const char *s);
+char *strndup(const char *s, size_t n);
+int strncasecmp(const char *s1, const char *s2, size_t n);
 
 typedef struct Type Type;
 typedef struct Node Node;
@@ -76,7 +93,7 @@ struct Token {
   TokenKind kind;   // Token kind
   Token *next;      // Next token
   int64_t val;      // If kind is TK_NUM, its value
-  long double fval; // If kind is TK_NUM, its value
+  double fval;      // If kind is TK_NUM, its value
   char *loc;        // Token location
   int len;          // Token length
   Type *ty;         // Used if TK_NUM or TK_STR
@@ -298,7 +315,7 @@ struct Node {
 
   // Numeric literal
   int64_t val;
-  long double fval;
+  double fval;
 };
 
 Node *new_cast(Node *expr, Type *ty);

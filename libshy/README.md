@@ -15,6 +15,7 @@ Initial scope:
 - `<string.shyh>` / `<string.h>`: memory and string helpers.
 - `<ctype.shyh>` / `<ctype.h>`: ASCII character classification and case conversion.
 - `<stdlib.shyh>` / `<stdlib.h>`: integer conversion and bare-metal termination helpers.
+- `<unistd.shyh>` / `<unistd.h>`: byte-oriented stdin/stdout/stderr `read` and `write`.
 - `<stdint.shyh>` / `<stdint.h>`: fixed-width integer typedefs for the Shy ABI.
 - `<stdtype.shyh>` / `<stdtype.h>`: Rust-style aliases such as `i32`, `u64`, `usize`, and `f32`.
 
@@ -33,6 +34,9 @@ cargo run -q -p shycc -- app.shyc -llibshy -o app.sfs
 to the requested precision instead of doing full libc rounding. `scanf` supports
 integer, string, character, `%n`, and literal `%%` conversions. Floating-point
 input is not implemented yet.
+
+`read` accepts only `STDIN_FILENO`; `write` accepts only `STDOUT_FILENO` and
+`STDERR_FILENO`. Other file descriptors return `-1`.
 
 Code that uses frontend floating-point operations still needs the current helper
 runtime via `-lfloat`.

@@ -1,0 +1,104 @@
+typedef unsigned int size_t;
+typedef int i32;
+
+int putchar(int c) {
+  asm!(c) {
+    "seta 0x70 {c}"
+  };
+  return c;
+}
+
+void exit(int status) {
+  asm!(status) {
+    "seta exit {status}"
+  };
+  for (;;)
+    ;
+}
+
+size_t strlen(const char *s) {
+  size_t n = 0;
+  while (s[n])
+    n = n + 1;
+  return n;
+}
+
+char *strcpy(char *dest, const char *src) {
+  char *p = dest;
+  while (*src) {
+    *p = *src;
+    p = p + 1;
+    src = src + 1;
+  }
+  *p = 0;
+  return dest;
+}
+
+void print_str(const char *s) {
+  while (*s) {
+    putchar(*s);
+    s = s + 1;
+  }
+}
+
+void print_i32(i32 n) {
+  if (n < 0) {
+    putchar('-');
+    n = 0 - n;
+  }
+  if (n >= 10)
+    print_i32(n / 10);
+  putchar('0' + n % 10);
+}
+
+void print_newline(void) {
+  putchar('\n');
+}
+
+void print_line(const char *s) {
+  print_str(s);
+  print_newline();
+}
+
+void print_book_line(const char *name, i32 id) {
+  print_str("[bookid] ");
+  print_str(name);
+  putchar(':');
+  print_i32(id);
+  print_newline();
+}
+
+struct book {
+  char name[64];
+  i32 id;
+};
+
+impl book {
+  book new(i32 id, char *name) {
+    if (strlen(name) > 64) {
+      print_line("error:book name too long");
+      exit(-1);
+    } else {
+      book b;
+      strcpy(b.name, name);
+      b.id = id;
+      return b;
+    }
+  }
+
+  void print(const self *s) {
+    print_book_line(s.name, s.id);
+  }
+
+  void drop(const self *s) {
+    (void *)s;
+  }
+}
+
+i32 main(void) {
+  book b1 = book::new(10, "红星照耀中国");
+  book *b2 = &b1;
+  b2.print();
+  print_line(b2.name);
+  return 0;
+}

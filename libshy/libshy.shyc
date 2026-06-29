@@ -4,6 +4,7 @@
 #include <stdio.shyh>
 #include <stdlib.shyh>
 #include <string.shyh>
+#include <unistd.shyh>
 
 void *memcpy(void *dest, const void *src, size_t n) {
   unsigned char *d = dest;
@@ -115,6 +116,23 @@ char *strrchr(const char *s, int c) {
   }
 }
 
+char *strstr(const char *haystack, const char *needle) {
+  if (!*needle)
+    return (char *)haystack;
+
+  for (; *haystack; haystack = haystack + 1) {
+    const char *h = haystack;
+    const char *n = needle;
+    while (*h && *n && *h == *n) {
+      h = h + 1;
+      n = n + 1;
+    }
+    if (!*n)
+      return (char *)haystack;
+  }
+  return NULL;
+}
+
 int isdigit(int c) { return '0' <= c && c <= '9'; }
 int islower(int c) { return 'a' <= c && c <= 'z'; }
 int isupper(int c) { return 'A' <= c && c <= 'Z'; }
@@ -128,6 +146,7 @@ int isspace(int c) {
          c == '\v';
 }
 int isprint(int c) { return 32 <= c && c < 127; }
+int ispunct(int c) { return isprint(c) && !isalnum(c) && !isspace(c); }
 int tolower(int c) { return isupper(c) ? c + ('a' - 'A') : c; }
 int toupper(int c) { return islower(c) ? c - ('a' - 'A') : c; }
 
@@ -209,6 +228,31 @@ int getchar(void) {
     "inutfa {c}"
   };
   return c;
+}
+
+ssize_t read(int fd, void *buf, size_t count) {
+  if (fd != STDIN_FILENO)
+    return -1;
+
+  unsigned char *p = buf;
+  for (size_t i = 0; i < count; i++) {
+    int c = 0;
+    asm!(c) {
+      "seta {c} 0x70"
+    };
+    p[i] = (unsigned char)c;
+  }
+  return (ssize_t)count;
+}
+
+ssize_t write(int fd, const void *buf, size_t count) {
+  if (fd != STDOUT_FILENO && fd != STDERR_FILENO)
+    return -1;
+
+  const unsigned char *p = buf;
+  for (size_t i = 0; i < count; i++)
+    putchar(p[i]);
+  return (ssize_t)count;
 }
 
 int puts(const char *s) {

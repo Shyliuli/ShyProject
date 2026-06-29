@@ -18,10 +18,7 @@
 //   a bare entry with no prologue.
 // - TLS is explicitly unsupported for now.
 
-typedef struct {
-  int size;
-  bool is64;
-} VInfo;
+typedef int VInfo;
 
 typedef struct Rename Rename;
 struct Rename {
@@ -40,6 +37,8 @@ static bool need_i64_cmp;
 static char *argreg[] = {"4x", "5x", "6x", "7x", "8x", "9x", "ax", "bx"};
 static int argreg_len = sizeof(argreg) / sizeof(*argreg);
 static Rename *renames;
+
+#define println codegen_shy_println
 
 __attribute__((format(printf, 1, 2)))
 static void println(char *fmt, ...) {
@@ -102,8 +101,12 @@ static bool is_64bit(Type *ty) {
 
 static VInfo vinfo(Type *ty) {
   if (ty->kind == TY_ARRAY || ty->kind == TY_FUNC)
-    return (VInfo){4, false};
-  return (VInfo){ty->size, is_64bit(ty)};
+    return 1;
+  return is_64bit(ty) ? 2 : 1;
+}
+
+static bool vinfo_is64(VInfo vi) {
+  return vi == 2;
 }
 
 static bool is_shy_flonum(Type *ty) {
@@ -140,14 +143,14 @@ static void pop32(char *reg) {
 }
 
 static void push_value(VInfo vi) {
-  if (vi.is64)
+  if (vinfo_is64(vi))
     push32("2x");
   push32("1x");
 }
 
 static void pop_value(VInfo vi, char *lo, char *hi) {
   pop32(lo);
-  if (vi.is64)
+  if (vinfo_is64(vi))
     pop32(hi);
 }
 
@@ -363,7 +366,7 @@ static void copy_struct_assignment(Node *node) {
 }
 
 static void cmp_zero(VInfo vi) {
-  if (vi.is64) {
+  if (vinfo_is64(vi)) {
     println("ora 1x 2x");
     println("equn 1x 0");
   } else {
@@ -645,10 +648,10 @@ static void gen_binary(Node *node) {
     }
   }
 
-  if (lvi.is64 || rvi.is64 || vi.is64) {
-    if (!lvi.is64)
+  if (vinfo_is64(lvi) || vinfo_is64(rvi) || vinfo_is64(vi)) {
+    if (!vinfo_is64(lvi))
       println("setn 2x 0");
-    if (!rvi.is64)
+    if (!vinfo_is64(rvi))
       println("setn cx 0");
 
     switch (node->kind) {
@@ -784,14 +787,14 @@ static void gen_binary(Node *node) {
 static int count_arg_slots(Node *args) {
   int n = 0;
   for (Node *arg = args; arg; arg = arg->next)
-    n += vinfo(arg->ty).is64 ? 2 : 1;
+    n += vinfo_is64(vinfo(arg->ty)) ? 2 : 1;
   return n;
 }
 
 static int count_funcall_slots(Node *node) {
   int n = count_arg_slots(node->args);
   if (node->ret_buffer && node->ty->size > 16)
-    n += vinfo(pointer_to(node->ty)).is64 ? 2 : 1;
+    n += vinfo_is64(vinfo(pointer_to(node->ty))) ? 2 : 1;
   return n;
 }
 
@@ -832,7 +835,7 @@ static void gen_expr(Node *node) {
       println("xorn 2x 0x80000000");
       return;
     }
-    if (vinfo(node->ty).is64) {
+    if (vinfo_is64(vinfo(node->ty))) {
       println("nota 1x");
       println("nota 2x");
       println("addn 1x 1");
@@ -896,7 +899,7 @@ static void gen_expr(Node *node) {
         call_helper_64(node->lhs->ty->is_unsigned ? "__shy_u64_to_f32" : "__shy_i64_to_f32");
       else if (is_integer(node->lhs->ty) && node->ty->kind == TY_DOUBLE)
         call_helper_64(node->lhs->ty->is_unsigned ? "__shy_u64_to_f64" : "__shy_i64_to_f64");
-    } else if (vinfo(node->ty).is64 && !vinfo(node->lhs->ty).is64) {
+    } else if (vinfo_is64(vinfo(node->ty)) && !vinfo_is64(vinfo(node->lhs->ty))) {
       if (node->lhs->ty->is_unsigned) {
         println("setn 2x 0");
       } else {
@@ -911,7 +914,7 @@ static void gen_expr(Node *node) {
         println("setn 2x 0");
         println(".L.cast.end.%d:", c);
       }
-    } else if (!vinfo(node->ty).is64) {
+    } else if (!vinfo_is64(vinfo(node->ty))) {
       println("setn 2x 0");
     }
     return;
@@ -932,7 +935,7 @@ static void gen_expr(Node *node) {
   case ND_BITNOT:
     gen_expr(node->lhs);
     println("nota 1x");
-    if (vinfo(node->ty).is64)
+    if (vinfo_is64(vinfo(node->ty)))
       println("nota 2x");
     return;
   case ND_LOGAND: {
@@ -1086,7 +1089,7 @@ static void gen_stmt(Node *node) {
   }
   case ND_SWITCH:
     gen_expr(node->cond);
-    if (vinfo(node->cond->ty).is64)
+    if (vinfo_is64(vinfo(node->cond->ty)))
       println("seta 1x 1x");
 
     for (Node *n = node->case_next; n; n = n->case_next) {
@@ -1321,12 +1324,12 @@ static void emit_text(Obj *prog) {
       if (bare_start)
         error_tok(var->tok, "Shy bare _start cannot have parameters");
       VInfo vi = vinfo(var->ty);
-      if (slot + (vi.is64 ? 2 : 1) > argreg_len)
+      if (slot + (vinfo_is64(vi) ? 2 : 1) > argreg_len)
         error_tok(var->tok ? var->tok : fn->tok,
                   "Shy backend supports at most eight argument slots");
       println("setn 3x %d", var->offset);
       println("adda 3x fx");
-      if (vi.is64) {
+      if (vinfo_is64(vi)) {
         println("puta 3x %s", argreg[slot + 1]);
         println("addn 3x 4");
         println("puta 3x %s", argreg[slot]);
