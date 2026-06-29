@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use shy_isa_lib::file::shyfile::File;
 
-use crate::link::link;
+use crate::link::{link, raii_drop_warnings};
 use crate::obj::ObjectFile;
 
 fn main() -> Result<()> {
@@ -63,6 +63,15 @@ fn main() -> Result<()> {
         let obj = ObjectFile::from_bytes(&buf)
             .with_context(|| format!("failed to parse object file: {input}"))?;
         objects.push(obj);
+    }
+
+    let named_objects: Vec<_> = inputs
+        .iter()
+        .zip(objects.iter())
+        .map(|(name, obj)| (name.as_str(), obj))
+        .collect();
+    for warning in raii_drop_warnings(&named_objects) {
+        eprintln!("warning: {warning}");
     }
 
     // 2. 链接。

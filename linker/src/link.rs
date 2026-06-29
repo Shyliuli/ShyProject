@@ -8,7 +8,7 @@
 //! - 其他 section 名暂不定义默认布局，链接器报错。
 //! - section 起始地址按 4 字节对齐。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 
@@ -27,6 +27,81 @@ pub struct LinkedOutput {
     pub image: Vec<u8>,
     /// symbol 名 -> 最终绝对地址，按地址升序排列。
     pub symbols: Vec<(String, u32)>,
+}
+
+fn parse_shy_method_symbol(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix("____")?;
+    let (ty, method) = rest.split_once("__")?;
+    if ty.is_empty() || method.is_empty() {
+        return None;
+    }
+    Some((ty, method))
+}
+
+/// Emits best-effort RAII diagnostics using only linked symbol names.
+///
+/// This intentionally does not change link success: without type metadata in `.sobj`,
+/// the linker can only infer that an object probably uses `Foo` when it references a
+/// mangled `____Foo__method` symbol.
+pub fn raii_drop_warnings(files: &[(&str, &ObjectFile)]) -> Vec<String> {
+    let mut drop_defs = HashSet::new();
+    for (_, file) in files {
+        for sym in &file.symbols {
+            if let Some((ty, "drop")) = parse_shy_method_symbol(&sym.name) {
+                drop_defs.insert(ty.to_string());
+            }
+        }
+    }
+
+    let mut warnings = Vec::new();
+    for (name, file) in files {
+        let mut method_refs: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut drop_known = HashSet::new();
+
+        for sym in &file.symbols {
+            if let Some((ty, "drop")) = parse_shy_method_symbol(&sym.name) {
+                drop_known.insert(ty.to_string());
+            }
+        }
+
+        for reloc in &file.relocations {
+            let RelocTarget::Symbol(target) = &reloc.target else {
+                continue;
+            };
+            let Some((ty, method)) = parse_shy_method_symbol(target) else {
+                continue;
+            };
+            if method == "drop" {
+                drop_known.insert(ty.to_string());
+            } else {
+                method_refs
+                    .entry(ty.to_string())
+                    .or_default()
+                    .insert(method.to_string());
+            }
+        }
+
+        let mut types: Vec<_> = method_refs.keys().cloned().collect();
+        types.sort();
+        for ty in types {
+            if !drop_defs.contains(&ty) || drop_known.contains(&ty) {
+                continue;
+            }
+
+            let mut methods: Vec<_> = method_refs[&ty].iter().cloned().collect();
+            methods.sort();
+            let refs = methods
+                .into_iter()
+                .map(|method| format!("____{ty}__{method}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            warnings.push(format!(
+                "{name}: references {refs} but not ____{ty}__drop; another object defines ____{ty}__drop. Did you forget `impl {ty} {{ void drop(self *s); }}` in the header?"
+            ));
+        }
+    }
+
+    warnings
 }
 
 fn align4(v: u32) -> u32 {
@@ -499,5 +574,57 @@ mod tests {
         );
         let out = link(vec![s]).unwrap();
         assert!(out.image.len() >= 0x100);
+    }
+
+    #[test]
+    fn warns_when_object_references_method_but_not_known_drop() {
+        let main = obj(
+            vec![sec("text._start", &[0; 12])],
+            vec![sym("text._start", "text._start", 0)],
+            vec![reloc_symbol("text._start", 4, "____Foo__new", 0)],
+        );
+        let foo = obj(
+            vec![sec("text.foo_drop", &[0; 12])],
+            vec![sym("____Foo__drop", "text.foo_drop", 0)],
+            vec![],
+        );
+
+        let warnings = raii_drop_warnings(&[("main.sobj", &main), ("foo.sobj", &foo)]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("main.sobj"));
+        assert!(warnings[0].contains("____Foo__new"));
+        assert!(warnings[0].contains("____Foo__drop"));
+    }
+
+    #[test]
+    fn no_raii_warning_when_object_already_references_drop() {
+        let main = obj(
+            vec![sec("text._start", &[0; 12])],
+            vec![sym("text._start", "text._start", 0)],
+            vec![
+                reloc_symbol("text._start", 4, "____Foo__new", 0),
+                reloc_symbol("text._start", 8, "____Foo__drop", 0),
+            ],
+        );
+        let foo = obj(
+            vec![sec("text.foo_drop", &[0; 12])],
+            vec![sym("____Foo__drop", "text.foo_drop", 0)],
+            vec![],
+        );
+
+        let warnings = raii_drop_warnings(&[("main.sobj", &main), ("foo.sobj", &foo)]);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn no_raii_warning_without_drop_definition() {
+        let main = obj(
+            vec![sec("text._start", &[0; 12])],
+            vec![sym("text._start", "text._start", 0)],
+            vec![reloc_symbol("text._start", 4, "____Foo__new", 0)],
+        );
+
+        let warnings = raii_drop_warnings(&[("main.sobj", &main)]);
+        assert!(warnings.is_empty());
     }
 }

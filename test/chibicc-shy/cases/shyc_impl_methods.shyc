@@ -1,0 +1,32 @@
+struct Acc {
+  int value;
+};
+
+int main(void) {
+  Acc a = Acc::new(5);
+  Acc *p = &a;
+  if (a.get() != 5)
+    return 1;
+  if (p.add(7) != 12)
+    return 2;
+  if (a.value != 12)
+    return 3;
+  return 0;
+}
+
+impl Acc {
+  Acc new(int value) {
+    Acc a;
+    a.value = value;
+    return a;
+  }
+
+  int add(self *s, int n) {
+    s.value = s.value + n;
+    return s.value;
+  }
+
+  int get(const self *s) {
+    return s.value;
+  }
+}

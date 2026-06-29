@@ -1,0 +1,34 @@
+int marker;
+
+int main(void) {
+  marker = 0;
+  {
+    Guard g = Guard::new(11);
+    if (g.value != 11)
+      return 1;
+  }
+  if (marker != 99)
+    return 2;
+
+  int x = 7;
+  asm!(x) {
+    "addn {x} 5"
+  };
+  return x == 12 ? 0 : 3;
+}
+
+struct Guard {
+  int value;
+};
+
+impl Guard {
+  Guard new(int value) {
+    Guard g;
+    g.value = value;
+    return g;
+  }
+
+  void drop(self *s) {
+    marker = 99;
+  }
+}

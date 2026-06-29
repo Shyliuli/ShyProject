@@ -149,6 +149,10 @@ static bool is_shy_flonum(Type *ty) {
   return ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE;
 }
 
+static bool returns_by_sret(Type *ty) {
+  return ty->kind == TY_STRUCT || ty->kind == TY_UNION;
+}
+
 static int stack_size_of(Type *ty) {
   return align_to(MAX(ty->size, 4), 4);
 }
@@ -988,7 +992,7 @@ static int count_arg_slots(Node *args) {
 
 static int count_funcall_slots(Node *node) {
   int n = count_arg_slots(node->args);
-  if (node->ret_buffer && node->ty->size > 16)
+  if (node->ret_buffer && returns_by_sret(node->ty))
     n += vinfo(pointer_to(node->ty)).is64 ? 2 : 1;
   return n;
 }
@@ -1112,7 +1116,49 @@ static void gen_expr(Node *node) {
         println(".L.cast.end.%d:", c);
       }
     } else if (!vinfo(node->ty).is64) {
-      println("setn 2x 0");
+      switch (node->ty->kind) {
+      case TY_BOOL:
+        println("equn 1x 0");
+        {
+          int c = count();
+          println("setn 1x 1");
+          println("jmpn .L.cast.bool.false.%d", c);
+          println("ujmpn .L.cast.bool.end.%d", c);
+          println(".L.cast.bool.false.%d:", c);
+          println("setn 1x 0");
+          println(".L.cast.bool.end.%d:", c);
+          println("setn 2x 0");
+        }
+        break;
+      case TY_CHAR:
+        println("andn 1x 0xff");
+        if (!node->ty->is_unsigned) {
+          int c = count();
+          println("bign 1x 127");
+          println("jmpn .L.cast.sign8.%d", c);
+          println("ujmpn .L.cast.end8.%d", c);
+          println(".L.cast.sign8.%d:", c);
+          println("orn 1x 0xffffff00");
+          println(".L.cast.end8.%d:", c);
+        }
+        println("setn 2x 0");
+        break;
+      case TY_SHORT:
+        println("andn 1x 0xffff");
+        if (!node->ty->is_unsigned) {
+          int c = count();
+          println("bign 1x 32767");
+          println("jmpn .L.cast.sign16.%d", c);
+          println("ujmpn .L.cast.end16.%d", c);
+          println(".L.cast.sign16.%d:", c);
+          println("orn 1x 0xffff0000");
+          println(".L.cast.end16.%d:", c);
+        }
+        println("setn 2x 0");
+        break;
+      default:
+        println("setn 2x 0");
+      }
     }
     return;
   case ND_MEMZERO:
@@ -1188,7 +1234,7 @@ static void gen_expr(Node *node) {
       unsupported(node, "function calls with too many register arguments");
 
     push_args_reverse(node->args);
-    if (node->ret_buffer && node->ty->size > 16) {
+    if (node->ret_buffer && returns_by_sret(node->ty)) {
       VInfo vi = vinfo(pointer_to(node->ty));
       gen_var_addr(node->ret_buffer);
       push_value(vi);
@@ -1327,10 +1373,8 @@ static void gen_stmt(Node *node) {
   case ND_RETURN:
     if (node->lhs) {
       Type *ty = node->lhs->ty;
-      if ((ty->kind == TY_STRUCT || ty->kind == TY_UNION) && ty->size > 16)
+      if (returns_by_sret(ty))
         copy_struct_return_to_hidden_buffer(node->lhs);
-      else if (ty->kind == TY_STRUCT || ty->kind == TY_UNION)
-        unsupported(node, "returning small struct/union values");
       else
         gen_expr(node->lhs);
     }

@@ -1,0 +1,34 @@
+int drops;
+
+struct Guard {
+  int value;
+};
+
+Guard make_guard(int value) {
+  Guard g = Guard::new(value);
+  return g;
+}
+
+int main(void) {
+  drops = 0;
+  {
+    Guard g = make_guard(7);
+    if (drops != 0)
+      return 1;
+    if (g.value != 7)
+      return 2;
+  }
+  return drops == 1 ? 0 : 3;
+}
+
+impl Guard {
+  Guard new(int value) {
+    Guard g;
+    g.value = value;
+    return g;
+  }
+
+  void drop(self *s) {
+    drops = drops + 1;
+  }
+}
