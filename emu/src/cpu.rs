@@ -10,7 +10,7 @@
 //! - 致命状态（未初始化 TRAP 时 trap、trap 栈溢出、空栈 iret）直接 panic。
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Stdout, Write, stdout, stdin};
+use std::io::{stdin, stdout, BufRead, BufReader, Read, Stdout, Write};
 use std::time::{Duration, Instant};
 
 use shy_isa_lib::address::Address;
@@ -18,6 +18,8 @@ use shy_isa_lib::op::OpType;
 
 /// 普通内存大小：16MiB。
 const MEM_SIZE: usize = 0x0100_0000;
+/// 翻译缓存容量。直接映射，条目数保持 2 的幂，便于快速取模。
+const INSTR_CACHE_ENTRIES: usize = 16 * 1024;
 /// 程序入口地址。
 const ENTRY: u32 = 0x0000_0100;
 /// 特殊映射区上界（不含），低于此地址不是普通内存。
@@ -47,6 +49,17 @@ enum Flow {
 /// 取指失败原因。
 type FetchErr = TrapCause;
 
+#[derive(Clone, Copy)]
+struct CachedInstr {
+    pc: u32,
+    user: bool,
+    segs: u32,
+    sege: u32,
+    op: OpType,
+    arg1: u32,
+    arg2: u32,
+}
+
 pub struct Emu {
     regs: [u32; 16],
     pc: u32,
@@ -62,6 +75,7 @@ pub struct Emu {
     ksp: u32,
     sege: u32,
     mem: Vec<u8>,
+    instr_cache: Vec<Option<CachedInstr>>,
     trap_stack: Vec<u32>,
     timer_pending: bool,
     last_tick: Instant,
@@ -90,6 +104,7 @@ impl Emu {
             ksp: 0,
             sege: MEM_SIZE as u32,
             mem: vec![0; MEM_SIZE],
+            instr_cache: vec![None; INSTR_CACHE_ENTRIES],
             trap_stack: Vec::new(),
             timer_pending: false,
             last_tick: Instant::now(),
@@ -111,6 +126,7 @@ impl Emu {
             );
         }
         self.mem[..image.len()].copy_from_slice(image);
+        self.clear_instr_cache();
         Ok(())
     }
 
@@ -154,7 +170,10 @@ impl Emu {
     /// 进入统一 trap 流程。
     fn enter_trap(&mut self, cause: TrapCause, epc: u32) {
         if self.trap < SPECIAL_TOP {
-            panic!("trap occurred with uninitialized TRAP register (TRAP=0x{:08X})", self.trap);
+            panic!(
+                "trap occurred with uninitialized TRAP register (TRAP=0x{:08X})",
+                self.trap
+            );
         }
         if self.trap_stack.len() >= 64 {
             panic!("trap status stack overflow (depth >= 64)");
@@ -195,9 +214,7 @@ impl Emu {
         }
         let (phys, limit) = if self.is_user() {
             (
-                self.segs
-                    .checked_add(addr)
-                    .ok_or(TrapCause::IllegalAddr)?,
+                self.segs.checked_add(addr).ok_or(TrapCause::IllegalAddr)?,
                 self.sege,
             )
         } else {
@@ -217,6 +234,10 @@ impl Emu {
             return Err(TrapCause::IllegalAddr);
         }
         self.translate_mem(addr, size)
+    }
+
+    fn clear_instr_cache(&mut self) {
+        self.instr_cache.fill(None);
     }
 
     fn read_mem32(&self, addr: u32) -> Result<u32, TrapCause> {
@@ -472,10 +493,24 @@ impl Emu {
 
     // ── 取指 ──────────────────────────────────────────────────────
 
-    fn fetch(&self) -> Result<(OpType, u32, u32), FetchErr> {
+    fn fetch(&mut self) -> Result<(OpType, u32, u32), FetchErr> {
         if self.pc % 4 != 0 {
             return Err(TrapCause::IllegalAddr);
         }
+        let cache_idx = ((self.pc / 4) as usize) & (INSTR_CACHE_ENTRIES - 1);
+        let user = self.is_user();
+        let cache_segs = if user { self.segs } else { 0 };
+        let cache_sege = if user { self.sege } else { MEM_SIZE as u32 };
+        if let Some(entry) = self.instr_cache[cache_idx] {
+            if entry.pc == self.pc
+                && entry.user == user
+                && entry.segs == cache_segs
+                && entry.sege == cache_sege
+            {
+                return Ok((entry.op, entry.arg1, entry.arg2));
+            }
+        }
+
         let base = self.translate_mem(self.pc, 12)?;
         let opcode_word = u32::from_be_bytes([
             self.mem[base],
@@ -497,9 +532,18 @@ impl Emu {
         ]);
         let op = match Address::from_u32(opcode_word) {
             Address::Opcode(op) => op,
-            // 0x60-0x6F 保留操作码取指 -> 非法指令；其他值同样非法。
+            // 0x61-0x6F 保留操作码取指 -> 非法指令；其他值同样非法。
             _ => return Err(TrapCause::IllegalInstr),
         };
+        self.instr_cache[cache_idx] = Some(CachedInstr {
+            pc: self.pc,
+            user,
+            segs: cache_segs,
+            sege: cache_sege,
+            op,
+            arg1,
+            arg2,
+        });
         Ok((op, arg1, arg2))
     }
 
@@ -654,24 +698,18 @@ impl Emu {
                     other => return other,
                 }
             }
-            OpType::Pushn => {
-                match self.push(a1, cur) {
-                    Flow::Continue => {}
-                    other => return other,
-                }
-            }
-            OpType::Popa => {
-                match self.pop(cur) {
-                    Ok(v) => w![self.w(a1, v)],
-                    Err(flow) => return flow,
-                }
-            }
-            OpType::Pop => {
-                match self.pop(cur) {
-                    Ok(_) => {}
-                    Err(flow) => return flow,
-                }
-            }
+            OpType::Pushn => match self.push(a1, cur) {
+                Flow::Continue => {}
+                other => return other,
+            },
+            OpType::Popa => match self.pop(cur) {
+                Ok(v) => w![self.w(a1, v)],
+                Err(flow) => return flow,
+            },
+            OpType::Pop => match self.pop(cur) {
+                Ok(_) => {}
+                Err(flow) => return flow,
+            },
             // ── 控制流 ──
             OpType::Jmpa => {
                 if self.rs == 1 {
@@ -806,6 +844,10 @@ impl Emu {
                 w![self.write_mem32(ptr, new)];
                 w![self.w(a2, old)];
             }
+            // ── 缓存维护 ──
+            OpType::Fencei => {
+                self.clear_instr_cache();
+            }
         }
 
         // 非控制流指令：PC 推进 12 字节。
@@ -843,18 +885,9 @@ impl Emu {
     fn dump_state(&self) {
         eprintln!(
             "PC=0x{:08X} SP=0x{:08X} STATUS=0x{:01X} RS={} TM={} EPC=0x{:08X} CAUSE={}",
-            self.pc,
-            self.sp,
-            self.status,
-            self.rs,
-            self.tm,
-            self.epc,
-            self.cause
+            self.pc, self.sp, self.status, self.rs, self.tm, self.epc, self.cause
         );
-        eprintln!(
-            "regs={:08X?}",
-            self.regs
-        );
+        eprintln!("regs={:08X?}", self.regs);
     }
 
     /// 运行直到程序退出，返回退出码。
@@ -927,6 +960,50 @@ mod tests {
 
     fn put(e: &mut Emu, addr: u32, bytes: &[u8]) {
         e.mem[addr as usize..addr as usize + bytes.len()].copy_from_slice(bytes);
+    }
+
+    #[test]
+    fn fetch_cache_requires_fencei_for_modified_instruction() {
+        let mut e = emu();
+        put(&mut e, 0x100, &encode(0x3E, 0x01, 1));
+
+        assert_eq!(e.fetch().unwrap(), (OpType::Setn, 0x01, 1));
+        e.write_mem32(0x108, 2).unwrap();
+        assert_eq!(e.fetch().unwrap(), (OpType::Setn, 0x01, 1));
+
+        e.pc = 0x200;
+        assert!(matches!(e.execute(OpType::Fencei, 0, 0), Flow::Continue));
+        e.pc = 0x100;
+        assert_eq!(e.fetch().unwrap(), (OpType::Setn, 0x01, 2));
+    }
+
+    #[test]
+    fn fetch_cache_separates_user_segments() {
+        let mut e = emu();
+        e.pc = 0x100;
+        e.status = 0b01;
+        e.segs = 0x00300000;
+        e.sege = 0x00301000;
+        put(&mut e, 0x00300100, &encode(0x3E, 0x01, 1));
+        put(&mut e, 0x00400100, &encode(0x3E, 0x01, 2));
+
+        assert_eq!(e.fetch().unwrap(), (OpType::Setn, 0x01, 1));
+        e.segs = 0x00400000;
+        e.sege = 0x00401000;
+        assert_eq!(e.fetch().unwrap(), (OpType::Setn, 0x01, 2));
+    }
+
+    #[test]
+    fn fencei_clears_instruction_translation_cache() {
+        let mut e = emu();
+        put(&mut e, 0x100, &encode(0x60, 0, 0));
+
+        assert_eq!(e.fetch().unwrap(), (OpType::Fencei, 0, 0));
+        assert!(e.instr_cache.iter().any(Option::is_some));
+
+        assert!(matches!(e.execute(OpType::Fencei, 0, 0), Flow::Continue));
+        assert!(e.instr_cache.iter().all(Option::is_none));
+        assert_eq!(e.pc, 0x10C);
     }
 
     #[test]
@@ -1133,12 +1210,8 @@ mod tests {
         put(&mut e, 0x124, &encode(0x3E, 0x1B, 0));
         e.run();
         // 内存被写入新值，2x 得到旧值。
-        let mem_val = u32::from_be_bytes([
-            e.mem[0x2000],
-            e.mem[0x2001],
-            e.mem[0x2002],
-            e.mem[0x2003],
-        ]);
+        let mem_val =
+            u32::from_be_bytes([e.mem[0x2000], e.mem[0x2001], e.mem[0x2002], e.mem[0x2003]]);
         assert_eq!(mem_val, 0x22222222);
         assert_eq!(e.regs[2], 0x11111111);
     }
@@ -1147,8 +1220,7 @@ mod tests {
     fn illegal_instruction_traps() {
         let mut e = emu();
         e.trap = 0x200; // 设置 trap 入口
-        // 0x60 是保留操作码。
-        put(&mut e, 0x100, &encode(0x60, 0, 0));
+        put(&mut e, 0x100, &encode(0x61, 0, 0));
         // trap 处理：setn exit 1
         put(&mut e, 0x200, &encode(0x3E, 0x1B, 1));
         let code = e.run();
@@ -1227,7 +1299,6 @@ mod tests {
         e.status = 0b01; // 用户态
         e.sp = 0x200000; // 用户栈
         e.ksp = 0x100000; // 内核栈
-        // syscall
         put(&mut e, 0x100, &encode(0x54, 0, 0));
         put(&mut e, 0x10C, &encode(0x3E, 0x1B, 0));
         // trap handler: seta 1x sp (读到内核栈), setn exit 0
@@ -1242,7 +1313,7 @@ mod tests {
     #[should_panic(expected = "uninitialized TRAP")]
     fn trap_with_uninitialized_trap_panics() {
         let mut e = emu();
-        put(&mut e, 0x100, &encode(0x60, 0, 0)); // 非法指令
+        put(&mut e, 0x100, &encode(0x61, 0, 0)); // 非法指令
         put(&mut e, 0x10C, &encode(0x3E, 0x1B, 0));
         let _ = e.run();
     }

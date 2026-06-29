@@ -19,7 +19,7 @@ impl Address {
             // ── 特殊寄存器 0x10-0x1F ──
             0x10 => Address::Reg(PC),
             0x11 => Address::Reg(SegmentStart),
-            0x60..=0x6F | 0x72..=0x7F | 0x80..=0xFF => Address::Reserved(addr),
+            0x61..=0x6F | 0x72..=0x7F | 0x80..=0xFF => Address::Reserved(addr),
             0x12 => Address::Reg(SP),
             0x13 => Address::Reg(TM),
             0x14 => Address::Reg(Status),
@@ -107,6 +107,8 @@ impl Address {
             0x5E => Address::Opcode(Wait),
             // ── 原子内存操作 0x5F ──
             0x5F => Address::Opcode(Atoma),
+            // ── 缓存维护 0x60 ──
+            0x60 => Address::Opcode(Fencei),
             // ── UART 0x70-0x71 ──
             0x70 => Address::Reg(UartData),
             0x71 => Address::Reg(UartStatus),
@@ -139,9 +141,17 @@ mod tests {
     }
 
     #[test]
-    fn keeps_0x60_reserved() {
+    fn maps_0x60_to_fencei_opcode() {
         match Address::from_u32(0x60) {
-            Address::Reserved(0x60) => {}
+            Address::Opcode(OpType::Fencei) => {}
+            other => panic!("expected fencei opcode, got {}", other.to_u32()),
+        }
+    }
+
+    #[test]
+    fn keeps_0x61_reserved() {
+        match Address::from_u32(0x61) {
+            Address::Reserved(0x61) => {}
             other => panic!("expected reserved address, got {}", other.to_u32()),
         }
     }

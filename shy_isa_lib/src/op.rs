@@ -76,6 +76,8 @@ pub enum OpType {
     Wait,
     // 原子内存操作 0x5F
     Atoma,
+    // 缓存维护 0x60
+    Fencei,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +166,7 @@ impl OpType {
             "put16n" => OpType::Put16n,
             "wait" => OpType::Wait,
             "atoma" => OpType::Atoma,
+            "fencei" | "fence.i" => OpType::Fencei,
             _ => return Err(ParseOpError::new(s)),
         };
 
@@ -236,6 +239,7 @@ impl OpType {
             OpType::Put16n => 0x5D,
             OpType::Wait => 0x5E,
             OpType::Atoma => 0x5F,
+            OpType::Fencei => 0x60,
         }
     }
 }
@@ -258,11 +262,17 @@ mod tests {
     }
 
     #[test]
+    fn fencei_opcode_is_0x60() {
+        assert_eq!(OpType::Fencei.to_u32(), 0x60);
+    }
+
+    #[test]
     fn parses_opcode_names() {
         assert_eq!(OpType::from_str("addn"), Ok(OpType::Addn));
         assert_eq!(OpType::from_str("CALLN"), Ok(OpType::Calln));
         assert_eq!(OpType::from_str("  ret  "), Ok(OpType::Ret));
         assert_eq!("oututfa".parse::<OpType>(), Ok(OpType::Oututfa));
+        assert_eq!("fence.i".parse::<OpType>(), Ok(OpType::Fencei));
         assert!(OpType::from_str("unknown").is_err());
     }
 }
