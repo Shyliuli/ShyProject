@@ -133,6 +133,8 @@ static void unsupported(Node *node, char *what) {
   error_tok(node->tok, "Shy backend does not support %s yet", what);
 }
 
+static bool node_refs_var(Node *node, Obj *var);
+
 static bool is_64bit(Type *ty) {
   return ty->size == 8;
 }
@@ -159,6 +161,9 @@ static void assign_lvar_offsets(Obj *prog) {
     int off = 0;
     for (Obj *var = fn->locals; var; var = var->next) {
       if (var->is_sret_alias || var->is_elided)
+        continue;
+      if ((var == fn->va_area || var == fn->alloca_bottom) &&
+          !node_refs_var(fn->body, var))
         continue;
       off = align_to(off, MAX(4, var->align));
       var->offset = off;
@@ -219,8 +224,12 @@ static void gen_var_addr(Obj *var) {
       println("setn 2x 0");
       return;
     }
-    println("setn 1x %d", var->offset);
-    println("adda 1x fx");
+    if (var->offset) {
+      println("setn 1x %d", var->offset);
+      println("adda 1x fx");
+    } else {
+      println("seta 1x fx");
+    }
   } else {
     println("setn 1x %s", var->name);
   }
@@ -334,6 +343,51 @@ static void store(Type *ty) {
   default:
     error("Shy backend cannot store scalar of size %d", ty->size);
   }
+}
+
+static void store_to_addr_reg(Type *ty, char *addr) {
+  switch (ty->size) {
+  case 1:
+    println("put8a %s 1x", addr);
+    return;
+  case 2:
+    println("put16a %s 1x", addr);
+    return;
+  case 4:
+    println("puta %s 1x", addr);
+    return;
+  case 8:
+    println("puta %s 2x", addr);
+    println("addn %s 4", addr);
+    println("puta %s 1x", addr);
+    return;
+  default:
+    error("Shy backend cannot store scalar of size %d", ty->size);
+  }
+}
+
+static bool try_gen_simple_assign(Node *node) {
+  if (node->lhs->kind != ND_VAR ||
+      node->lhs->ty->kind == TY_STRUCT || node->lhs->ty->kind == TY_UNION)
+    return false;
+
+  Obj *var = node->lhs->var;
+  if (var->is_sret_alias)
+    return false;
+
+  gen_expr(node->rhs);
+  if (var->is_local) {
+    if (var->offset) {
+      println("setn 3x %d", var->offset);
+      println("adda 3x fx");
+    } else {
+      println("seta 3x fx");
+    }
+  } else {
+    println("setn 3x %s", var->name);
+  }
+  store_to_addr_reg(node->lhs->ty, "3x");
+  return true;
 }
 
 static void copy_bytes(Type *ty) {
@@ -616,7 +670,114 @@ static void gen_64_shr(bool is_unsigned) {
   println(".L.u64.shr.done.%d:", c);
 }
 
+static bool get_imm32(Node *node, uint32_t *val) {
+  if (node->kind == ND_NUM && !is_shy_flonum(node->ty) && !vinfo(node->ty).is64) {
+    *val = (uint32_t)node->val;
+    return true;
+  }
+
+  if (node->kind != ND_CAST || is_shy_flonum(node->ty) || vinfo(node->ty).is64)
+    return false;
+
+  uint32_t inner;
+  if (!get_imm32(node->lhs, &inner))
+    return false;
+
+  switch (node->ty->kind) {
+  case TY_BOOL:
+    *val = inner != 0;
+    return true;
+  case TY_CHAR:
+    *val = node->ty->is_unsigned ? (uint8_t)inner : (uint32_t)(int8_t)inner;
+    return true;
+  case TY_SHORT:
+    *val = node->ty->is_unsigned ? (uint16_t)inner : (uint32_t)(int16_t)inner;
+    return true;
+  default:
+    *val = inner;
+    return true;
+  }
+}
+
+static bool try_gen_binary_imm(Node *node) {
+  VInfo lvi = vinfo(node->lhs->ty);
+  VInfo rvi = vinfo(node->rhs->ty);
+  VInfo vi = vinfo(node->ty);
+  uint32_t imm;
+  if (is_shy_flonum(node->lhs->ty) || is_shy_flonum(node->rhs->ty) ||
+      lvi.is64 || rvi.is64 || vi.is64 || !get_imm32(node->rhs, &imm))
+    return false;
+
+  gen_expr(node->lhs);
+
+  switch (node->kind) {
+  case ND_ADD:
+    println("addn 1x %u", imm);
+    return true;
+  case ND_SUB:
+    println("subn 1x %u", imm);
+    return true;
+  case ND_MUL:
+    println("muln 1x %u", imm);
+    return true;
+  case ND_DIV:
+    println("divn 1x %u", imm);
+    return true;
+  case ND_MOD:
+    println("seta dx 1x");
+    println("divn 1x %u", imm);
+    println("muln 1x %u", imm);
+    println("suba dx 1x");
+    println("seta 1x dx");
+    return true;
+  case ND_BITAND:
+    println("andn 1x %u", imm);
+    return true;
+  case ND_BITOR:
+    println("orn 1x %u", imm);
+    return true;
+  case ND_BITXOR:
+    println("xorn 1x %u", imm);
+    return true;
+  case ND_EQ:
+    println("equn 1x %u", imm);
+    set_bool_from_rs();
+    return true;
+  case ND_NE: {
+    int c = count();
+    println("equn 1x %u", imm);
+    println("setn 1x 1");
+    println("jmpn .L.ne.false.%d", c);
+    println("ujmpn .L.ne.end.%d", c);
+    println(".L.ne.false.%d:", c);
+    println("setn 1x 0");
+    println(".L.ne.end.%d:", c);
+    println("setn 2x 0");
+    return true;
+  }
+  case ND_LT:
+    println("sman 1x %u", imm);
+    set_bool_from_rs();
+    return true;
+  case ND_LE:
+    println("smaequn 1x %u", imm);
+    set_bool_from_rs();
+    return true;
+  case ND_SHL:
+    println("lsn 1x %u", imm);
+    return true;
+  case ND_SHR:
+    println("rsn 1x %u", imm);
+    return true;
+  default:
+    return false;
+  }
+}
+
 static void gen_binary(Node *node) {
+  if (try_gen_binary_imm(node))
+    return;
+
   VInfo lvi = vinfo(node->lhs->ty);
   VInfo rvi = vinfo(node->rhs->ty);
   VInfo vi = vinfo(node->ty);
@@ -909,6 +1070,8 @@ static void gen_expr(Node *node) {
       copy_struct_assignment(node);
       return;
     }
+    if (try_gen_simple_assign(node))
+      return;
     gen_addr(node->lhs);
     push32("1x");
     gen_expr(node->rhs);
@@ -1337,6 +1500,23 @@ static void emit_start(Obj *prog) {
   println("seta exit 1x");
 }
 
+static bool node_refs_var(Node *node, Obj *var) {
+  for (; node; node = node->next) {
+    if (node->kind == ND_VAR && node->var == var)
+      return true;
+
+    if (node_refs_var(node->lhs, var) || node_refs_var(node->rhs, var) ||
+        node_refs_var(node->cond, var) || node_refs_var(node->then, var) ||
+        node_refs_var(node->els, var) || node_refs_var(node->init, var) ||
+        node_refs_var(node->inc, var) || node_refs_var(node->body, var) ||
+        node_refs_var(node->args, var) || node_refs_var(node->cas_addr, var) ||
+        node_refs_var(node->cas_old, var) || node_refs_var(node->cas_new, var) ||
+        node_refs_var(node->atomic_expr, var))
+      return true;
+  }
+  return false;
+}
+
 static void emit_text(Obj *prog) {
   emit_start(prog);
 
@@ -1376,7 +1556,7 @@ static void emit_text(Obj *prog) {
       }
     }
 
-    if (fn->va_area && !bare_start) {
+    if (fn->va_area && !bare_start && node_refs_var(fn->body, fn->va_area)) {
       int vararg_slot = 0;
       for (int i = slot; i < argreg_len; i++) {
         println("setn 3x %d", fn->va_area->offset + vararg_slot * 4);
