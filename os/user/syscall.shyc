@@ -1,0 +1,58 @@
+#![no_main]
+
+int syscall3(int nr, int a0, int a1, int a2) {
+  int ret = 0;
+  asm!(nr, a0, a1, a2, ret) {
+    "seta 0x {nr}\n"
+    "seta 1x {a0}\n"
+    "seta 2x {a1}\n"
+    "seta 3x {a2}\n"
+    "syscall\n"
+    "seta {ret} 0x"
+  };
+  return ret;
+}
+
+int write(int fd, const void *buf, unsigned int len) {
+  return syscall3(1, fd, (int)buf, (int)len);
+}
+
+int read(int fd, void *buf, unsigned int len) {
+  return syscall3(2, fd, (int)buf, (int)len);
+}
+
+int yield(void) {
+  return syscall3(3, 0, 0, 0);
+}
+
+int getpid(void) {
+  return syscall3(4, 0, 0, 0);
+}
+
+int exec(const char *name, unsigned int len) {
+  return syscall3(5, (int)name, (int)len, 0);
+}
+
+int ps(char *buf, unsigned int len) {
+  return syscall3(6, (int)buf, (int)len, 0);
+}
+
+int kill(int pid) {
+  return syscall3(7, pid, 0, 0);
+}
+
+int waitpid(int pid) {
+  return syscall3(8, pid, 0, 0);
+}
+
+int open(const char *name, unsigned int len) {
+  return syscall3(9, (int)name, (int)len, 0);
+}
+
+int close(int fd) {
+  return syscall3(10, fd, 0, 0);
+}
+
+int fork(void) {
+  return syscall3(11, 0, 0, 0);
+}

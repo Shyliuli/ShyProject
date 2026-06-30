@@ -1,0 +1,49 @@
+#![no_main]
+
+#include "types.shyh"
+
+Console console;
+
+impl Console {
+  void putc(self *c, int ch) {
+    asm!(ch) {
+      "seta 0x70 {ch}"
+    };
+  }
+
+  void puts(self *c, const char *s) {
+    while (*s) {
+      c.putc(*s);
+      s = s + 1;
+    }
+  }
+
+  void put_hex(self *c, unsigned int v) {
+    const char *digits = "0123456789ABCDEF";
+    for (int n = 0; n < 8; n++) {
+      int shift = 28 - n * 4;
+      c.putc(digits[(v >> shift) & 15]);
+    }
+  }
+
+  void exit(self *c, unsigned int code) {
+    asm!(code) {
+      "seta exit {code}"
+    };
+    for (;;)
+      ;
+  }
+
+  void fault(self *c, unsigned int cause, unsigned int epc) {
+    c.puts("FAULT cause=");
+    c.put_hex(cause);
+    c.puts(" epc=");
+    c.put_hex(epc);
+    c.putc('\n');
+    c.exit(1);
+  }
+}
+
+void shyos_fault(unsigned int cause, unsigned int epc) {
+  console.fault(cause, epc);
+}

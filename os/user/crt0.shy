@@ -1,0 +1,14 @@
+___DEFINE___
+
+___DATA___
+
+___CODE___
+
+.section text._start
+.symbol _start
+calln main
+seta 1x 1x
+setn 0x 0
+syscall
+halt:
+ujmpn halt

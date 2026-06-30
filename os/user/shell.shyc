@@ -1,0 +1,212 @@
+#![no_main]
+
+int write(int fd, const void *buf, unsigned int len);
+int read(int fd, void *buf, unsigned int len);
+int yield(void);
+int exec(const char *name, unsigned int len);
+int ps(char *buf, unsigned int len);
+int kill(int pid);
+int waitpid(int pid);
+int open(const char *name, unsigned int len);
+int close(int fd);
+int fork(void);
+void sys_exit(int code);
+
+typedef struct Shell {
+  char line[64];
+} Shell;
+
+static void puts(const char *s, unsigned int len) {
+  write(1, s, len);
+}
+
+static int streq(const char *a, const char *b) {
+  int i = 0;
+  while (a[i] && b[i]) {
+    if (a[i] != b[i])
+      return 0;
+    i = i + 1;
+  }
+  return a[i] == b[i];
+}
+
+static int starts_with(const char *s, const char *prefix) {
+  int i = 0;
+  while (prefix[i]) {
+    if (s[i] != prefix[i])
+      return 0;
+    i = i + 1;
+  }
+  return 1;
+}
+
+static int strlen2(const char *s) {
+  int n = 0;
+  while (s[n])
+    n = n + 1;
+  return n;
+}
+
+static int parse_pid(const char *s) {
+  int n = 0;
+  int seen = 0;
+  for (int i = 0; s[i]; i++) {
+    if ('0' <= s[i] && s[i] <= '9') {
+      n = n * 10 + (s[i] - '0');
+      seen = 1;
+    } else if (s[i] != ' ') {
+      return -1;
+    }
+  }
+  return seen ? n : -1;
+}
+
+static void put_int(int n) {
+  if (n < 0) {
+    puts("-", 1);
+    n = 0 - n;
+  }
+  if (n >= 10)
+    put_int(n / 10);
+  char c = (char)('0' + (n % 10));
+  write(1, &c, 1);
+}
+
+impl Shell {
+  void read_line(self *sh) {
+    int n = 0;
+    for (;;) {
+      char c = 0;
+      read(0, &c, 1);
+      if (c == '\r')
+        continue;
+      if (c == '\n') {
+        puts("\n", 1);
+        break;
+      }
+      if (n + 1 < 64) {
+        sh.line[n] = c;
+        n = n + 1;
+        write(1, &c, 1);
+      }
+    }
+    sh.line[n] = 0;
+  }
+
+  void help(self *sh) {
+    puts("commands: help ls cat <name> ps run <name> kill <pid> wait <pid>\n",
+         65);
+    puts("programs: hello ticker\n", 23);
+  }
+
+  void ps_cmd(self *sh) {
+    char out[256];
+    int n = ps(out, 255);
+    if (n < 0) {
+      puts("ps failed\n", 10);
+      return;
+    }
+    write(1, out, (unsigned int)n);
+  }
+
+  void run_cmd(self *sh, char *name) {
+    int len = strlen2(name);
+    int pid = fork();
+    if (pid < 0) {
+      puts("run failed\n", 11);
+      return;
+    }
+    if (pid == 0) {
+      if (exec(name, (unsigned int)len) < 0) {
+        puts("exec failed\n", 12);
+        sys_exit(1);
+      }
+      sys_exit(0);
+    }
+    puts("pid ", 4);
+    put_int(pid);
+    puts("\n", 1);
+    waitpid(pid);
+  }
+
+  void dump_file(self *sh, const char *name, int len) {
+    int fd = open(name, (unsigned int)len);
+    if (fd < 0) {
+      puts("open failed\n", 12);
+      return;
+    }
+
+    char buf[64];
+    for (;;) {
+      int n = read(fd, buf, 64);
+      if (n < 0) {
+        puts("read failed\n", 12);
+        close(fd);
+        return;
+      }
+      if (n == 0)
+        break;
+      write(1, buf, (unsigned int)n);
+    }
+    close(fd);
+  }
+
+  void ls(self *sh) {
+    sh.dump_file(".", 1);
+  }
+
+  void cat(self *sh, char *name) {
+    sh.dump_file(name, strlen2(name));
+  }
+
+  void kill_cmd(self *sh, char *arg) {
+    int pid = parse_pid(arg);
+    if (pid < 0 || kill(pid) < 0) {
+      puts("kill failed\n", 12);
+      return;
+    }
+    puts("killed\n", 7);
+  }
+
+  void wait_cmd(self *sh, char *arg) {
+    int pid = parse_pid(arg);
+    if (pid < 0 || waitpid(pid) < 0) {
+      puts("wait failed\n", 12);
+      return;
+    }
+    puts("wait done\n", 10);
+  }
+
+  void run(self *sh) {
+    puts("ShyOS OO shell\n", 15);
+    for (;;) {
+      puts("shy$ ", 5);
+      sh.read_line();
+      if (streq(sh.line, "help"))
+        sh.help();
+      else if (streq(sh.line, "ls"))
+        sh.ls();
+      else if (starts_with(sh.line, "cat "))
+        sh.cat(sh.line + 4);
+      else if (streq(sh.line, "ps"))
+        sh.ps_cmd();
+      else if (starts_with(sh.line, "run "))
+        sh.run_cmd(sh.line + 4);
+      else if (starts_with(sh.line, "kill "))
+        sh.kill_cmd(sh.line + 5);
+      else if (starts_with(sh.line, "wait "))
+        sh.wait_cmd(sh.line + 5);
+      else if (streq(sh.line, ""))
+        ;
+      else
+        puts("unknown command\n", 16);
+      yield();
+    }
+  }
+}
+
+int main(void) {
+  Shell sh;
+  sh.run();
+  return 0;
+}

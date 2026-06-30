@@ -1,0 +1,143 @@
+#![no_main]
+
+#include "types.shyh"
+
+extern unsigned char rd_shell_name[];
+extern unsigned char rd_shell_data[];
+extern unsigned char rd_shell_data_end[];
+extern unsigned char rd_hello_name[];
+extern unsigned char rd_hello_data[];
+extern unsigned char rd_hello_data_end[];
+extern unsigned char rd_ticker_name[];
+extern unsigned char rd_ticker_data[];
+extern unsigned char rd_ticker_data_end[];
+extern unsigned char rd_readme_txt_name[];
+extern unsigned char rd_readme_txt_data[];
+extern unsigned char rd_readme_txt_data_end[];
+extern unsigned char rd_hello_txt_name[];
+extern unsigned char rd_hello_txt_data[];
+extern unsigned char rd_hello_txt_data_end[];
+extern unsigned char rd_dot_name[];
+extern unsigned char rd_dot_data[];
+extern unsigned char rd_dot_data_end[];
+
+RamDisk ramdisk;
+
+static unsigned int ptr_len(unsigned char *start, unsigned char *end) {
+  return (unsigned int)(end - start);
+}
+
+static int streq_len(const char *a, const char *b, int len) {
+  int i = 0;
+  while (i < len) {
+    if (!b[i] || a[i] != b[i])
+      return 0;
+    i = i + 1;
+  }
+  return b[i] == 0;
+}
+
+static int streq(const char *a, const char *b) {
+  int i = 0;
+  while (a[i] && b[i]) {
+    if (a[i] != b[i])
+      return 0;
+    i = i + 1;
+  }
+  return a[i] == b[i];
+}
+
+impl RamDisk {
+  void init(self *rd) {
+    rd.files[0].name = (const char *)rd_shell_name;
+    rd.files[0].data = rd_shell_data;
+    rd.files[0].end = rd_shell_data_end;
+    rd.files[0].executable = 1;
+
+    rd.files[1].name = (const char *)rd_hello_name;
+    rd.files[1].data = rd_hello_data;
+    rd.files[1].end = rd_hello_data_end;
+    rd.files[1].executable = 1;
+
+    rd.files[2].name = (const char *)rd_ticker_name;
+    rd.files[2].data = rd_ticker_data;
+    rd.files[2].end = rd_ticker_data_end;
+    rd.files[2].executable = 1;
+
+    rd.files[3].name = (const char *)rd_readme_txt_name;
+    rd.files[3].data = rd_readme_txt_data;
+    rd.files[3].end = rd_readme_txt_data_end;
+    rd.files[3].executable = 0;
+
+    rd.files[4].name = (const char *)rd_hello_txt_name;
+    rd.files[4].data = rd_hello_txt_data;
+    rd.files[4].end = rd_hello_txt_data_end;
+    rd.files[4].executable = 0;
+
+    rd.files[5].name = (const char *)rd_dot_name;
+    rd.files[5].data = rd_dot_data;
+    rd.files[5].end = rd_dot_data_end;
+    rd.files[5].executable = 0;
+  }
+
+  int lookup(self *rd, const char *name, int len) {
+    for (int i = 0; i < RAMDISK_NFILE; i++)
+      if (streq_len(name, rd.files[i].name, len))
+        return i;
+    return -1;
+  }
+
+  const char *file_name(self *rd, int idx) {
+    if (idx < 0 || idx >= RAMDISK_NFILE)
+      return 0;
+    return rd.files[idx].name;
+  }
+
+  unsigned int file_len(self *rd, int idx) {
+    if (idx < 0 || idx >= RAMDISK_NFILE)
+      return 0;
+    return ptr_len(rd.files[idx].data, rd.files[idx].end);
+  }
+
+  int read(self *rd, int idx, unsigned int off, unsigned char *dst,
+           unsigned int len) {
+    if (idx < 0 || idx >= RAMDISK_NFILE)
+      return -1;
+
+    unsigned int file_len = rd.file_len(idx);
+    if (off >= file_len)
+      return 0;
+    if (len > file_len - off)
+      len = file_len - off;
+
+    unsigned char *src = rd.files[idx].data + off;
+    for (unsigned int i = 0; i < len; i++)
+      dst[i] = src[i];
+    return (int)len;
+  }
+
+  const char *program_name(self *rd, const char *name, int len) {
+    int idx = rd.lookup(name, len);
+    if (idx < 0 || !rd.files[idx].executable)
+      return 0;
+    return rd.files[idx].name;
+  }
+
+  int load_program(self *rd, const char *name, unsigned int segs) {
+    int idx = -1;
+    for (int i = 0; i < RAMDISK_NFILE; i++) {
+      if (streq(name, rd.files[i].name)) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0 || !rd.files[idx].executable)
+      return -1;
+
+    unsigned char *dst = (unsigned char *)segs;
+    unsigned int len = rd.file_len(idx);
+    for (unsigned int i = 0; i < len; i++)
+      dst[i] = rd.files[idx].data[i];
+    return 0;
+  }
+}

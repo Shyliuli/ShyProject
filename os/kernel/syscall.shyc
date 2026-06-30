@@ -1,0 +1,193 @@
+#![no_main]
+
+#include "types.shyh"
+
+static int read_uart(void) {
+  int c = 0;
+  asm!(c) {
+    "seta {c} 0x70"
+  };
+  return c;
+}
+
+static int user_range_ok(unsigned int ptr, unsigned int len) {
+  if (!current)
+    return 0;
+
+  unsigned int user_base = current.user_base();
+  unsigned int user_end = current.user_end();
+
+  if (ptr < 0x100)
+    return 0;
+  if (ptr > user_end - user_base)
+    return 0;
+
+  unsigned int paddr = user_base + ptr;
+  if (paddr > user_end)
+    return 0;
+  if (len > user_end - paddr)
+    return 0;
+  return 1;
+}
+
+static unsigned int user_paddr(unsigned int ptr) {
+  return current.user_base() + ptr;
+}
+
+static int sys_write(unsigned int fd, unsigned int ptr, unsigned int len) {
+  if (!current || !user_range_ok(ptr, len))
+    return -1;
+
+  unsigned char *p = (unsigned char *)user_paddr(ptr);
+  return current.write((int)fd, p, len);
+}
+
+static int sys_read(unsigned int fd, unsigned int ptr, unsigned int len) {
+  if (!current || !user_range_ok(ptr, len))
+    return -1;
+
+  unsigned char *p = (unsigned char *)user_paddr(ptr);
+  if (fd == 0) {
+    for (unsigned int i = 0; i < len; i++)
+      p[i] = (unsigned char)read_uart();
+    return (int)len;
+  }
+  return current.read((int)fd, p, len);
+}
+
+static int sys_ps(unsigned int ptr, unsigned int len) {
+  if (len == 0)
+    return 0;
+  if (!user_range_ok(ptr, len))
+    return -1;
+
+  unsigned char *p = (unsigned char *)user_paddr(ptr);
+  return ptable.format_ps(p, (int)len);
+}
+
+static int sys_open(unsigned int ptr, unsigned int len) {
+  if (!current || len == 0 || len > 31)
+    return -1;
+  if (!user_range_ok(ptr, len))
+    return -1;
+
+  char name[32];
+  unsigned char *p = (unsigned char *)user_paddr(ptr);
+  for (unsigned int i = 0; i < len; i++)
+    name[i] = (char)p[i];
+  name[len] = 0;
+
+  int file = ramdisk.lookup(name, (int)len);
+  if (file < 0)
+    return -1;
+  return current.open(file);
+}
+
+static int sys_exec(unsigned int ptr, unsigned int len, TrapFrame *tf) {
+  if (!current || len == 0 || len > 15)
+    return -1;
+  if (!user_range_ok(ptr, len))
+    return -1;
+
+  char name[16];
+  unsigned char *p = (unsigned char *)user_paddr(ptr);
+  for (unsigned int i = 0; i < len; i++)
+    name[i] = (char)p[i];
+  name[len] = 0;
+
+  return current.exec(name, (int)len, tf);
+}
+
+void shyos_trap_dispatch(TrapFrame *tf) {
+  unsigned int cause = tf->cause;
+  unsigned int epc = tf->epc;
+
+  if (cause == 2) {
+    ptable.schedule(tf);
+    return;
+  }
+
+  if (cause != 1) {
+    console.puts("FAULT pid=");
+    console.put_hex((unsigned int)(current ? current.getpid() : -1));
+    console.puts(" cause=");
+    console.put_hex(cause);
+    console.puts(" epc=");
+    console.put_hex(epc);
+    console.putc('\n');
+    if (current)
+      current.exit();
+    ptable.schedule(tf);
+    return;
+  }
+
+  unsigned int nr = tf->gpr[0];
+  unsigned int a0 = tf->gpr[1];
+  unsigned int a1 = tf->gpr[2];
+  unsigned int a2 = tf->gpr[3];
+
+  if (nr == 0) {
+    if (current)
+      current.exit();
+    ptable.schedule(tf);
+    return;
+  }
+  if (nr == 1) {
+    tf->gpr[0] = (unsigned int)sys_write(a0, a1, a2);
+    return;
+  }
+  if (nr == 2) {
+    tf->gpr[0] = (unsigned int)sys_read(a0, a1, a2);
+    return;
+  }
+  if (nr == 3) {
+    tf->gpr[0] = 0;
+    ptable.schedule(tf);
+    return;
+  }
+  if (nr == 4) {
+    tf->gpr[0] = (unsigned int)(current ? current.getpid() : -1);
+    return;
+  }
+  if (nr == 5) {
+    int r = sys_exec(a0, a1, tf);
+    if (r < 0)
+      tf->gpr[0] = (unsigned int)-1;
+    return;
+  }
+  if (nr == 6) {
+    tf->gpr[0] = (unsigned int)sys_ps(a0, a1);
+    return;
+  }
+  if (nr == 7) {
+    int pid = (int)a0;
+    Proc *p = ptable.find(pid);
+    int r = p ? p.kill() : -1;
+    tf->gpr[0] = (unsigned int)r;
+    if (r == 0 && current && pid == current.getpid()) {
+      ptable.schedule(tf);
+      return;
+    }
+    return;
+  }
+  if (nr == 8) {
+    int r = current ? current.waitpid((int)a0, tf) : -1;
+    if (r < 0)
+      tf->gpr[0] = (unsigned int)-1;
+    return;
+  }
+  if (nr == 9) {
+    tf->gpr[0] = (unsigned int)sys_open(a0, a1);
+    return;
+  }
+  if (nr == 10) {
+    tf->gpr[0] = (unsigned int)(current ? current.close((int)a0) : -1);
+    return;
+  }
+  if (nr == 11) {
+    tf->gpr[0] = (unsigned int)(current ? current.fork(tf) : -1);
+    return;
+  }
+
+  tf->gpr[0] = (unsigned int)-1;
+}

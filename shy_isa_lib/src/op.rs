@@ -78,6 +78,8 @@ pub enum OpType {
     Atoma,
     // 缓存维护 0x60
     Fencei,
+    // 进入用户态 0x61
+    EnterUser,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +169,7 @@ impl OpType {
             "wait" => OpType::Wait,
             "atoma" => OpType::Atoma,
             "fencei" | "fence.i" => OpType::Fencei,
+            "enteruser" => OpType::EnterUser,
             _ => return Err(ParseOpError::new(s)),
         };
 
@@ -240,6 +243,7 @@ impl OpType {
             OpType::Wait => 0x5E,
             OpType::Atoma => 0x5F,
             OpType::Fencei => 0x60,
+            OpType::EnterUser => 0x61,
         }
     }
 }
@@ -267,12 +271,18 @@ mod tests {
     }
 
     #[test]
+    fn enteruser_opcode_is_0x61() {
+        assert_eq!(OpType::EnterUser.to_u32(), 0x61);
+    }
+
+    #[test]
     fn parses_opcode_names() {
         assert_eq!(OpType::from_str("addn"), Ok(OpType::Addn));
         assert_eq!(OpType::from_str("CALLN"), Ok(OpType::Calln));
         assert_eq!(OpType::from_str("  ret  "), Ok(OpType::Ret));
         assert_eq!("oututfa".parse::<OpType>(), Ok(OpType::Oututfa));
         assert_eq!("fence.i".parse::<OpType>(), Ok(OpType::Fencei));
+        assert_eq!("enteruser".parse::<OpType>(), Ok(OpType::EnterUser));
         assert!(OpType::from_str("unknown").is_err());
     }
 }

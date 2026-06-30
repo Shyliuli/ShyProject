@@ -1,0 +1,52 @@
+___DEFINE___
+
+___DATA___
+
+.section data.trap_frame
+.symbol trap_frame
+trap_frame(0) {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+
+___CODE___
+
+.section text.trap_entry
+.symbol trap_entry
+seta trap_frame(0) 0x
+seta trap_frame(4) 1x
+seta trap_frame(8) 2x
+seta trap_frame(12) 3x
+seta trap_frame(16) 4x
+seta trap_frame(20) 5x
+seta trap_frame(24) 6x
+seta trap_frame(28) 7x
+seta trap_frame(32) 8x
+seta trap_frame(36) 9x
+seta trap_frame(40) ax
+seta trap_frame(44) bx
+seta trap_frame(48) cx
+seta trap_frame(52) dx
+seta trap_frame(56) ex
+seta trap_frame(60) fx
+seta trap_frame(64) epc
+seta trap_frame(68) cause
+seta trap_frame(72) ksp
+seta trap_frame(76) rs
+setn 4x trap_frame
+calln shyos_trap_dispatch
+seta 0x trap_frame(0)
+seta 1x trap_frame(4)
+seta 2x trap_frame(8)
+seta 3x trap_frame(12)
+seta 4x trap_frame(16)
+seta 5x trap_frame(20)
+seta 6x trap_frame(24)
+seta 7x trap_frame(28)
+seta 8x trap_frame(32)
+seta 9x trap_frame(36)
+seta ax trap_frame(40)
+seta bx trap_frame(44)
+seta cx trap_frame(48)
+seta dx trap_frame(52)
+seta ex trap_frame(56)
+seta fx trap_frame(60)
+seta rs trap_frame(76)
+iret

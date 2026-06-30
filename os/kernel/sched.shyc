@@ -1,0 +1,437 @@
+#![no_main]
+
+#include "types.shyh"
+
+ProcTable ptable;
+Proc *current;
+Cpu cpu;
+
+static void clear_user_region(unsigned int paddr, unsigned int len) {
+  unsigned char *p = (unsigned char *)paddr;
+  for (unsigned int i = 0; i < len; i++)
+    p[i] = 0;
+}
+
+static void copy_user_segment(Proc *dst, Proc *src) {
+  unsigned char *d = (unsigned char *)dst->segs;
+  unsigned char *s = (unsigned char *)src->segs;
+  unsigned int len = dst->sege - dst->segs;
+  for (unsigned int i = 0; i < len; i++)
+    d[i] = s[i];
+}
+
+static unsigned int slot_segs(int pid) {
+  if (pid == 0)
+    return 0x00400000;
+  if (pid == 1)
+    return 0x00600000;
+  if (pid == 2)
+    return 0x00800000;
+  return 0x00A00000;
+}
+
+static unsigned int slot_sege(int pid) {
+  if (pid == 0)
+    return 0x00600000;
+  if (pid == 1)
+    return 0x00800000;
+  if (pid == 2)
+    return 0x00A00000;
+  return 0x00C00000;
+}
+
+static int append_ch(unsigned char *buf, int cap, int pos, int ch) {
+  if (pos < cap)
+    buf[pos] = (unsigned char)ch;
+  return pos + 1;
+}
+
+static int append_str(unsigned char *buf, int cap, int pos, const char *s) {
+  for (int i = 0; s[i]; i++)
+    pos = append_ch(buf, cap, pos, s[i]);
+  return pos;
+}
+
+static int append_dec(unsigned char *buf, int cap, int pos, int n) {
+  if (n >= 10)
+    pos = append_dec(buf, cap, pos, n / 10);
+  return append_ch(buf, cap, pos, (char)('0' + (n % 10)));
+}
+
+static const char *state_name(int state) {
+  if (state == PROC_FREE)
+    return "FREE";
+  if (state == PROC_READY)
+    return "READY";
+  if (state == PROC_RUNNING)
+    return "RUN";
+  if (state == PROC_WAITING)
+    return "WAIT";
+  return "?";
+}
+
+impl Cpu {
+  void set_segs(self *c, unsigned int v) {
+    asm!(v) {
+      "seta segs {v}"
+    };
+  }
+
+  void set_sege(self *c, unsigned int v) {
+    asm!(v) {
+      "seta sege {v}"
+    };
+  }
+
+  void set_epc(self *c, unsigned int v) {
+    asm!(v) {
+      "seta epc {v}"
+    };
+  }
+
+  void set_ksp(self *c, unsigned int v) {
+    asm!(v) {
+      "seta ksp {v}"
+    };
+  }
+
+  void set_tm(self *c, unsigned int v) {
+    asm!(v) {
+      "seta tm {v}"
+    };
+  }
+
+  void fencei(self *c) {
+    asm!() {
+      "fencei"
+    };
+  }
+}
+
+impl TrapFrame {
+  void copy_from(self *dst, TrapFrame *src) {
+    for (int i = 0; i < 16; i++)
+      dst.gpr[i] = src->gpr[i];
+    dst.epc = src->epc;
+    dst.cause = src->cause;
+    dst.user_sp = src->user_sp;
+    dst.rs = src->rs;
+  }
+}
+
+impl Proc {
+  void reset_fds(self *p) {
+    p.fds[0].file = FD_RESERVED;
+    p.fds[0].off = 0;
+    p.fds[1].file = FD_RESERVED;
+    p.fds[1].off = 0;
+    p.fds[2].file = FD_RESERVED;
+    p.fds[2].off = 0;
+    for (int i = 3; i < NFILE; i++) {
+      p.fds[i].file = FD_FREE;
+      p.fds[i].off = 0;
+    }
+  }
+
+  void close_files(self *p) {
+    for (int i = 3; i < NFILE; i++) {
+      p.fds[i].file = FD_FREE;
+      p.fds[i].off = 0;
+    }
+  }
+
+  void clear_user_slot(self *p) {
+    clear_user_region(p.segs, USER_IMAGE_CLEAR);
+    clear_user_region(p.segs + USER_STACK_TOP_VA - USER_STACK_CLEAR,
+                      USER_STACK_CLEAR);
+  }
+
+  void init_context(self *p, const char *name) {
+    p.state = PROC_READY;
+    p.user_sp = USER_STACK_TOP_VA;
+    p.wait_pid = -1;
+    p.name = name;
+    for (int i = 0; i < 16; i++)
+      p.tf.gpr[i] = 0;
+    p.tf.epc = USER_ENTRY_VA;
+    p.tf.cause = 0;
+    p.tf.user_sp = USER_STACK_TOP_VA;
+    p.tf.rs = 0;
+    p.reset_fds();
+  }
+
+  int getpid(const self *p) {
+    return p.pid;
+  }
+
+  unsigned int user_base(const self *p) {
+    return p.segs;
+  }
+
+  unsigned int user_end(const self *p) {
+    return p.sege;
+  }
+
+  void exit(self *p) {
+    int pid = p.pid;
+    p.state = PROC_FREE;
+    p.wait_pid = -1;
+    p.name = "-";
+    p.close_files();
+    ptable.wake_waiters(pid);
+  }
+
+  int kill(self *p) {
+    if (p.state == PROC_FREE)
+      return -1;
+    p.exit();
+    return 0;
+  }
+
+  int open(self *p, int file_idx) {
+    if (file_idx < 0)
+      return -1;
+    for (int fd = 3; fd < NFILE; fd++) {
+      if (p.fds[fd].file == FD_FREE) {
+        p.fds[fd].file = file_idx;
+        p.fds[fd].off = 0;
+        return fd;
+      }
+    }
+    return -1;
+  }
+
+  int close(self *p, int fd) {
+    if (fd < 3 || fd >= NFILE)
+      return -1;
+    if (p.fds[fd].file < 0)
+      return -1;
+    p.fds[fd].file = FD_FREE;
+    p.fds[fd].off = 0;
+    return 0;
+  }
+
+  int read(self *p, int fd, unsigned char *dst, unsigned int len) {
+    if (fd < 3 || fd >= NFILE)
+      return -1;
+    int file = p.fds[fd].file;
+    if (file < 0)
+      return -1;
+    int n = ramdisk.read(file, p.fds[fd].off, dst, len);
+    if (n > 0)
+      p.fds[fd].off = p.fds[fd].off + (unsigned int)n;
+    return n;
+  }
+
+  int write(self *p, int fd, unsigned char *src, unsigned int len) {
+    if (fd != 1 && fd != 2)
+      return -1;
+    for (unsigned int i = 0; i < len; i++)
+      console.putc(src[i]);
+    return (int)len;
+  }
+
+  int waitpid(self *p, int pid, TrapFrame *tf) {
+    if (pid < 0 || pid >= NPROC)
+      return -1;
+    Proc *target = ptable.find(pid);
+    if (!target)
+      return 0;
+
+    tf->gpr[0] = 0;
+    p.tf.copy_from(tf);
+    p.user_sp = tf->user_sp;
+    p.tf.user_sp = tf->user_sp;
+    p.state = PROC_WAITING;
+    p.wait_pid = pid;
+    ptable.schedule(tf);
+    return 0;
+  }
+
+  int exec(self *p, const char *name, int len, TrapFrame *tf) {
+    const char *canonical = ramdisk.program_name(name, len);
+    if (!canonical)
+      return -1;
+
+    p.clear_user_slot();
+    if (ramdisk.load_program(canonical, p.segs) < 0)
+      return -1;
+
+    p.name = canonical;
+    p.user_sp = USER_STACK_TOP_VA;
+    p.wait_pid = -1;
+    p.reset_fds();
+    for (int i = 0; i < 16; i++)
+      tf->gpr[i] = 0;
+    tf->epc = USER_ENTRY_VA;
+    tf->cause = 0;
+    tf->user_sp = USER_STACK_TOP_VA;
+    tf->rs = 0;
+    p.tf.copy_from(tf);
+
+    cpu.set_epc(USER_ENTRY_VA);
+    cpu.set_ksp(USER_STACK_TOP_VA);
+    cpu.fencei();
+    return 0;
+  }
+
+  int fork(self *p, TrapFrame *tf) {
+    Proc *child = ptable.alloc();
+    if (!child)
+      return -1;
+
+    copy_user_segment(child, p);
+    child.state = PROC_READY;
+    child.user_sp = tf->user_sp;
+    child.wait_pid = -1;
+    child.name = p.name;
+    child.tf.copy_from(tf);
+    child.tf.gpr[0] = 0;
+    child.tf.user_sp = tf->user_sp;
+    for (int i = 0; i < NFILE; i++) {
+      child.fds[i].file = p.fds[i].file;
+      child.fds[i].off = p.fds[i].off;
+    }
+
+    tf->gpr[0] = child.pid;
+    return child.pid;
+  }
+}
+
+impl ProcTable {
+  void init(self *t) {
+    for (int i = 0; i < NPROC; i++) {
+      t.procs[i].pid = i;
+      t.procs[i].state = PROC_FREE;
+      t.procs[i].segs = slot_segs(i);
+      t.procs[i].sege = slot_sege(i);
+      t.procs[i].user_sp = USER_STACK_TOP_VA;
+      t.procs[i].wait_pid = -1;
+      t.procs[i].name = "-";
+      t.procs[i].reset_fds();
+    }
+    current = 0;
+  }
+
+  Proc *find(self *t, int pid) {
+    if (pid < 0 || pid >= NPROC)
+      return 0;
+    if (t.procs[pid].state == PROC_FREE)
+      return 0;
+    return &t.procs[pid];
+  }
+
+  Proc *alloc(self *t) {
+    for (int i = 0; i < NPROC; i++) {
+      if (t.procs[i].state == PROC_FREE)
+        return &t.procs[i];
+    }
+    return 0;
+  }
+
+  int create_first(self *t, const char *name, int len) {
+    Proc *p = t.alloc();
+    if (!p)
+      return -1;
+
+    p.clear_user_slot();
+    if (ramdisk.load_program(name, p.segs) < 0)
+      return -1;
+    cpu.fencei();
+    p.init_context(name);
+    return p.pid;
+  }
+
+  void start_first(self *t) {
+    current = &t.procs[0];
+    current.state = PROC_RUNNING;
+    cpu.set_segs(current.segs);
+    cpu.set_sege(current.sege);
+    cpu.set_ksp(current.user_sp);
+    cpu.set_tm(TIMER_SLICE);
+    cpu.fencei();
+  }
+
+  int runnable_exists(self *t) {
+    for (int i = 0; i < NPROC; i++)
+      if (t.procs[i].state == PROC_READY || t.procs[i].state == PROC_RUNNING)
+        return 1;
+    return 0;
+  }
+
+  void wake_waiters(self *t, int pid) {
+    for (int i = 0; i < NPROC; i++) {
+      if (t.procs[i].state == PROC_WAITING && t.procs[i].wait_pid == pid) {
+        t.procs[i].wait_pid = -1;
+        t.procs[i].state = PROC_READY;
+        t.procs[i].tf.gpr[0] = 0;
+      }
+    }
+  }
+
+  void save_running(self *t, TrapFrame *tf) {
+    if (current && current.state == PROC_RUNNING) {
+      current.tf.copy_from(tf);
+      current.user_sp = tf->user_sp;
+      current.tf.user_sp = tf->user_sp;
+      current.state = PROC_READY;
+    }
+  }
+
+  void schedule(self *t, TrapFrame *tf) {
+    int old_pid = current ? current.pid : -1;
+    unsigned int old_segs = current ? current.segs : 0;
+    t.save_running(tf);
+
+    if (!t.runnable_exists()) {
+      console.puts("ShyOS fork: all processes exited\n");
+      console.exit(0);
+    }
+
+    int start = old_pid < 0 ? 0 : old_pid + 1;
+    Proc *next = 0;
+    for (int step = 0; step < NPROC; step++) {
+      int idx = (start + step) % NPROC;
+      if (t.procs[idx].state == PROC_READY) {
+        next = &t.procs[idx];
+        break;
+      }
+    }
+
+    if (!next && current && current.state == PROC_READY)
+      next = current;
+
+    if (!next) {
+      console.puts("ShyOS fork: scheduler found no ready process\n");
+      console.exit(1);
+    }
+
+    current = next;
+    current.state = PROC_RUNNING;
+    tf.copy_from(&current.tf);
+
+    cpu.set_segs(current.segs);
+    cpu.set_sege(current.sege);
+    cpu.set_epc(current.tf.epc);
+    cpu.set_ksp(current.tf.user_sp);
+    cpu.set_tm(TIMER_SLICE);
+    if (old_segs != current.segs)
+      cpu.fencei();
+  }
+
+  int format_ps(self *t, unsigned char *buf, int cap) {
+    int pos = 0;
+    pos = append_str(buf, cap, pos, "PID STATE NAME\n");
+    for (int i = 0; i < NPROC; i++) {
+      pos = append_dec(buf, cap, pos, t.procs[i].pid);
+      pos = append_ch(buf, cap, pos, ' ');
+      pos = append_str(buf, cap, pos, state_name(t.procs[i].state));
+      pos = append_ch(buf, cap, pos, ' ');
+      pos = append_str(buf, cap, pos, t.procs[i].name);
+      pos = append_ch(buf, cap, pos, '\n');
+    }
+    if (pos > cap)
+      return cap;
+    return pos;
+  }
+}

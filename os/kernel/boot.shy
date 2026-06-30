@@ -1,0 +1,22 @@
+___DEFINE___
+
+KERNEL_STACK_TOP 0x00100000
+USER_SEGS 0x00400000
+USER_SEGE 0x00800000
+USER_ENTRY_VA 0x00000100
+USER_STACK_TOP_VA 0x001ff000
+
+___DATA___
+
+___CODE___
+
+.section text._start
+.symbol _start
+setn sp KERNEL_STACK_TOP
+setn ksp KERNEL_STACK_TOP
+setn trap trap_entry
+setn tm 0
+calln kmain
+setn ksp USER_STACK_TOP_VA
+enteruser USER_ENTRY_VA
+setn exit 0xff

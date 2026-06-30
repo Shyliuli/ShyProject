@@ -1,0 +1,14 @@
+#![no_main]
+
+#include "types.shyh"
+
+void kmain(void) {
+  ramdisk.init();
+  ptable.init();
+  if (ptable.create_first("shell", 5) < 0) {
+    console.puts("failed to create shell\n");
+    return;
+  }
+  ptable.start_first();
+  console.puts("ShyOS OO: boot shell\n");
+}

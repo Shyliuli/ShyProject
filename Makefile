@@ -7,7 +7,7 @@ BIN_DIR := target/bin
 TOOL_BINS := shyasm shyemu shyld shycc
 CHIBICC := third_party/chibicc/chibicc
 
-.PHONY: bin install-bin clean-bin test cargo-test test-chibicc-shy
+.PHONY: bin install-bin clean-bin test cargo-test test-chibicc-shy os-build os-run
 
 bin: $(BIN_DIR)
 	$(CARGO) build --release -p asm -p emu -p linker -p shycc
@@ -34,6 +34,12 @@ cargo-test:
 
 test-chibicc-shy:
 	test/chibicc-shy/run.sh
+
+os-build:
+	$(MAKE) -C os build
+
+os-run:
+	$(MAKE) -C os run
 
 $(BIN_DIR):
 	$(INSTALL) -d $(BIN_DIR)

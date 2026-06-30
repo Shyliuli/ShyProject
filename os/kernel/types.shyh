@@ -1,0 +1,131 @@
+#define NPROC 4
+#define PROC_FREE 0
+#define PROC_READY 1
+#define PROC_RUNNING 2
+#define PROC_WAITING 3
+#define USER_STACK_TOP_VA 0x001ff000
+#define USER_ENTRY_VA 0x00000100
+#define TIMER_SLICE 20
+#define USER_IMAGE_CLEAR 0x00020000
+#define USER_STACK_CLEAR 0x00004000
+#define NFILE 4
+#define FD_FREE -1
+#define FD_RESERVED -2
+#define RAMDISK_NFILE 6
+
+typedef struct TrapFrame {
+  unsigned int gpr[16];
+  unsigned int epc;
+  unsigned int cause;
+  unsigned int user_sp;
+  unsigned int rs;
+} TrapFrame;
+
+typedef struct FileDesc {
+  int file;
+  unsigned int off;
+} FileDesc;
+
+typedef struct Proc {
+  int pid;
+  int state;
+  unsigned int segs;
+  unsigned int sege;
+  unsigned int user_sp;
+  int wait_pid;
+  const char *name;
+  TrapFrame tf;
+  FileDesc fds[NFILE];
+} Proc;
+
+typedef struct ProcTable {
+  Proc procs[NPROC];
+} ProcTable;
+
+typedef struct RamFile {
+  const char *name;
+  unsigned char *data;
+  unsigned char *end;
+  int executable;
+} RamFile;
+
+typedef struct RamDisk {
+  RamFile files[RAMDISK_NFILE];
+} RamDisk;
+
+typedef struct Console {
+  int unused;
+} Console;
+
+typedef struct Cpu {
+  int unused;
+} Cpu;
+
+extern ProcTable ptable;
+extern Proc *current;
+extern RamDisk ramdisk;
+extern Console console;
+extern Cpu cpu;
+
+impl Cpu {
+  void set_segs(self *c, unsigned int v);
+  void set_sege(self *c, unsigned int v);
+  void set_epc(self *c, unsigned int v);
+  void set_ksp(self *c, unsigned int v);
+  void set_tm(self *c, unsigned int v);
+  void fencei(self *c);
+}
+
+impl TrapFrame {
+  void copy_from(self *dst, TrapFrame *src);
+}
+
+impl Proc {
+  void reset_fds(self *p);
+  void close_files(self *p);
+  void clear_user_slot(self *p);
+  void init_context(self *p, const char *name);
+  int getpid(const self *p);
+  unsigned int user_base(const self *p);
+  unsigned int user_end(const self *p);
+  void exit(self *p);
+  int kill(self *p);
+  int open(self *p, int file_idx);
+  int close(self *p, int fd);
+  int read(self *p, int fd, unsigned char *dst, unsigned int len);
+  int write(self *p, int fd, unsigned char *src, unsigned int len);
+  int waitpid(self *p, int pid, TrapFrame *tf);
+  int exec(self *p, const char *name, int len, TrapFrame *tf);
+  int fork(self *p, TrapFrame *tf);
+}
+
+impl ProcTable {
+  void init(self *t);
+  Proc *find(self *t, int pid);
+  Proc *alloc(self *t);
+  int create_first(self *t, const char *name, int len);
+  void start_first(self *t);
+  int runnable_exists(self *t);
+  void wake_waiters(self *t, int pid);
+  void save_running(self *t, TrapFrame *tf);
+  void schedule(self *t, TrapFrame *tf);
+  int format_ps(self *t, unsigned char *buf, int cap);
+}
+
+impl RamDisk {
+  void init(self *rd);
+  int lookup(self *rd, const char *name, int len);
+  const char *file_name(self *rd, int idx);
+  unsigned int file_len(self *rd, int idx);
+  int read(self *rd, int idx, unsigned int off, unsigned char *dst, unsigned int len);
+  const char *program_name(self *rd, const char *name, int len);
+  int load_program(self *rd, const char *name, unsigned int segs);
+}
+
+impl Console {
+  void putc(self *c, int ch);
+  void puts(self *c, const char *s);
+  void put_hex(self *c, unsigned int v);
+  void exit(self *c, unsigned int code);
+  void fault(self *c, unsigned int cause, unsigned int epc);
+}

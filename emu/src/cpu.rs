@@ -532,7 +532,7 @@ impl Emu {
         ]);
         let op = match Address::from_u32(opcode_word) {
             Address::Opcode(op) => op,
-            // 0x61-0x6F 保留操作码取指 -> 非法指令；其他值同样非法。
+            // 0x62-0x6F 保留操作码取指 -> 非法指令；其他值同样非法。
             _ => return Err(TrapCause::IllegalInstr),
         };
         self.instr_cache[cache_idx] = Some(CachedInstr {
@@ -847,6 +847,20 @@ impl Emu {
             // ── 缓存维护 ──
             OpType::Fencei => {
                 self.clear_instr_cache();
+            }
+            // ── 进入用户态 ──
+            OpType::EnterUser => {
+                if self.is_user() {
+                    return Flow::Trap {
+                        cause: TrapCause::IllegalInstr,
+                        epc: cur,
+                    };
+                }
+                std::mem::swap(&mut self.sp, &mut self.ksp);
+                self.status = 0b11;
+                self.pc = a1;
+                self.clear_instr_cache();
+                return Flow::Continue;
             }
         }
 
@@ -1220,7 +1234,7 @@ mod tests {
     fn illegal_instruction_traps() {
         let mut e = emu();
         e.trap = 0x200; // 设置 trap 入口
-        put(&mut e, 0x100, &encode(0x61, 0, 0));
+        put(&mut e, 0x100, &encode(0x62, 0, 0));
         // trap 处理：setn exit 1
         put(&mut e, 0x200, &encode(0x3E, 0x1B, 1));
         let code = e.run();
@@ -1313,9 +1327,41 @@ mod tests {
     #[should_panic(expected = "uninitialized TRAP")]
     fn trap_with_uninitialized_trap_panics() {
         let mut e = emu();
-        put(&mut e, 0x100, &encode(0x61, 0, 0)); // 非法指令
+        put(&mut e, 0x100, &encode(0x62, 0, 0)); // 非法指令
         put(&mut e, 0x10C, &encode(0x3E, 0x1B, 0));
         let _ = e.run();
+    }
+
+    #[test]
+    fn enteruser_switches_to_user_segment_and_swaps_stacks() {
+        let mut e = emu();
+        e.sp = 0x00100000;
+        e.ksp = 0x003ff000;
+        e.segs = 0x00400000;
+        e.sege = 0x00800000;
+        put(&mut e, 0x100, &encode(0x61, 0x100, 0)); // enteruser 0x100
+        put(&mut e, 0x00400100, &encode(0x3E, 0x1B, 7)); // user: setn exit 7
+        let code = e.run();
+        assert_eq!(code, 7);
+        assert_eq!(e.status, 0b11);
+        assert_eq!(e.sp, 0x003ff000);
+        assert_eq!(e.ksp, 0x00100000);
+    }
+
+    #[test]
+    fn enteruser_in_user_mode_traps_as_illegal_instruction() {
+        let mut e = emu();
+        e.trap = 0x200;
+        e.status = 0b01;
+        e.sp = 0x100;
+        e.ksp = 0x100000;
+        e.segs = 0x00300000;
+        e.sege = 0x00300200;
+        put(&mut e, 0x00300100, &encode(0x61, 0x100, 0));
+        put(&mut e, 0x200, &encode(0x3E, 0x1B, 3));
+        let code = e.run();
+        assert_eq!(code, 3);
+        assert_eq!(e.cause, 3);
     }
 
     #[test]
