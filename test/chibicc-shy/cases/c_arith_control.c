@@ -36,5 +36,19 @@ int main(void) {
   if (sw != 42)
     return fail(3);
 
+  int neg = -1;
+  if (!(neg < 0))
+    return fail(4);
+  if (!(neg <= 0))
+    return fail(5);
+  if (0 < neg)
+    return fail(6);
+
+  unsigned int u = (unsigned int)-1;
+  if (u < 0)
+    return fail(7);
+  if (!(1u < u))
+    return fail(8);
+
   return 0;
 }

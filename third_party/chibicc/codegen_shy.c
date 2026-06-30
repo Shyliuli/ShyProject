@@ -208,6 +208,39 @@ static void set_bool_from_rs(void) {
   println("setn 2x 0");
 }
 
+static void gen_signed_cmp32(bool le) {
+  int c = count();
+  println("seta 4x 1x");
+  println("rsn 4x 31");
+  println("seta 5x 3x");
+  println("rsn 5x 31");
+  println("equa 4x 5x");
+  println("jmpn .L.scmp.same.%d", c);
+  println("seta 1x 4x");
+  println("ujmpn .L.scmp.end.%d", c);
+  println(".L.scmp.same.%d:", c);
+  println("%s 1x 3x", le ? "smaequa" : "smaa");
+  set_bool_from_rs();
+  println(".L.scmp.end.%d:", c);
+  println("setn 2x 0");
+}
+
+static void gen_signed_cmp32_imm(uint32_t imm, bool le) {
+  int c = count();
+  println("seta 4x 1x");
+  println("rsn 4x 31");
+  println("setn 5x %u", imm >> 31);
+  println("equa 4x 5x");
+  println("jmpn .L.scmp.same.%d", c);
+  println("seta 1x 4x");
+  println("ujmpn .L.scmp.end.%d", c);
+  println(".L.scmp.same.%d:", c);
+  println("%s 1x %u", le ? "smaequn" : "sman", imm);
+  set_bool_from_rs();
+  println(".L.scmp.end.%d:", c);
+  println("setn 2x 0");
+}
+
 static void gen_expr(Node *node);
 static void gen_stmt(Node *node);
 
@@ -760,10 +793,18 @@ static bool try_gen_binary_imm(Node *node) {
     return true;
   }
   case ND_LT:
+    if (!node->lhs->ty->is_unsigned) {
+      gen_signed_cmp32_imm(imm, false);
+      return true;
+    }
     println("sman 1x %u", imm);
     set_bool_from_rs();
     return true;
   case ND_LE:
+    if (!node->lhs->ty->is_unsigned) {
+      gen_signed_cmp32_imm(imm, true);
+      return true;
+    }
     println("smaequn 1x %u", imm);
     set_bool_from_rs();
     return true;
@@ -965,10 +1006,18 @@ static void gen_binary(Node *node) {
     return;
   }
   case ND_LT:
+    if (!node->lhs->ty->is_unsigned) {
+      gen_signed_cmp32(false);
+      return;
+    }
     println("smaa 1x 3x");
     set_bool_from_rs();
     return;
   case ND_LE:
+    if (!node->lhs->ty->is_unsigned) {
+      gen_signed_cmp32(true);
+      return;
+    }
     println("smaequa 1x 3x");
     set_bool_from_rs();
     return;
