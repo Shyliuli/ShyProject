@@ -13,6 +13,10 @@ struct Args {
     int argc;
 };
 
+struct Text {
+    const char *data;
+};
+
 impl Args {
     void clear(self *a) {
         a.argc = 0;
@@ -30,6 +34,23 @@ impl Args {
             return (char *)0;
         }
         return a.argv[i];
+    }
+
+    int empty(self *a) {
+        return a.argc <= 0;
+    }
+
+    char *shift(self *a) {
+        char *first = a.get(0);
+
+        if (first == 0) {
+            return (char *)0;
+        }
+        for (int i = 1; i < a.argc; i++) {
+            a.argv[i - 1] = a.argv[i];
+        }
+        a.argc = a.argc - 1;
+        return first;
     }
 
     int parse(self *a, char *s) {
@@ -53,6 +74,41 @@ impl Args {
             }
         }
         return a.argc;
+    }
+};
+
+impl Text {
+    int len(self *t) {
+        int n = 0;
+
+        while (t.data[n]) {
+            n = n + 1;
+        }
+        return n;
+    }
+
+    int contains(self *t, const char *needle) {
+        int i = 0;
+        struct Text pat;
+        int n;
+
+        pat.data = needle;
+        n = pat.len();
+        if (n == 0) {
+            return 1;
+        }
+        while (t.data[i]) {
+            int j = 0;
+
+            while (needle[j] && t.data[i + j] == needle[j]) {
+                j = j + 1;
+            }
+            if (j == n) {
+                return 1;
+            }
+            i = i + 1;
+        }
+        return 0;
     }
 };
 
@@ -83,12 +139,10 @@ static void trim_right(char *s) {
 }
 
 static int strlen2(const char *s) {
-    int n = 0;
+    struct Text text;
 
-    while (s[n]) {
-        n = n + 1;
-    }
-    return n;
+    text.data = s;
+    return text.len();
 }
 
 static void print_int(int value) {
@@ -135,24 +189,10 @@ static int parse_int(const char *s) {
 }
 
 static int contains(const char *s, const char *needle) {
-    int i = 0;
-    int n = strlen2(needle);
+    struct Text text;
 
-    if (n == 0) {
-        return 1;
-    }
-    while (s[i]) {
-        int j = 0;
-
-        while (needle[j] && s[i + j] == needle[j]) {
-            j = j + 1;
-        }
-        if (j == n) {
-            return 1;
-        }
-        i = i + 1;
-    }
-    return 0;
+    text.data = s;
+    return text.contains(needle);
 }
 
 static void make_path(const char *cmd, char *path) {
@@ -258,10 +298,10 @@ static int run_simple(char *cmdline) {
         exit(0);
     }
     args.parse(cmdline);
-    if (args.argc <= 0) {
+    if (args.empty()) {
         return 0;
     }
-    if (streq(arg_at(&args, 0), "exit")) {
+    if (streq(args.get(0), "exit")) {
         exit(0);
     }
 
@@ -704,12 +744,7 @@ int main(void) {
     args.parse(argbuf);
 
     if (streq(name, "busybox") && args.argc > 0) {
-        char *applet = arg_at(&args, 0);
-
-        for (int j = 1; j < args.argc; j++) {
-            args.argv[j - 1] = args.argv[j];
-        }
-        args.argc = args.argc - 1;
+        char *applet = args.shift();
         status = dispatch(applet, args.argc, args.argv);
     } else {
         status = dispatch(name, args.argc, args.argv);

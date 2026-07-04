@@ -99,24 +99,145 @@ static void load_idle_code(struct proc *p) {
     write_inst(mem, off + 24, 0x4A, 0x10C, 0);
 }
 
+impl proc {
+    void set_state(self *p, enum procstate state) {
+        p.state = state;
+    }
+
+    int is_state(self *p, enum procstate state) {
+        return p.state == state;
+    }
+
+    int is_used(self *p) {
+        return p.state != UNUSED;
+    }
+
+    int is_runnable_user(self *p) {
+        return p.state == RUNNABLE && p.pid != 0;
+    }
+
+    int is_live_non_idle(self *p) {
+        return p.state != UNUSED && p.state != ZOMBIE && p.pid != 0;
+    }
+
+    int killed_runnable(self *p) {
+        return p.pid != 0 && p.killed && p.state == RUNNABLE;
+    }
+
+    int wait_chan(self *p) {
+        return 0 - p.pid;
+    }
+
+    int sleeping_on(self *p, int chan) {
+        return p.state == SLEEPING && p.chan == chan;
+    }
+
+    void clear_wait(self *p) {
+        p.waiting = 0;
+        p.wait_status = 0;
+        p.chan = 0;
+    }
+
+    void sleep_on(self *p, int chan) {
+        p.chan = chan;
+        p.state = SLEEPING;
+    }
+
+    void wake(self *p) {
+        p.chan = 0;
+        p.state = RUNNABLE;
+    }
+
+    void kill_flag(self *p) {
+        p.killed = 1;
+        if (p.state == SLEEPING) {
+            p.wake();
+        }
+    }
+
+    void copy_name(self *p, const char *name) {
+        copy_proc_name(p.name, name);
+    }
+
+    void init_unused(self *p) {
+        clear_context(&p.ctx);
+        p.state = UNUSED;
+        p.pid = 0;
+        p.parent = -1;
+        p.kstack = 0;
+        p.segbase = 0;
+        p.sz = 0;
+        p.heap_base = 0;
+        p.stack_base = USER_STACK_DEFAULT_BASE;
+        p.xstatus = 0;
+        p.chan = 0;
+        p.killed = 0;
+        p.waiting = 0;
+        p.wait_status = 0;
+        p.stdin_fd = -1;
+        p.stdout_fd = -1;
+        p.open_fds = 0;
+        p.name[0] = 0;
+    }
+
+    void init_embryo(self *p, int pid) {
+        p.state = EMBRYO;
+        p.pid = pid;
+        p.parent = -1;
+        p.chan = 0;
+        p.killed = 0;
+        p.stdin_fd = -1;
+        p.stdout_fd = -1;
+        p.open_fds = 0;
+        p.name[0] = 0;
+    }
+
+    void init_user_context(self *p) {
+        for (int r = 0; r < 16; r++) {
+            p.ctx.regs[r] = 0;
+        }
+        p.ctx.ksp = p.kstack;
+        p.ctx.sp = USER_STACK_DEFAULT_BASE;
+        p.ctx.segs = p.segbase;
+        p.ctx.sege = p.segbase + USER_SEG_SIZE;
+        p.ctx.epc = USER_ENTRY;
+        p.ctx.valid = 0;
+        p.sz = 0;
+        p.heap_base = 0;
+        p.stack_base = USER_STACK_DEFAULT_BASE;
+        p.xstatus = 0;
+        p.chan = 0;
+        p.killed = 0;
+        p.waiting = 0;
+        p.wait_status = 0;
+        p.stdin_fd = -1;
+        p.stdout_fd = -1;
+        p.open_fds = 0;
+        p.name[0] = 0;
+    }
+
+    void free_resources(self *p) {
+        if (p.kstack != 0) {
+            kfree_page((void *)p.kstack);
+        }
+        if (p.segbase != 0) {
+            seg_free(p.segbase);
+        }
+    }
+}
+
 static struct proc *find_proc_locked(int pid) {
     for (int i = 0; i < NPROC; i++) {
-        if (procs[i].state != UNUSED && procs[i].pid == pid) {
+        if (procs[i].is_used() && procs[i].pid == pid) {
             return &procs[i];
         }
     }
     return 0;
 }
 
-static int wait_chan(struct proc *p) {
-    return 0 - p->pid;
-}
-
 static int has_live_non_idle_locked(void) {
     for (int i = 0; i < NPROC; i++) {
-        if (procs[i].state != UNUSED &&
-            procs[i].state != ZOMBIE &&
-            procs[i].pid != 0) {
+        if (procs[i].is_live_non_idle()) {
             return 1;
         }
     }
@@ -141,11 +262,9 @@ static void wake_waiting_parent_locked(struct proc *parent, struct proc *child) 
 
     copy_wait_status(parent, parent->wait_status, child->xstatus);
     free_proc_locked(child);
-    parent->wait_status = 0;
-    parent->waiting = 0;
-    parent->chan = 0;
+    parent.clear_wait();
     parent->ctx.regs[1] = pid;
-    parent->state = RUNNABLE;
+    parent.set_state(RUNNABLE);
 }
 
 void proc_init(void) {
@@ -153,31 +272,14 @@ void proc_init(void) {
 
     lock_init(&proc_lock);
     for (int i = 0; i < NPROC; i++) {
-        clear_context(&procs[i].ctx);
-        procs[i].state = UNUSED;
-        procs[i].pid = 0;
-        procs[i].parent = -1;
-        procs[i].kstack = 0;
-        procs[i].segbase = 0;
-        procs[i].sz = 0;
-        procs[i].heap_base = 0;
-        procs[i].stack_base = USER_STACK_DEFAULT_BASE;
-        procs[i].xstatus = 0;
-        procs[i].chan = 0;
-        procs[i].killed = 0;
-        procs[i].waiting = 0;
-        procs[i].wait_status = 0;
-        procs[i].stdin_fd = -1;
-        procs[i].stdout_fd = -1;
-        procs[i].open_fds = 0;
-        procs[i].name[0] = 0;
+        procs[i].init_unused();
     }
 
     next_pid = 1;
     idle = alloc_proc();
     idle->pid = 0;
     idle->parent = -1;
-    idle->state = RUNNABLE;
+    idle.set_state(RUNNABLE);
     next_pid = 1;
     load_idle_code(idle);
 }
@@ -187,19 +289,11 @@ struct proc *alloc_proc(void) {
 
     lock_acquire(&proc_lock);
     for (int i = 0; i < NPROC; i++) {
-        if (procs[i].state == UNUSED) {
+        if (procs[i].is_state(UNUSED)) {
             p = &procs[i];
-            p->state = EMBRYO;
-            p->pid = next_pid;
+            p.init_embryo(next_pid);
             next_pid = next_pid + 1;
-            p->parent = -1;
-    p->chan = 0;
-    p->killed = 0;
-            p->stdin_fd = -1;
-            p->stdout_fd = -1;
-            p->open_fds = 0;
-            p->name[0] = 0;
-    break;
+            break;
         }
     }
     lock_release(&proc_lock);
@@ -212,27 +306,7 @@ struct proc *alloc_proc(void) {
     p->segbase = seg_alloc();
 
     lock_acquire(&proc_lock);
-    for (int r = 0; r < 16; r++) {
-        p->ctx.regs[r] = 0;
-    }
-    p->ctx.ksp = p->kstack;
-    p->ctx.sp = USER_STACK_DEFAULT_BASE;
-    p->ctx.segs = p->segbase;
-    p->ctx.sege = p->segbase + USER_SEG_SIZE;
-    p->ctx.epc = USER_ENTRY;
-    p->ctx.valid = 0;
-    p->sz = 0;
-    p->heap_base = 0;
-    p->stack_base = USER_STACK_DEFAULT_BASE;
-    p->xstatus = 0;
-    p->chan = 0;
-    p->killed = 0;
-    p->waiting = 0;
-    p->wait_status = 0;
-    p->stdin_fd = -1;
-    p->stdout_fd = -1;
-    p->open_fds = 0;
-    p->name[0] = 0;
+    p.init_user_context();
     lock_release(&proc_lock);
 
     return p;
@@ -243,31 +317,8 @@ static void free_proc_locked(struct proc *p) {
         return;
     }
 
-    if (p->kstack != 0) {
-        kfree_page((void *)p->kstack);
-    }
-    if (p->segbase != 0) {
-        seg_free(p->segbase);
-    }
-
-    clear_context(&p->ctx);
-    p->state = UNUSED;
-    p->pid = 0;
-    p->parent = -1;
-    p->kstack = 0;
-    p->segbase = 0;
-    p->sz = 0;
-    p->heap_base = 0;
-    p->stack_base = USER_STACK_DEFAULT_BASE;
-    p->xstatus = 0;
-    p->chan = 0;
-    p->killed = 0;
-    p->waiting = 0;
-    p->wait_status = 0;
-    p->stdin_fd = -1;
-    p->stdout_fd = -1;
-    p->open_fds = 0;
-    p->name[0] = 0;
+    p.free_resources();
+    p.init_unused();
 }
 
 void free_proc(struct proc *p) {
@@ -311,19 +362,17 @@ int fork(void) {
     child->ctx.sege = child->segbase + USER_SEG_SIZE;
     child->ctx.regs[1] = 0;
     child->parent = current->pid;
-    child->state = RUNNABLE;
+    child.set_state(RUNNABLE);
     child->sz = current->sz;
     child->heap_base = current->heap_base;
     child->stack_base = current->stack_base;
     child->xstatus = 0;
-    child->chan = 0;
     child->killed = 0;
-    child->waiting = 0;
-    child->wait_status = 0;
+    child.clear_wait();
     child->stdin_fd = stdin_fd;
     child->stdout_fd = stdout_fd;
     child->open_fds = open_fds;
-    copy_proc_name(child->name, current->name);
+    child.copy_name(current->name);
     file_dup_open_mask(open_fds);
     if (stdin_fd >= 3) {
         file_dup(stdin_fd);
@@ -343,20 +392,18 @@ static void proc_exit_locked(int status) {
     struct proc *parent;
 
     current->xstatus = status;
-    current->chan = 0;
-    current->waiting = 0;
-    current->wait_status = 0;
-    current->state = ZOMBIE;
+    current.clear_wait();
+    current.set_state(ZOMBIE);
     if (status == 2 && current->parent == 1) {
         asm("setn exit 0");
     }
     parent = find_proc_locked(current->parent);
     if (parent != 0 &&
-        parent->state == SLEEPING &&
+        parent.is_state(SLEEPING) &&
         parent->waiting) {
         wake_waiting_parent_locked(parent, current);
     } else if (parent != 0) {
-        wakeup_locked(wait_chan(parent));
+        wakeup_locked(parent.wait_chan());
     }
 
     for (int i = 0; i < NPROC; i++) {
@@ -400,11 +447,10 @@ int wait(int *status) {
         for (int i = 0; i < NPROC; i++) {
             if (procs[i].parent == current->pid) {
                 have_child = 1;
-                if (procs[i].state == ZOMBIE) {
+                if (procs[i].is_state(ZOMBIE)) {
                     int pid = procs[i].pid;
                     copy_wait_status(current, (unsigned int)status, procs[i].xstatus);
-                    current->waiting = 0;
-                    current->wait_status = 0;
+                    current.clear_wait();
                     free_proc_locked(&procs[i]);
                     lock_release(&proc_lock);
                     return pid;
@@ -423,8 +469,7 @@ int wait(int *status) {
 
         current->waiting = 1;
         current->wait_status = (unsigned int)status;
-        current->chan = wait_chan(current);
-        current->state = SLEEPING;
+        current.sleep_on(current.wait_chan());
         lock_release(&proc_lock);
         return 0;
     }
@@ -449,11 +494,7 @@ int kill(int pid) {
         return -1;
     }
 
-    p->killed = 1;
-    if (p->state == SLEEPING) {
-        p->chan = 0;
-        p->state = RUNNABLE;
-    }
+    p.kill_flag();
     lock_release(&proc_lock);
     return 0;
 }
@@ -467,8 +508,7 @@ int sleep(int chan) {
     }
 
     lock_acquire(&proc_lock);
-    current->chan = chan;
-    current->state = SLEEPING;
+    current.sleep_on(chan);
     lock_release(&proc_lock);
     return 0;
 }
@@ -479,9 +519,8 @@ static void wakeup_locked(int chan) {
     }
 
     for (int i = 0; i < NPROC; i++) {
-        if (procs[i].state == SLEEPING && procs[i].chan == chan) {
-            procs[i].chan = 0;
-            procs[i].state = RUNNABLE;
+        if (procs[i].sleeping_on(chan)) {
+            procs[i].wake();
         }
     }
 }
@@ -494,8 +533,8 @@ void wakeup(int chan) {
 
 void yield(void) {
     lock_acquire(&proc_lock);
-    if (current->state == RUNNING) {
-        current->state = RUNNABLE;
+    if (current.is_state(RUNNING)) {
+        current.set_state(RUNNABLE);
     }
     lock_release(&proc_lock);
     scheduler();
@@ -563,7 +602,7 @@ struct proc *proc_next(void) {
 
     for (int n = 0; n < NPROC; n++) {
         int i = (start + n) % NPROC;
-        if (procs[i].state == RUNNABLE && procs[i].pid != 0) {
+        if (procs[i].is_runnable_user()) {
             if (procs[i].killed) {
                 current = &procs[i];
                 proc_exit_locked(-1);
@@ -575,7 +614,7 @@ struct proc *proc_next(void) {
         }
     }
 
-    if (current != 0 && current->state == RUNNABLE && current->pid != 0) {
+    if (current != 0 && current.is_runnable_user()) {
         next = current;
         lock_release(&proc_lock);
         return next;
@@ -589,7 +628,7 @@ struct proc *proc_next(void) {
 void proc_set_current_state(enum procstate state) {
     lock_acquire(&proc_lock);
     if (current != 0) {
-        current->state = state;
+        current.set_state(state);
     }
     lock_release(&proc_lock);
 }
@@ -598,7 +637,7 @@ int proc_current_state_is(enum procstate state) {
     int same = 0;
 
     lock_acquire(&proc_lock);
-    if (current != 0 && current->state == state) {
+    if (current != 0 && current.is_state(state)) {
         same = 1;
     }
     lock_release(&proc_lock);
@@ -609,10 +648,7 @@ int proc_current_killed_runnable(void) {
     int killed = 0;
 
     lock_acquire(&proc_lock);
-    if (current != 0 &&
-        current->pid != 0 &&
-        current->killed &&
-        current->state == RUNNABLE) {
+    if (current != 0 && current.killed_runnable()) {
         killed = 1;
     }
     lock_release(&proc_lock);
@@ -648,7 +684,7 @@ void proc_set_current_stack_base(unsigned int stack_base) {
 void proc_set_current_name(const char *name) {
     lock_acquire(&proc_lock);
     if (current != 0) {
-        copy_proc_name(current->name, name);
+        current.copy_name(name);
     }
     lock_release(&proc_lock);
 }
@@ -668,7 +704,7 @@ int proc_psline(int index, char *user_buf, int max) {
 
     lock_acquire(&proc_lock);
     for (int i = 0; i < NPROC; i++) {
-        if (procs[i].state != UNUSED) {
+        if (procs[i].is_used()) {
             if (seen == index) {
                 int pid = procs[i].pid;
                 int divisor = 1;

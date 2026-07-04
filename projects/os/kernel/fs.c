@@ -249,9 +249,40 @@ static void copy_mem_name(char *dst, const char *src) {
     dst[i] = 0;
 }
 
+impl mem_file {
+    int named(self *mf, const char *name) {
+        return mf.used && streq(mf.name, name);
+    }
+
+    void init_file(self *mf, const char *name) {
+        copy_mem_name(mf.name, name);
+        mf.size = 0;
+        mf.used = 1;
+        mf.is_dir = 0;
+    }
+
+    void init_dir(self *mf, const char *name) {
+        copy_mem_name(mf.name, name);
+        mf.size = 0;
+        mf.used = 1;
+        mf.is_dir = 1;
+    }
+
+    void clear(self *mf) {
+        mf.used = 0;
+        mf.size = 0;
+        mf.is_dir = 0;
+        mf.name[0] = 0;
+    }
+
+    void truncate(self *mf) {
+        mf.size = 0;
+    }
+}
+
 static struct mem_file *mem_lookup_locked(const char *name) {
     for (int i = 0; i < NMEMFILE; i++) {
-        if (mem_files[i].used && streq(mem_files[i].name, name)) {
+        if (mem_files[i].named(name)) {
             return &mem_files[i];
         }
     }
@@ -267,9 +298,15 @@ static struct mem_file *mem_alloc_locked(void) {
     return 0;
 }
 
+impl fs_file {
+    int named(self *fsf, const char *path_name) {
+        return streq(fsf.name, path_name);
+    }
+}
+
 struct fs_file *fs_lookup(const char *path_name) {
     for (int i = 0; i < fs_nfiles; i++) {
-        if (streq(fs_files[i].name, path_name)) {
+        if (fs_files[i].named(path_name)) {
             return &fs_files[i];
         }
     }
@@ -349,10 +386,7 @@ int fs_mkdir(const char *path) {
         lock_release(&file_lock);
         return -1;
     }
-    copy_mem_name(mf->name, name);
-    mf->size = 0;
-    mf->used = 1;
-    mf->is_dir = 1;
+    mf.init_dir(name);
     lock_release(&file_lock);
     return 0;
 }
@@ -371,10 +405,7 @@ int fs_rm(const char *path) {
         lock_release(&file_lock);
         return -1;
     }
-    mf->used = 0;
-    mf->size = 0;
-    mf->is_dir = 0;
-    mf->name[0] = 0;
+    mf.clear();
     lock_release(&file_lock);
     return 0;
 }
@@ -426,6 +457,174 @@ int file_result_blocked(int r) {
     return r == FILE_BLOCKED;
 }
 
+impl file {
+    int is_free(self *f) {
+        return f.ref == 0;
+    }
+
+    int can_read(self *f) {
+        return f.ref > 0 && f.readable;
+    }
+
+    int can_write(self *f) {
+        return f.ref > 0 && f.writable;
+    }
+
+    void reset(self *f) {
+        f.type = FD_NONE;
+        f.file = 0;
+        f.pipe = 0;
+        f.mem = 0;
+        f.off = 0;
+        f.readable = 0;
+        f.writable = 0;
+    }
+
+    void open_reg(self *f, struct fs_file *fsf) {
+        f.type = FD_REG;
+        f.file = fsf;
+        f.pipe = 0;
+        f.mem = 0;
+        f.off = 0;
+        f.ref = 1;
+        f.readable = 1;
+        f.writable = 0;
+    }
+
+    void open_mem(self *f, struct mem_file *mf, int writable) {
+        f.type = FD_MEM;
+        f.file = 0;
+        f.pipe = 0;
+        f.mem = mf;
+        f.off = 0;
+        f.ref = 1;
+        f.readable = 1;
+        f.writable = writable;
+    }
+
+    void open_pipe(self *f, struct Pipe *p, int readable, int writable) {
+        f.type = FD_PIPE;
+        f.file = 0;
+        f.pipe = p;
+        f.mem = 0;
+        f.off = 0;
+        f.ref = 1;
+        f.readable = readable;
+        f.writable = writable;
+    }
+
+    int read(self *f, void *user_buf, unsigned int n) {
+        unsigned int addr = (unsigned int)user_buf;
+        unsigned int remaining;
+        unsigned char *dst;
+
+        if (!f.can_read()) {
+            return -1;
+        }
+        if (f.type == FD_PIPE) {
+            return f.pipe.read(user_buf, n);
+        }
+        if (f.type != FD_REG || f.file == 0) {
+            if (f.type != FD_MEM || f.mem == 0) {
+                return -1;
+            }
+            if (!user_range_ok(addr, n)) {
+                return -1;
+            }
+            if (f.off >= f.mem->size) {
+                return 0;
+            }
+            remaining = f.mem->size - f.off;
+            if (n > remaining) {
+                n = remaining;
+            }
+            dst = (unsigned char *)(current->segbase + addr);
+            memcpy(dst, f.mem->data + f.off, n);
+            f.off = f.off + n;
+            return (int)n;
+        }
+
+        if (!user_range_ok(addr, n)) {
+            return -1;
+        }
+        if (f.off >= f.file->size) {
+            return 0;
+        }
+
+        remaining = f.file->size - f.off;
+        if (n > remaining) {
+            n = remaining;
+        }
+        dst = (unsigned char *)(current->segbase + addr);
+        memcpy(dst, f.file->data + f.off, n);
+        f.off = f.off + n;
+        return (int)n;
+    }
+
+    int write(self *f, const void *user_buf, unsigned int n) {
+        unsigned int addr = (unsigned int)user_buf;
+        unsigned int space;
+        unsigned char *src;
+
+        if (!f.can_write()) {
+            return -1;
+        }
+        if (f.type == FD_PIPE) {
+            return f.pipe.write(user_buf, n);
+        }
+        if (f.type == FD_MEM && f.mem != 0) {
+            if (!user_range_ok(addr, n)) {
+                return -1;
+            }
+            if (f.off >= MEM_FILE_MAX) {
+                return 0;
+            }
+            space = MEM_FILE_MAX - f.off;
+            if (n > space) {
+                n = space;
+            }
+            src = (unsigned char *)(current->segbase + addr);
+            memcpy(f.mem->data + f.off, src, n);
+            f.off = f.off + n;
+            if (f.off > f.mem->size) {
+                f.mem->size = f.off;
+            }
+            return (int)n;
+        }
+        return -1;
+    }
+
+    int close(self *f) {
+        if (f.ref <= 0) {
+            return -1;
+        }
+
+        f.ref = f.ref - 1;
+        if (f.type == FD_PIPE && f.pipe != 0) {
+            f.pipe.close_end(f.writable);
+        }
+        if (f.ref == 0) {
+            if (f.type == FD_PIPE && f.pipe != 0 &&
+                f.pipe->read_open == 0 && f.pipe->write_open == 0) {
+                f.pipe.free();
+            }
+            f.reset();
+        }
+        return 0;
+    }
+
+    int dup_ref(self *f) {
+        if (f.ref <= 0) {
+            return -1;
+        }
+        f.ref = f.ref + 1;
+        if (f.type == FD_PIPE && f.pipe != 0) {
+            f.pipe.dup_end(f.writable);
+        }
+        return 0;
+    }
+}
+
 int file_open(const char *path) {
     char *path_name = user_path_name(path);
     struct fs_file *fsf;
@@ -443,26 +642,17 @@ int file_open(const char *path) {
         return -1;
     }
     for (fd = 3; fd < NFILE; fd++) {
-        if (file_table[fd].ref == 0) {
+        if (file_table[fd].is_free()) {
             if (mf != 0) {
-                file_table[fd].type = FD_MEM;
-                file_table[fd].file = 0;
-                file_table[fd].mem = mf;
+                file_table[fd].open_mem(mf, 0);
             } else {
                 fsf = fs_lookup(path_name);
                 if (fsf == 0) {
                     lock_release(&file_lock);
                     return -1;
                 }
-                file_table[fd].type = FD_REG;
-                file_table[fd].file = fsf;
-                file_table[fd].mem = 0;
+                file_table[fd].open_reg(fsf);
             }
-            file_table[fd].pipe = 0;
-            file_table[fd].off = 0;
-            file_table[fd].ref = 1;
-            file_table[fd].readable = 1;
-            file_table[fd].writable = 0;
             current_add_fd(fd);
             lock_release(&file_lock);
             return fd;
@@ -494,22 +684,13 @@ int file_create(const char *path) {
             lock_release(&file_lock);
             return -1;
         }
-        copy_mem_name(mf->name, path_name);
-        mf->used = 1;
-        mf->is_dir = 0;
+        mf.init_file(path_name);
     }
-    mf->size = 0;
+    mf.truncate();
 
     for (fd = 3; fd < NFILE; fd++) {
-        if (file_table[fd].ref == 0) {
-            file_table[fd].type = FD_MEM;
-            file_table[fd].file = 0;
-            file_table[fd].pipe = 0;
-            file_table[fd].mem = mf;
-            file_table[fd].off = 0;
-            file_table[fd].ref = 1;
-            file_table[fd].readable = 1;
-            file_table[fd].writable = 1;
+        if (file_table[fd].is_free()) {
+            file_table[fd].open_mem(mf, 1);
             current_add_fd(fd);
             lock_release(&file_lock);
             return fd;
@@ -521,9 +702,6 @@ int file_create(const char *path) {
 
 int file_read(int fd, void *user_buf, unsigned int n) {
     struct file *f;
-    unsigned int addr = (unsigned int)user_buf;
-    unsigned int remaining;
-    unsigned char *dst;
     int r;
 
     int original_fd = fd;
@@ -533,67 +711,16 @@ int file_read(int fd, void *user_buf, unsigned int n) {
     }
     lock_acquire(&file_lock);
     f = &file_table[fd];
-    if (f->ref <= 0 || !f->readable) {
+    r = f.read(user_buf, n);
+    if (r != FILE_BLOCKED) {
         lock_release(&file_lock);
-        return -1;
     }
-    if (f->type == FD_PIPE) {
-        r = f->pipe.read(user_buf, n);
-        if (r != FILE_BLOCKED) {
-            lock_release(&file_lock);
-        }
-        return r;
-    }
-    if (f->type != FD_REG || f->file == 0) {
-        if (f->type != FD_MEM || f->mem == 0) {
-            lock_release(&file_lock);
-            return -1;
-        }
-        if (!user_range_ok(addr, n)) {
-            lock_release(&file_lock);
-            return -1;
-        }
-        if (f->off >= f->mem->size) {
-            lock_release(&file_lock);
-            return 0;
-        }
-        remaining = f->mem->size - f->off;
-        if (n > remaining) {
-            n = remaining;
-        }
-        dst = (unsigned char *)(current->segbase + addr);
-        memcpy(dst, f->mem->data + f->off, n);
-        f->off = f->off + n;
-        lock_release(&file_lock);
-        return (int)n;
-    }
-
-    if (!user_range_ok(addr, n)) {
-        lock_release(&file_lock);
-        return -1;
-    }
-    if (f->off >= f->file->size) {
-        lock_release(&file_lock);
-        return 0;
-    }
-
-    remaining = f->file->size - f->off;
-    if (n > remaining) {
-        n = remaining;
-    }
-    dst = (unsigned char *)(current->segbase + addr);
-    memcpy(dst, f->file->data + f->off, n);
-    f->off = f->off + n;
-    lock_release(&file_lock);
-    return (int)n;
+    return r;
 }
 
 int file_write(int fd, const void *user_buf, unsigned int n) {
     struct file *f;
     int r;
-    unsigned int addr = (unsigned int)user_buf;
-    unsigned int space;
-    unsigned char *src;
 
     int original_fd = fd;
     fd = resolve_fd(fd);
@@ -602,75 +729,25 @@ int file_write(int fd, const void *user_buf, unsigned int n) {
     }
     lock_acquire(&file_lock);
     f = &file_table[fd];
-    if (f->ref <= 0 || !f->writable) {
+    r = f.write(user_buf, n);
+    if (r != FILE_BLOCKED) {
         lock_release(&file_lock);
-        return -1;
     }
-    if (f->type == FD_PIPE) {
-        r = f->pipe.write(user_buf, n);
-        if (r != FILE_BLOCKED) {
-            lock_release(&file_lock);
-        }
-        return r;
-    }
-    if (f->type == FD_MEM && f->mem != 0) {
-        if (!user_range_ok(addr, n)) {
-            lock_release(&file_lock);
-            return -1;
-        }
-        if (f->off >= MEM_FILE_MAX) {
-            lock_release(&file_lock);
-            return 0;
-        }
-        space = MEM_FILE_MAX - f->off;
-        if (n > space) {
-            n = space;
-        }
-        src = (unsigned char *)(current->segbase + addr);
-        memcpy(f->mem->data + f->off, src, n);
-        f->off = f->off + n;
-        if (f->off > f->mem->size) {
-            f->mem->size = f->off;
-        }
-        lock_release(&file_lock);
-        return (int)n;
-    }
-    lock_release(&file_lock);
-    return -1;
+    return r;
 }
 
 int file_close(int fd) {
     struct file *f;
+    int r;
 
     if (fd < 0 || fd >= NFILE) {
         return -1;
     }
     lock_acquire(&file_lock);
     f = &file_table[fd];
-    if (f->ref <= 0) {
-        lock_release(&file_lock);
-        return -1;
-    }
-
-    f->ref = f->ref - 1;
-    if (f->type == FD_PIPE && f->pipe != 0) {
-        f->pipe.close_end(f->writable);
-    }
-    if (f->ref == 0) {
-        if (f->type == FD_PIPE && f->pipe != 0 &&
-            f->pipe.read_open == 0 && f->pipe.write_open == 0) {
-            f->pipe.free();
-        }
-        f->type = FD_NONE;
-        f->file = 0;
-        f->pipe = 0;
-        f->mem = 0;
-        f->off = 0;
-        f->readable = 0;
-        f->writable = 0;
-    }
+    r = f.close();
     lock_release(&file_lock);
-    return 0;
+    return r;
 }
 
 int file_close_fd(int fd) {
@@ -724,13 +801,9 @@ int file_dup(int fd) {
     }
     lock_acquire(&file_lock);
     f = &file_table[fd];
-    if (f->ref <= 0) {
+    if (f.dup_ref() < 0) {
         lock_release(&file_lock);
         return -1;
-    }
-    f->ref = f->ref + 1;
-    if (f->type == FD_PIPE && f->pipe != 0) {
-        f->pipe.dup_end(f->writable);
     }
     lock_release(&file_lock);
     return fd;
@@ -793,7 +866,7 @@ int file_pipe(int *fds) {
     }
 
     for (int fd = 3; fd + 1 < NFILE; fd++) {
-        if (file_table[fd].ref == 0 && file_table[fd + 1].ref == 0) {
+        if (file_table[fd].is_free() && file_table[fd + 1].is_free()) {
             rfd = fd;
             wfd = fd + 1;
             break;
@@ -806,23 +879,8 @@ int file_pipe(int *fds) {
 
     p.init();
 
-    file_table[rfd].type = FD_PIPE;
-    file_table[rfd].file = 0;
-    file_table[rfd].pipe = p;
-    file_table[rfd].mem = 0;
-    file_table[rfd].off = 0;
-    file_table[rfd].ref = 1;
-    file_table[rfd].readable = 1;
-    file_table[rfd].writable = 0;
-
-    file_table[wfd].type = FD_PIPE;
-    file_table[wfd].file = 0;
-    file_table[wfd].pipe = p;
-    file_table[wfd].mem = 0;
-    file_table[wfd].off = 0;
-    file_table[wfd].ref = 1;
-    file_table[wfd].readable = 0;
-    file_table[wfd].writable = 1;
+    file_table[rfd].open_pipe(p, 1, 0);
+    file_table[wfd].open_pipe(p, 0, 1);
 
     ufds = (int *)(current->segbase + addr);
     ufds[0] = rfd;
