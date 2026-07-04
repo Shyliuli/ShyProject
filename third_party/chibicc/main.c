@@ -11,6 +11,8 @@ bool opt_target_shy;
 bool opt_shy_link_runtime;
 bool opt_shy_no_main;
 bool opt_shy_emit_source_lines;
+bool opt_shy_emit_debug_info;
+char *opt_shy_debug_output_path;
 char *opt_shy_mem_hint;
 char *opt_shy_stack_hint;
 
@@ -41,7 +43,7 @@ static StringArray input_paths;
 static StringArray tmpfiles;
 
 static void usage(int status) {
-  fprintf(stderr, "chibicc [ -o <path> ] [ --shy-emit-source-lines ] <file>\n");
+  fprintf(stderr, "chibicc [ -o <path> ] [ --shy-emit-source-lines ] [ --shy-emit-debug-info ] <file>\n");
   exit(status);
 }
 
@@ -294,6 +296,11 @@ static void parse_args(int argc, char **argv) {
       continue;
     }
 
+    if (!strcmp(argv[i], "--shy-emit-debug-info")) {
+      opt_shy_emit_debug_info = true;
+      continue;
+    }
+
     if (!strcmp(argv[i], "-cc1-input")) {
       base_file = argv[++i];
       continue;
@@ -364,6 +371,9 @@ static void parse_args(int argc, char **argv) {
 
   if (input_paths.len == 0)
     error("no input files");
+
+  if (opt_shy_emit_debug_info && !opt_shy_emit_source_lines)
+    error("--shy-emit-debug-info requires --shy-emit-source-lines");
 
   // -E implies that the input is the C macro language.
   if (opt_E)
@@ -581,6 +591,11 @@ static void cc1(void) {
   FILE *output_buf = open_memstream(&buf, &buflen);
 
   // Traverse the AST to emit assembly.
+  if (opt_target_shy && opt_shy_emit_debug_info) {
+    if (!output_file || !strcmp(output_file, "-"))
+      error("--shy-emit-debug-info requires a named -o output");
+    opt_shy_debug_output_path = format("%s.debug.json", output_file);
+  }
   codegen(prog, output_buf);
   fclose(output_buf);
 

@@ -30,6 +30,41 @@ struct Rename {
   char *new;
 };
 
+typedef struct DebugFile DebugFile;
+struct DebugFile {
+  DebugFile *next;
+  char *path;
+  int index;
+};
+
+typedef struct DebugFunction DebugFunction;
+struct DebugFunction {
+  DebugFunction *next;
+  Obj *fn;
+  char *name;
+  char *section;
+  int offset;
+  int file_index;
+  int line;
+};
+
+typedef struct DebugType DebugType;
+struct DebugType {
+  DebugType *next;
+  Type *ty;
+  int id;
+  char *name_override;
+};
+
+typedef struct DebugLine DebugLine;
+struct DebugLine {
+  DebugLine *next;
+  int file_index;
+  int line;
+  char *section;
+  int offset;
+};
+
 static FILE *output_file;
 static Obj *current_fn;
 static int labelseq;
@@ -42,14 +77,505 @@ static int argreg_len = sizeof(argreg) / sizeof(*argreg);
 static Rename *renames;
 static char *last_source_filename;
 static int last_source_line;
+static DebugFile *debug_files;
+static DebugFunction *debug_functions;
+static DebugType *debug_types;
+static DebugLine *debug_lines;
+static DebugLine *debug_lines_tail;
+static char *debug_current_section;
+static int debug_current_offset;
+
+static void json_string(FILE *out, char *s);
+
+static bool startswith(char *s, char *prefix) {
+  return !strncmp(s, prefix, strlen(prefix));
+}
+
+static char *skip_space(char *s) {
+  while (*s && isspace(*s))
+    s++;
+  return s;
+}
+
+static bool is_label_line(char *s) {
+  int len = strlen(s);
+  return len > 0 && s[len - 1] == ':';
+}
+
+static char *token_text(Token *tok) {
+  if (!tok || !tok->loc || tok->len <= 0)
+    return NULL;
+  return strndup(tok->loc, tok->len);
+}
+
+static int debug_file_index(char *path) {
+  if (!path)
+    path = "-";
+
+  for (DebugFile *file = debug_files; file; file = file->next)
+    if (!strcmp(file->path, path))
+      return file->index;
+
+  DebugFile *file = calloc(1, sizeof(DebugFile));
+  file->path = strdup(path);
+  int index = 1;
+  for (DebugFile *p = debug_files; p; p = p->next)
+    index++;
+  file->index = index;
+  file->next = debug_files;
+  debug_files = file;
+  return index;
+}
+
+static void debug_add_line(char *filename, int line) {
+  if (!opt_shy_emit_debug_info || !debug_current_section)
+    return;
+  if (!startswith(debug_current_section, "text."))
+    return;
+
+  DebugLine *entry = calloc(1, sizeof(DebugLine));
+  entry->file_index = debug_file_index(filename);
+  entry->line = line;
+  entry->section = strdup(debug_current_section);
+  entry->offset = debug_current_offset;
+
+  if (debug_lines_tail) {
+    debug_lines_tail->next = entry;
+    debug_lines_tail = entry;
+  } else {
+    debug_lines = debug_lines_tail = entry;
+  }
+}
+
+static void debug_add_function(Obj *fn, char *section) {
+  if (!opt_shy_emit_debug_info || !fn || !fn->tok)
+    return;
+
+  char *filename = fn->tok->filename ? fn->tok->filename :
+                   fn->tok->file && fn->tok->file->display_name ? fn->tok->file->display_name :
+                   fn->tok->file ? fn->tok->file->name : "-";
+
+  DebugFunction *entry = calloc(1, sizeof(DebugFunction));
+  entry->fn = fn;
+  entry->name = strdup(fn->name);
+  entry->section = strdup(section);
+  entry->offset = 0;
+  entry->file_index = debug_file_index(filename);
+  entry->line = fn->tok->line_no;
+  entry->next = debug_functions;
+  debug_functions = entry;
+}
+
+static int debug_type_id(Type *ty) {
+  if (!ty)
+    return 0;
+
+  for (DebugType *dt = debug_types; dt; dt = dt->next)
+    if (dt->ty == ty)
+      return dt->id;
+
+  DebugType *dt = calloc(1, sizeof(DebugType));
+  dt->ty = ty;
+  int id = 1;
+  for (DebugType *p = debug_types; p; p = p->next)
+    id++;
+  dt->id = id;
+  dt->next = debug_types;
+  debug_types = dt;
+
+  switch (ty->kind) {
+  case TY_PTR:
+  case TY_ARRAY:
+  case TY_VLA:
+    debug_type_id(ty->base);
+    break;
+  case TY_FUNC:
+    debug_type_id(ty->return_ty);
+    for (Type *param = ty->params; param; param = param->next)
+      debug_type_id(param);
+    break;
+  case TY_STRUCT:
+  case TY_UNION:
+    for (Member *mem = ty->members; mem; mem = mem->next)
+      debug_type_id(mem->ty);
+    break;
+  default:
+    break;
+  }
+
+  return dt->id;
+}
+
+static DebugType *debug_find_type(Type *ty) {
+  for (DebugType *dt = debug_types; dt; dt = dt->next)
+    if (dt->ty == ty)
+      return dt;
+  return NULL;
+}
+
+static void debug_note_var_type_name(Obj *var) {
+  if (!var || !var->ty || !var->name || !var->name[0])
+    return;
+  if (var->ty->kind != TY_STRUCT && var->ty->kind != TY_UNION)
+    return;
+
+  int id = debug_type_id(var->ty);
+  (void)id;
+  DebugType *dt = debug_find_type(var->ty);
+  if (!dt || dt->name_override || var->ty->tag)
+    return;
+  dt->name_override =
+      format("%s %s", var->ty->kind == TY_STRUCT ? "struct" : "union",
+             var->name);
+}
+
+static bool debug_is_param(Obj *fn, Obj *var) {
+  for (Obj *param = fn->params; param; param = param->next)
+    if (param == var)
+      return true;
+  return false;
+}
+
+static bool debug_should_emit_var(Obj *var) {
+  return var && var->name && var->name[0] && var->ty && !var->is_sret_alias &&
+         !var->is_elided;
+}
+
+static bool debug_is_internal_var(Obj *fn, Obj *var) {
+  return var == fn->va_area || var == fn->alloca_bottom ||
+         !strcmp(var->name, "__va_area__") ||
+         !strcmp(var->name, "__alloca_size__");
+}
+
+static void debug_collect_function_types(Obj *fn) {
+  for (Obj *var = fn->params; var; var = var->next) {
+    if (!debug_should_emit_var(var))
+      continue;
+    debug_note_var_type_name(var);
+    debug_type_id(var->ty);
+  }
+  for (Obj *var = fn->locals; var; var = var->next) {
+    if (debug_is_param(fn, var) || !debug_should_emit_var(var) ||
+        debug_is_internal_var(fn, var))
+      continue;
+    debug_note_var_type_name(var);
+    debug_type_id(var->ty);
+  }
+}
+
+static void debug_collect_types(void) {
+  for (DebugFunction *fn = debug_functions; fn; fn = fn->next)
+    if (fn->fn)
+      debug_collect_function_types(fn->fn);
+}
+
+static char *debug_type_name(Type *ty) {
+  if (!ty)
+    return NULL;
+
+  switch (ty->kind) {
+  case TY_VOID:
+    return "void";
+  case TY_BOOL:
+    return "_Bool";
+  case TY_CHAR:
+    return ty->is_unsigned ? "unsigned char" : "char";
+  case TY_SHORT:
+    return ty->is_unsigned ? "unsigned short" : "short";
+  case TY_INT:
+    return ty->is_unsigned ? "unsigned int" : "int";
+  case TY_LONG:
+    return ty->is_unsigned ? "unsigned long" : "long";
+  case TY_FLOAT:
+    return "float";
+  case TY_DOUBLE:
+    return "double";
+  case TY_LDOUBLE:
+    return "long double";
+  case TY_ENUM:
+    return "enum";
+  case TY_STRUCT:
+    if (ty->tag)
+      return format("struct %s", token_text(ty->tag));
+    return "struct";
+  case TY_UNION:
+    if (ty->tag)
+      return format("union %s", token_text(ty->tag));
+    return "union";
+  case TY_PTR:
+    return "pointer";
+  case TY_ARRAY:
+    return "array";
+  case TY_VLA:
+    return "vla";
+  case TY_FUNC:
+    return "function";
+  }
+  return "type";
+}
+
+static char *debug_type_kind(Type *ty) {
+  switch (ty->kind) {
+  case TY_PTR:
+    return "pointer";
+  case TY_ARRAY:
+  case TY_VLA:
+    return "array";
+  case TY_STRUCT:
+    return "struct";
+  case TY_UNION:
+    return "union";
+  case TY_ENUM:
+    return "enum";
+  case TY_FUNC:
+    return "function";
+  default:
+    return "base";
+  }
+}
+
+static char *debug_base_encoding(Type *ty) {
+  switch (ty->kind) {
+  case TY_VOID:
+    return "void";
+  case TY_BOOL:
+    return "bool";
+  case TY_FLOAT:
+  case TY_DOUBLE:
+  case TY_LDOUBLE:
+    return "float";
+  case TY_CHAR:
+  case TY_SHORT:
+  case TY_INT:
+  case TY_LONG:
+  case TY_ENUM:
+    return ty->is_unsigned ? "unsigned" : "signed";
+  default:
+    return NULL;
+  }
+}
+
+static void debug_write_var(FILE *out, Obj *var) {
+  char *filename = var->tok && var->tok->filename ? var->tok->filename :
+                   var->tok && var->tok->file && var->tok->file->display_name ? var->tok->file->display_name :
+                   var->tok && var->tok->file ? var->tok->file->name : NULL;
+  fprintf(out, "{\"name\": ");
+  json_string(out, var->name);
+  fprintf(out, ", \"type\": %d, \"offset\": %d, \"file\": %d, \"line\": %d}",
+          debug_type_id(var->ty), var->offset,
+          filename ? debug_file_index(filename) : 0,
+          var->tok ? var->tok->line_no : 0);
+}
+
+static void debug_write_vars(FILE *out, Obj *fn, bool params) {
+  bool first = true;
+  if (params) {
+    for (Obj *var = fn->params; var; var = var->next) {
+      if (!debug_should_emit_var(var))
+        continue;
+      if (!first)
+        fprintf(out, ", ");
+      first = false;
+      debug_write_var(out, var);
+    }
+    return;
+  }
+
+  for (Obj *var = fn->locals; var; var = var->next) {
+    if (debug_is_param(fn, var) || !debug_should_emit_var(var) ||
+        debug_is_internal_var(fn, var))
+      continue;
+    if (!first)
+      fprintf(out, ", ");
+    first = false;
+    debug_write_var(out, var);
+  }
+}
+
+static void debug_write_type(FILE *out, DebugType *dt) {
+  Type *ty = dt->ty;
+  fprintf(out, "    {\"id\": %d, \"kind\": ", dt->id);
+  json_string(out, debug_type_kind(ty));
+  fprintf(out, ", \"name\": ");
+  json_string(out, dt->name_override ? dt->name_override : debug_type_name(ty));
+  fprintf(out, ", \"size\": %d", ty->size);
+
+  char *encoding = debug_base_encoding(ty);
+  if (encoding) {
+    fprintf(out, ", \"encoding\": ");
+    json_string(out, encoding);
+  }
+
+  if (ty->base)
+    fprintf(out, ", \"base\": %d", debug_type_id(ty->base));
+  if (ty->kind == TY_ARRAY)
+    fprintf(out, ", \"array_len\": %d", ty->array_len);
+  if (ty->kind == TY_VLA)
+    fprintf(out, ", \"array_len\": -1");
+
+  if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
+    fprintf(out, ", \"members\": [");
+    bool first = true;
+    for (Member *mem = ty->members; mem; mem = mem->next) {
+      if (!mem->name)
+        continue;
+      if (!first)
+        fprintf(out, ", ");
+      first = false;
+      fprintf(out, "{\"name\": ");
+      json_string(out, token_text(mem->name));
+      fprintf(out, ", \"type\": %d, \"offset\": %d", debug_type_id(mem->ty),
+              mem->offset);
+      if (mem->is_bitfield)
+        fprintf(out, ", \"bit_offset\": %d, \"bit_size\": %d",
+                mem->bit_offset, mem->bit_width);
+      fprintf(out, "}");
+    }
+    fprintf(out, "]");
+  }
+
+  fprintf(out, "}");
+}
+
+static void debug_track_emitted_line(char *line) {
+  if (!opt_shy_emit_debug_info)
+    return;
+
+  char *s = skip_space(line);
+  if (!*s)
+    return;
+
+  if (startswith(s, ".section ")) {
+    free(debug_current_section);
+    debug_current_section = strdup(skip_space(s + strlen(".section ")));
+    debug_current_offset = 0;
+    return;
+  }
+
+  if (!debug_current_section || !startswith(debug_current_section, "text."))
+    return;
+  if (startswith(s, "//") || startswith(s, "#![") || *s == '.' || is_label_line(s))
+    return;
+
+  debug_current_offset += 12;
+}
+
+static void json_string(FILE *out, char *s) {
+  fputc('"', out);
+  for (; s && *s; s++) {
+    switch (*s) {
+    case '\\':
+      fputs("\\\\", out);
+      break;
+    case '"':
+      fputs("\\\"", out);
+      break;
+    case '\n':
+      fputs("\\n", out);
+      break;
+    case '\r':
+      fputs("\\r", out);
+      break;
+    case '\t':
+      fputs("\\t", out);
+      break;
+    default:
+      fputc(*s, out);
+    }
+  }
+  fputc('"', out);
+}
+
+static void write_shy_debug_info(void) {
+  if (!opt_shy_emit_debug_info)
+    return;
+
+  debug_collect_types();
+
+  FILE *out = fopen(opt_shy_debug_output_path, "w");
+  if (!out)
+    error("cannot open debug info file: %s: %s", opt_shy_debug_output_path,
+          strerror(errno));
+
+  fprintf(out, "{\n  \"version\": 1,\n  \"address_size\": 4,\n  \"endian\": \"big\",\n");
+
+  fprintf(out, "  \"files\": [\n");
+  bool first = true;
+  for (DebugFile *file = debug_files; file; file = file->next) {
+    if (!first)
+      fprintf(out, ",\n");
+    first = false;
+    fprintf(out, "    {\"index\": %d, \"path\": ", file->index);
+    json_string(out, file->path);
+    fprintf(out, "}");
+  }
+  fprintf(out, "\n  ],\n");
+
+  fprintf(out, "  \"types\": [\n");
+  first = true;
+  for (DebugType *type = debug_types; type; type = type->next) {
+    if (!first)
+      fprintf(out, ",\n");
+    first = false;
+    debug_write_type(out, type);
+  }
+  fprintf(out, "\n  ],\n");
+
+  fprintf(out, "  \"functions\": [\n");
+  first = true;
+  for (DebugFunction *fn = debug_functions; fn; fn = fn->next) {
+    if (!first)
+      fprintf(out, ",\n");
+    first = false;
+    fprintf(out, "    {\"name\": ");
+    json_string(out, fn->name);
+    fprintf(out, ", \"symbol\": ");
+    json_string(out, fn->name);
+    fprintf(out, ", \"section\": ");
+    json_string(out, fn->section);
+    fprintf(out, ", \"offset\": %d, \"file\": %d, \"line\": %d",
+            fn->offset, fn->file_index, fn->line);
+    fprintf(out, ", \"frame_base\": \"r15\", \"params\": [");
+    if (fn->fn)
+      debug_write_vars(out, fn->fn, true);
+    fprintf(out, "], \"locals\": [");
+    if (fn->fn)
+      debug_write_vars(out, fn->fn, false);
+    fprintf(out, "]}");
+  }
+  fprintf(out, "\n  ],\n");
+
+  fprintf(out, "  \"line_entries\": [\n");
+  first = true;
+  for (DebugLine *line = debug_lines; line; line = line->next) {
+    if (!first)
+      fprintf(out, ",\n");
+    first = false;
+    fprintf(out, "    {\"file\": %d, \"line\": %d, \"section\": ",
+            line->file_index, line->line);
+    json_string(out, line->section);
+    fprintf(out, ", \"offset\": %d}", line->offset);
+  }
+  fprintf(out, "\n  ]\n}\n");
+  fclose(out);
+}
 
 __attribute__((format(printf, 1, 2)))
 static void println(char *fmt, ...) {
+  char *line;
+  size_t len;
+  FILE *buf = open_memstream(&line, &len);
+
   va_list ap;
   va_start(ap, fmt);
-  vfprintf(output_file, fmt, ap);
+  vfprintf(buf, fmt, ap);
   va_end(ap);
+  fclose(buf);
+
+  fputs(line, output_file);
   fprintf(output_file, "\n");
+  debug_track_emitted_line(line);
+  free(line);
 }
 
 static void emit_source_line(Token *tok) {
@@ -64,6 +590,7 @@ static void emit_source_line(Token *tok) {
     return;
   last_source_filename = filename;
   last_source_line = line_no;
+  debug_add_line(filename, line_no);
 
   uintptr_t file_start = (uintptr_t)tok->file->contents;
   uintptr_t file_end = file_start + strlen(tok->file->contents);
@@ -1617,7 +2144,9 @@ static void emit_text(Obj *prog) {
     if (!fn->is_function || !fn->is_definition || !fn->is_live)
       continue;
     bool bare_start = opt_shy_no_main && !strcmp(fn->name, "_start");
-    println(".section text.%s", fn->name);
+    char *section_name = format("text.%s", fn->name);
+    println(".section %s", section_name);
+    debug_add_function(fn, section_name);
     emit_source_line(fn->tok);
     println(".symbol %s", fn->name);
     current_fn = fn;
@@ -1969,6 +2498,13 @@ void codegen_shy(Obj *prog, FILE *out) {
   output_file = out;
   last_source_filename = NULL;
   last_source_line = 0;
+  debug_files = NULL;
+  debug_functions = NULL;
+  debug_types = NULL;
+  debug_lines = NULL;
+  debug_lines_tail = NULL;
+  debug_current_section = NULL;
+  debug_current_offset = 0;
   rename_private_symbols(prog);
   assign_lvar_offsets(prog);
 
@@ -1987,4 +2523,5 @@ void codegen_shy(Obj *prog, FILE *out) {
   emit_text(prog);
   if (opt_shy_link_runtime)
     emit_runtime();
+  write_shy_debug_info();
 }

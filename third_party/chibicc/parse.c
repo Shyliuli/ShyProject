@@ -1144,6 +1144,7 @@ static Type *enum_specifier(Token **rest, Token *tok) {
     tag = tok;
     tok = tok->next;
   }
+  ty->tag = tag;
 
   if (tag && !equal(tok, "{")) {
     Type *ty = find_tag(tag);

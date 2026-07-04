@@ -349,6 +349,7 @@ struct Type {
   // Declaration
   Token *name;
   Token *name_pos;
+  Token *tag;
 
   // Array
   int array_len;
@@ -470,6 +471,8 @@ extern bool opt_target_shy;
 extern bool opt_shy_link_runtime;
 extern bool opt_shy_no_main;
 extern bool opt_shy_emit_source_lines;
+extern bool opt_shy_emit_debug_info;
+extern char *opt_shy_debug_output_path;
 extern char *opt_shy_mem_hint;
 extern char *opt_shy_stack_hint;
 extern char *base_file;
