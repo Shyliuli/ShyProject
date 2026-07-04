@@ -48,7 +48,6 @@ int read_line(char *buf, int max) {
             break;
         }
 
-        write(1, &c, 1);
         if (c == '\n') {
             break;
         }

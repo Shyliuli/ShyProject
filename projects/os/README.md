@@ -58,10 +58,20 @@ Run the emulator directly:
 cargo run -q -p emu -- projects/os/target/kernel.sfs --mem 128M
 ```
 
-Scripted shell input also works:
+Scripted shell input also works, but note that the shell does not echo input
+itself; in a pipe the output shows the prompt followed by the command result:
 
 ```sh
 printf "echo hello\ncat test.txt\nexit\n" | make os-run
+```
+
+Output:
+
+```
+ShyOS boot
+$ hello
+$ hello world
+$ $
 ```
 
 ## User Shell and Applets
@@ -82,11 +92,11 @@ if-else dispatch chain (ShyC has no function pointers).
 
 ## Tests
 
-`make -C projects/os test` builds the kernel, runs the emulator, and checks:
-
-- The shell transcript for `echo hello`, `cat test.txt`, and `exit`.
-- The exit-only smoke test returns cleanly.
-- The `p7malloc` user test prints `p7malloc ok` and returns cleanly.
+`make -C projects/os test` builds the kernel, runs the emulator with a
+scripted shell input, and checks the transcript contains `ShyOS boot`, the
+prompted command results (`$ hello`, `$ hello world`), and the final restarted
+shell prompt. It also runs the `p7malloc` user test and requires the emulator
+exit code to be 0.
 - The emulator exit code is 0.
 
 ```sh
