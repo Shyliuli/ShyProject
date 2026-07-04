@@ -7,6 +7,7 @@ test/testc/*.shy
 test/testc/*.sobj
 test/testc/*.sfs
 test/testc/*.sym
+projects/os/tasktree*.json
 vscode-shyc/node_modules/
 vscode-shyc/out/
 vscode-shyc/*.vsix
