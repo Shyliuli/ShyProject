@@ -1,0 +1,41 @@
+#![no_main]
+#![mem(1M)]
+#![stack(4K)]
+
+#include "usys.h"
+#include "ulib.h"
+
+int main(void) {
+    char buf[64];
+    char *path = user_arg();
+    int fd;
+    int n;
+
+    if (!path[0]) {
+        fd = 0;
+    } else {
+        fd = open(path);
+        if (fd < 0) {
+            exit(1);
+        }
+    }
+
+    while (1) {
+        n = read(fd, buf, 64);
+        if (n <= 0) {
+            break;
+        }
+        write(1, buf, n);
+    }
+
+    if (fd != 0) {
+        close(fd);
+    }
+    exit(0);
+    return 0;
+}
+
+void _start(void) {
+    main();
+    exit(0);
+}

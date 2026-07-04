@@ -1,0 +1,156 @@
+#![no_main]
+#![mem(1M)]
+#![stack(4K)]
+
+#include "usys.h"
+#include "ulib.h"
+
+#define P4_TOTAL 768
+
+static char expected(int n) {
+    return (char)('a' + (n % 26));
+}
+
+static void print_int(int value) {
+    char buf[12];
+    int i = 0;
+    int n = value;
+
+    if (n == 0) {
+        puts("0");
+        return;
+    }
+    if (n < 0) {
+        puts("-");
+        n = 0 - n;
+    }
+    while (n > 0 && i < 11) {
+        buf[i] = (char)('0' + (n % 10));
+        n = n / 10;
+        i = i + 1;
+    }
+    while (i > 0) {
+        i = i - 1;
+        write(1, &buf[i], 1);
+    }
+}
+
+static int writer(int fd) {
+    int sent = 0;
+
+    while (sent < P4_TOTAL) {
+        char c = expected(sent);
+        int w;
+
+        w = write(fd, &c, 1);
+        if (w <= 0) {
+            puts("p4pipe write failed\n");
+            return -1;
+        }
+        sent = sent + w;
+        if (sent % 111 == 0) {
+            yield();
+        }
+    }
+    if (close(fd) < 0) {
+        puts("p4pipe close failed\n");
+        return -1;
+    }
+    return 0;
+}
+
+int main(void) {
+    int fds[2];
+    int pid;
+    int total = 0;
+    int ok = 1;
+    int status = 0;
+    int saved_status = 0;
+    int bad = -1;
+    int bad_got = 0;
+    int bad_want = 0;
+    char buf[29];
+
+    if (pipe(fds) < 0) {
+        puts("p4pipe pipe failed\n");
+        exit(1);
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        puts("p4pipe fork failed\n");
+        exit(1);
+    }
+    if (pid == 0) {
+        if (close(fds[0]) < 0) {
+            puts("p4pipe child close failed\n");
+            exit(1);
+        }
+        if (writer(fds[1]) < 0) {
+            exit(1);
+        }
+        exit(0);
+    }
+
+    close(fds[1]);
+    yield();
+
+    while (total < P4_TOTAL) {
+        int n = read(fds[0], buf, 29);
+        if (n < 0) {
+            puts("p4pipe read failed\n");
+            exit(1);
+        }
+        if (n == 0) {
+            break;
+        }
+        for (int i = 0; i < n; i++) {
+            if (buf[i] != expected(total + i)) {
+                ok = 0;
+                if (bad < 0) {
+                    bad = total + i;
+                    bad_got = (int)buf[i];
+                    bad_want = (int)expected(total + i);
+                }
+            }
+        }
+        total = total + n;
+        if (total % 87 == 0) {
+            yield();
+        }
+    }
+
+    while (wait(&status) == 0) {
+        yield();
+    }
+    saved_status = status;
+
+    if (ok && total == P4_TOTAL) {
+        close(fds[0]);
+        puts("p4pipe ok\n");
+        exit(0);
+    }
+
+    close(fds[0]);
+
+    puts("p4pipe failed total ");
+    print_int(total);
+    puts(" ok ");
+    print_int(ok);
+    puts(" bad ");
+    print_int(bad);
+    puts(" got ");
+    print_int(bad_got);
+    puts(" want ");
+    print_int(bad_want);
+    puts(" status ");
+    print_int(saved_status);
+    puts("\n");
+    exit(1);
+    return 0;
+}
+
+void _start(void) {
+    main();
+    exit(0);
+}

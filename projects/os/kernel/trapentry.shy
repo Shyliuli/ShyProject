@@ -1,0 +1,107 @@
+___DEFINE___
+
+SCHED_STACK_TOP 0x07f00000
+
+TF_SIZE 88
+TF_R0_OFF 0
+TF_R1_OFF 4
+TF_R2_OFF 8
+TF_R3_OFF 12
+TF_R4_OFF 16
+TF_R5_OFF 20
+TF_R6_OFF 24
+TF_R7_OFF 28
+TF_R8_OFF 32
+TF_R9_OFF 36
+TF_RA_OFF 40
+TF_RB_OFF 44
+TF_RC_OFF 48
+TF_RD_OFF 52
+TF_RE_OFF 56
+TF_RF_OFF 60
+TF_SP_OFF 64
+TF_KSP_OFF 68
+TF_EPC_OFF 72
+TF_SEGS_OFF 76
+TF_SEGE_OFF 80
+TF_CAUSE_OFF 84
+
+___DATA___
+
+___CODE___
+
+.section text.trap_entry
+.symbol trap_entry
+    // Save all general registers to the process kernel stack.
+    pusha 0x
+    pusha 1x
+    pusha 2x
+    pusha 3x
+    pusha 4x
+    pusha 5x
+    pusha 6x
+    pusha 7x
+    pusha 8x
+    pusha 9x
+    pusha ax
+    pusha bx
+    pusha cx
+    pusha dx
+    pusha ex
+    pusha fx
+
+    // Save special registers. 2x is used as a scratch register.
+    seta 2x sp
+    pusha 2x
+    seta 2x ksp
+    pusha 2x
+    seta 2x epc
+    pusha 2x
+    seta 2x segs
+    pusha 2x
+    seta 2x sege
+    pusha 2x
+    seta 2x cause
+    pusha 2x
+
+    // Build pointer to the trap frame: SP - TF_SIZE.
+    seta 2x sp
+    subn 2x TF_SIZE
+
+    // Save the interrupted process context using fixed offsets.
+    seta 4x 2x
+    calln trap_save_context
+
+    // Rebuild the trap-frame pointer after the helper returns.
+    seta 2x sp
+    subn 2x TF_SIZE
+
+    // Pass only scalar values to the C dispatcher.
+    setn 3x TF_CAUSE_OFF
+    adda 3x 2x
+    geta 4x 3x
+
+    setn 3x TF_R0_OFF
+    adda 3x 2x
+    geta 5x 3x
+
+    setn 3x TF_R1_OFF
+    adda 3x 2x
+    geta 6x 3x
+
+    setn 3x TF_R2_OFF
+    adda 3x 2x
+    geta 7x 3x
+
+    setn 3x TF_R3_OFF
+    adda 3x 2x
+    geta 8x 3x
+
+    // Switch to the scheduler stack.
+    setn sp SCHED_STACK_TOP
+
+    // Call the C syscall/timer dispatcher.
+    calln trap_handler
+
+    // The trap handler returns; jump to the scheduler (never returns).
+    ujmpn scheduler

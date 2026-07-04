@@ -1,0 +1,255 @@
+___DEFINE___
+
+USER_ENTRY 0x00000100
+USER_SEG_SIZE 0x00100000
+
+CTX_R0_OFF 0
+CTX_R1_OFF 4
+CTX_R2_OFF 8
+CTX_R3_OFF 12
+CTX_R4_OFF 16
+CTX_R5_OFF 20
+CTX_R6_OFF 24
+CTX_R7_OFF 28
+CTX_R8_OFF 32
+CTX_R9_OFF 36
+CTX_RA_OFF 40
+CTX_RB_OFF 44
+CTX_RC_OFF 48
+CTX_RD_OFF 52
+CTX_RE_OFF 56
+CTX_RF_OFF 60
+CTX_SP_OFF 64
+CTX_KSP_OFF 68
+CTX_EPC_OFF 72
+CTX_SEGS_OFF 76
+CTX_SEGE_OFF 80
+CTX_VALID_OFF 84
+
+PROC_KSTACK_OFF 100
+PROC_SEGBASE_OFF 104
+
+TF_R0_OFF 0
+TF_R1_OFF 4
+TF_R2_OFF 8
+TF_R3_OFF 12
+TF_R4_OFF 16
+TF_R5_OFF 20
+TF_R6_OFF 24
+TF_R7_OFF 28
+TF_R8_OFF 32
+TF_R9_OFF 36
+TF_RA_OFF 40
+TF_RB_OFF 44
+TF_RC_OFF 48
+TF_RD_OFF 52
+TF_RE_OFF 56
+TF_RF_OFF 60
+TF_SP_OFF 64
+TF_KSP_OFF 68
+TF_EPC_OFF 72
+TF_SEGS_OFF 76
+TF_SEGE_OFF 80
+
+___DATA___
+
+___CODE___
+
+.section text.trap_save_context
+.symbol trap_save_context
+    // void trap_save_context(struct trapframe *tf);
+    // current->ctx is at offset 0 in struct proc.
+    setn 1x current
+    geta 1x 1x
+    seta 2x 4x
+
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+    addn 1x 4
+    addn 2x 4
+    geta 3x 2x
+    puta 1x 3x
+
+    // ctx.sp is the interrupted user stack pointer from tf->ksp.
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_SP_OFF
+    setn 2x TF_KSP_OFF
+    adda 2x 4x
+    geta 3x 2x
+    puta 1x 3x
+
+    // ctx.ksp is the process kernel stack top before this trap frame.
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_KSP_OFF
+    puta 1x 4x
+
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_EPC_OFF
+    setn 2x TF_EPC_OFF
+    adda 2x 4x
+    geta 3x 2x
+    puta 1x 3x
+
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_SEGS_OFF
+    setn 2x TF_SEGS_OFF
+    adda 2x 4x
+    geta 3x 2x
+    puta 1x 3x
+
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_SEGE_OFF
+    setn 2x TF_SEGE_OFF
+    adda 2x 4x
+    geta 3x 2x
+    puta 1x 3x
+
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_VALID_OFF
+    setn 3x 1
+    puta 1x 3x
+    ret
+
+.section text.ctx_set_current_ret
+.symbol ctx_set_current_ret
+    // void ctx_set_current_ret(uint32_t value);
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_R1_OFF
+    puta 1x 4x
+    ret
+
+.section text.ctx_reset_current
+.symbol ctx_reset_current
+    // Reset current->ctx for a fresh image at USER_ENTRY.
+    // 4x contains the segment-relative initial user stack pointer.
+    setn 1x current
+    geta 1x 1x
+    setn 2x 0
+    setn 3x 16
+.L.ctx_reset_regs:
+    equn 3x 0
+    jmpn .L.ctx_reset_regs_done
+    puta 1x 2x
+    addn 1x 4
+    subn 3x 1
+    ujmpn .L.ctx_reset_regs
+.L.ctx_reset_regs_done:
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_SP_OFF
+    puta 1x 4x
+
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_KSP_OFF
+    setn 2x current
+    geta 2x 2x
+    addn 2x PROC_KSTACK_OFF
+    geta 2x 2x
+    puta 1x 2x
+
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_EPC_OFF
+    setn 2x USER_ENTRY
+    puta 1x 2x
+
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_SEGS_OFF
+    setn 2x current
+    geta 2x 2x
+    addn 2x PROC_SEGBASE_OFF
+    geta 2x 2x
+    puta 1x 2x
+
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_SEGE_OFF
+    setn 2x current
+    geta 2x 2x
+    addn 2x PROC_SEGBASE_OFF
+    geta 2x 2x
+    addn 2x USER_SEG_SIZE
+    puta 1x 2x
+
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_VALID_OFF
+    setn 2x 0
+    puta 1x 2x
+    ret
+
+.section text.ctx_retry_current_syscall
+.symbol ctx_retry_current_syscall
+    // Re-run the trapped syscall instruction when a blocking syscall wakes.
+    setn 1x current
+    geta 1x 1x
+    addn 1x CTX_EPC_OFF
+    geta 2x 1x
+    subn 2x 48
+    puta 1x 2x
+    ret

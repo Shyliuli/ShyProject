@@ -36,10 +36,10 @@ test-chibicc-shy:
 	test/chibicc-shy/run.sh
 
 os-build:
-	$(MAKE) -C os build
+	$(MAKE) -C projects/os build
 
 os-run:
-	$(MAKE) -C os run
+	$(MAKE) -C projects/os run
 
 $(BIN_DIR):
 	$(INSTALL) -d $(BIN_DIR)

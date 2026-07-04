@@ -1,0 +1,34 @@
+#![no_main]
+#![mem(1M)]
+#![stack(16K)]
+
+#include "usys.h"
+#include "ulib.h"
+
+int main(void) {
+    char buf[6000];
+    int i;
+
+    i = 0;
+    while (i < 6000) {
+        buf[i] = (char)(i & 127);
+        i = i + 1;
+    }
+
+    i = 0;
+    while (i < 6000) {
+        if (buf[i] != (char)(i & 127)) {
+            exit(1);
+        }
+        i = i + 1;
+    }
+
+    puts("stack ok\n");
+    exit(0);
+    return 0;
+}
+
+void _start(void) {
+    main();
+    exit(0);
+}

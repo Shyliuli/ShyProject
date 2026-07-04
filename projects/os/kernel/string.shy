@@ -1,0 +1,114 @@
+___DEFINE___
+
+___DATA___
+
+___CODE___
+
+.section text.memcpy
+.symbol memcpy
+    // void *memcpy(void *dest, const void *src, size_t n);
+    // Arguments: dest in 4x, src in 5x, n in 6x.
+    // Return: dest in 1x.
+    seta 1x 4x
+    equn 6x 0
+    jmpn .L.memcpy_done
+.L.memcpy_loop:
+    get8a 7x 5x
+    put8a 4x 7x
+    addn 4x 1
+    addn 5x 1
+    subn 6x 1
+    equn 6x 0
+    jmpn .L.memcpy_done
+    ujmpn .L.memcpy_loop
+.L.memcpy_done:
+    ret
+
+.section text.memset
+.symbol memset
+    // void *memset(void *s, int c, size_t n);
+    // Arguments: s in 4x, c in 5x, n in 6x.
+    // Return: s in 1x.
+    seta 1x 4x
+    equn 6x 0
+    jmpn .L.memset_done
+.L.memset_loop:
+    put8a 4x 5x
+    addn 4x 1
+    subn 6x 1
+    equn 6x 0
+    jmpn .L.memset_done
+    ujmpn .L.memset_loop
+.L.memset_done:
+    ret
+
+.section text.memcmp
+.symbol memcmp
+    // int memcmp(const void *s1, const void *s2, size_t n);
+    // Arguments: s1 in 4x, s2 in 5x, n in 6x.
+    // Return: 0 if equal, nonzero otherwise in 1x.
+    setn 1x 0
+    equn 6x 0
+    jmpn .L.memcmp_done
+.L.memcmp_loop:
+    get8a 7x 4x
+    get8a 8x 5x
+    suba 7x 8x
+    equn 7x 0
+    jmpn .L.memcmp_next
+    setn 1x 1
+    jmpn .L.memcmp_done
+.L.memcmp_next:
+    addn 4x 1
+    addn 5x 1
+    subn 6x 1
+    equn 6x 0
+    jmpn .L.memcmp_done
+    ujmpn .L.memcmp_loop
+.L.memcmp_done:
+    ret
+
+.section text.strlen
+.symbol strlen
+    // size_t strlen(const char *s);
+    // Argument: s in 4x.
+    // Return: length in 1x.
+    setn 1x 0
+.L.strlen_loop:
+    get8a 7x 4x
+    equn 7x 0
+    jmpn .L.strlen_done
+    addn 1x 1
+    addn 4x 1
+    ujmpn .L.strlen_loop
+.L.strlen_done:
+    ret
+
+.section text.strcmp
+.symbol strcmp
+    // int strcmp(const char *s1, const char *s2);
+    // Arguments: s1 in 4x, s2 in 5x.
+    // Return: 0 if equal, signed difference otherwise in 1x.
+.L.strcmp_loop:
+    get8a 7x 4x
+    get8a 8x 5x
+    equn 7x 0
+    jmpn .L.strcmp_end1
+    equn 8x 0
+    jmpn .L.strcmp_end2
+    suba 7x 8x
+    equn 7x 0
+    jmpn .L.strcmp_next
+    seta 1x 7x
+    ret
+.L.strcmp_next:
+    addn 4x 1
+    addn 5x 1
+    ujmpn .L.strcmp_loop
+.L.strcmp_end1:
+    setn 1x 0
+    suba 1x 8x
+    ret
+.L.strcmp_end2:
+    seta 1x 7x
+    ret

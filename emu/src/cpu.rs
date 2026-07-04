@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use shy_isa_lib::address::Address;
 use shy_isa_lib::op::OpType;
 
-/// 普通内存大小：16MiB。
-const MEM_SIZE: usize = 0x0100_0000;
+/// 默认内存大小：32MiB。
+pub const DEFAULT_MEM_SIZE: u32 = 0x0200_0000;
 /// 翻译缓存容量。直接映射，条目数保持 2 的幂，便于快速取模。
 const INSTR_CACHE_ENTRIES: usize = 16 * 1024;
 /// 程序入口地址。
@@ -74,6 +74,7 @@ pub struct Emu {
     cause: u32,
     ksp: u32,
     sege: u32,
+    mem_size: u32,
     mem: Vec<u8>,
     instr_cache: Vec<Option<CachedInstr>>,
     trap_stack: Vec<u32>,
@@ -88,7 +89,7 @@ pub struct Emu {
 
 impl Emu {
     /// 创建一个空白 CPU，内存清零，PC 指向入口，处于内核态、中断关闭。
-    pub fn new(debug: bool) -> Self {
+    pub fn new(debug: bool, mem_size: u32) -> Self {
         Self {
             regs: [0; 16],
             pc: ENTRY,
@@ -102,8 +103,9 @@ impl Emu {
             epc: 0,
             cause: 0,
             ksp: 0,
-            sege: MEM_SIZE as u32,
-            mem: vec![0; MEM_SIZE],
+            sege: mem_size,
+            mem_size,
+            mem: vec![0; mem_size as usize],
             instr_cache: vec![None; INSTR_CACHE_ENTRIES],
             trap_stack: Vec::new(),
             timer_pending: false,
@@ -118,11 +120,11 @@ impl Emu {
 
     /// 加载 `.sfs` raw 内存镜像：字节偏移即地址。
     pub fn load_image(&mut self, image: &[u8]) -> anyhow::Result<()> {
-        if image.len() > MEM_SIZE {
+        if image.len() > self.mem_size as usize {
             anyhow::bail!(
                 "image size {} exceeds memory size {}",
                 image.len(),
-                MEM_SIZE
+                self.mem_size
             );
         }
         self.mem[..image.len()].copy_from_slice(image);
@@ -218,12 +220,12 @@ impl Emu {
                 self.sege,
             )
         } else {
-            (addr, MEM_SIZE as u32)
+            (addr, self.mem_size)
         };
         let end = phys
             .checked_add(size as u32)
             .ok_or(TrapCause::IllegalAddr)?;
-        if end > limit || end as usize > MEM_SIZE {
+        if end > limit || end as usize > self.mem_size as usize {
             return Err(TrapCause::IllegalAddr);
         }
         Ok(phys as usize)
@@ -500,7 +502,7 @@ impl Emu {
         let cache_idx = ((self.pc / 4) as usize) & (INSTR_CACHE_ENTRIES - 1);
         let user = self.is_user();
         let cache_segs = if user { self.segs } else { 0 };
-        let cache_sege = if user { self.sege } else { MEM_SIZE as u32 };
+        let cache_sege = if user { self.sege } else { self.mem_size };
         if let Some(entry) = self.instr_cache[cache_idx] {
             if entry.pc == self.pc
                 && entry.user == user
@@ -958,7 +960,7 @@ mod tests {
     use super::*;
 
     fn emu() -> Emu {
-        let mut e = Emu::new(false);
+        let mut e = Emu::new(false, 0x0100_0000);
         // 测试中关闭实时定时器干扰。
         e.last_tick = Instant::now() + Duration::from_secs(3600);
         e
@@ -1307,7 +1309,7 @@ mod tests {
 
     #[test]
     fn user_to_kernel_sp_swap_on_trap() {
-        let mut e = Emu::new(false);
+        let mut e = Emu::new(false, 0x0100_0000);
         e.last_tick = Instant::now() + Duration::from_secs(3600);
         e.trap = 0x200;
         e.status = 0b01; // 用户态

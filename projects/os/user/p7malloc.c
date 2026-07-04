@@ -1,0 +1,85 @@
+#![no_main]
+#![mem(1M)]
+#![stack(4K)]
+
+#include "usys.h"
+#include "ulib.h"
+
+static void fail(void) {
+    puts("p7malloc fail\n");
+    exit(1);
+}
+
+static void fill(char *p, int n, int seed) {
+    int i = 0;
+
+    while (i < n) {
+        p[i] = (char)((i + seed) & 127);
+        i = i + 1;
+    }
+}
+
+static void check(char *p, int n, int seed) {
+    int i = 0;
+
+    while (i < n) {
+        if (p[i] != (char)((i + seed) & 127)) {
+            fail();
+        }
+        i = i + 1;
+    }
+}
+
+int main(void) {
+    char *a;
+    char *b;
+    char *c;
+    void *bad;
+
+    a = (char *)malloc(32);
+    b = (char *)malloc(257);
+    c = (char *)malloc(4);
+    if (a == 0 || b == 0 || c == 0) {
+        fail();
+    }
+    if (!((unsigned int)a < (unsigned int)b && (unsigned int)b < (unsigned int)c)) {
+        fail();
+    }
+
+    fill(a, 32, 3);
+    fill(b, 257, 9);
+    fill(c, 4, 21);
+    check(a, 32, 3);
+    check(b, 257, 9);
+    check(c, 4, 21);
+
+    free(a);
+    free(b);
+    free(c);
+    free((void *)0);
+
+    bad = sbrk(1048576);
+    if ((int)bad != -1) {
+        fail();
+    }
+    bad = sbrk(-1048576);
+    if ((int)bad != -1) {
+        fail();
+    }
+
+    a = (char *)malloc(16);
+    if (a == 0) {
+        fail();
+    }
+    fill(a, 16, 33);
+    check(a, 16, 33);
+
+    puts("p7malloc ok\n");
+    exit(0);
+    return 0;
+}
+
+void _start(void) {
+    main();
+    exit(0);
+}

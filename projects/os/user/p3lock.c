@@ -1,0 +1,101 @@
+#![no_main]
+#![mem(1M)]
+#![stack(4K)]
+
+#include "usys.h"
+#include "ulib.h"
+
+#define P3_ITERS 100
+#define P3_EXPECTED 200
+
+static void print_int(int value) {
+    char buf[12];
+    int i = 0;
+    int n = value;
+
+    if (n == 0) {
+        puts("0");
+        return;
+    }
+    if (n < 0) {
+        puts("-");
+        n = 0 - n;
+    }
+    while (n > 0 && i < 11) {
+        buf[i] = (char)('0' + (n % 10));
+        n = n / 10;
+        i = i + 1;
+    }
+    while (i > 0) {
+        i = i - 1;
+        write(1, &buf[i], 1);
+    }
+}
+
+static void child_work(void) {
+    for (int i = 0; i < P3_ITERS; i++) {
+        p3counter(1);
+        if (i % 11 == 0) {
+            yield();
+        }
+    }
+    exit(0);
+}
+
+int main(void) {
+    int status = 0;
+    int done = 0;
+    int pid1;
+    int pid2;
+    int count;
+
+    p3counter(0);
+
+    pid1 = fork();
+    if (pid1 < 0) {
+        puts("p3lock fork failed\n");
+        exit(1);
+    }
+    if (pid1 == 0) {
+        child_work();
+    }
+
+    pid2 = fork();
+    if (pid2 < 0) {
+        puts("p3lock fork failed\n");
+        exit(1);
+    }
+    if (pid2 == 0) {
+        child_work();
+    }
+
+    while (done < 2) {
+        int pid = wait(&status);
+        if (pid > 0) {
+            done = done + 1;
+        } else if (pid == 0) {
+            yield();
+        } else {
+            puts("p3lock wait failed\n");
+            exit(1);
+        }
+    }
+
+    count = p3counter(2);
+    puts("p3lock count ");
+    print_int(count);
+    puts("\n");
+    if (count == P3_EXPECTED) {
+        puts("p3lock ok\n");
+        exit(0);
+    }
+
+    puts("p3lock failed\n");
+    exit(1);
+    return 0;
+}
+
+void _start(void) {
+    main();
+    exit(0);
+}

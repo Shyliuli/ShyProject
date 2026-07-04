@@ -1,0 +1,39 @@
+#![no_main]
+#![mem(1M)]
+#![stack(4K)]
+
+#include "usys.h"
+
+int main(void) {
+    while (1) {
+        int status = 0;
+        int pid = fork();
+
+        if (pid < 0) {
+            exit(0);
+        }
+        if (pid == 0) {
+            exec("/sh", "");
+            exit(1);
+        }
+        pid = wait(&status);
+        while (pid == 0) {
+            yield();
+            pid = wait(&status);
+        }
+        if (pid < 0) {
+            exit(0);
+        }
+        if (status == 2) {
+            exit(0);
+        }
+    }
+
+    exit(0);
+    return 0;
+}
+
+void _start(void) {
+    main();
+    exit(0);
+}

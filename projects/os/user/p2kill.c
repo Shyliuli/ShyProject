@@ -1,0 +1,44 @@
+#![no_main]
+#![mem(1M)]
+#![stack(4K)]
+
+#include "usys.h"
+#include "ulib.h"
+
+#define P2_KILL_CHAN 5151
+
+int main(void) {
+    int status = 0;
+    int pid = fork();
+
+    if (pid < 0) {
+        puts("p2kill fork failed\n");
+        exit(1);
+    }
+    if (pid == 0) {
+        sleep(P2_KILL_CHAN);
+        puts("p2kill child survived\n");
+        exit(2);
+    }
+
+    yield();
+    if (kill(pid) < 0) {
+        puts("p2kill kill failed\n");
+        exit(1);
+    }
+
+    pid = wait(&status);
+    if (pid > 0 && status == -1) {
+        puts("p2kill child killed\n");
+        exit(0);
+    }
+
+    puts("p2kill failed\n");
+    exit(1);
+    return 0;
+}
+
+void _start(void) {
+    main();
+    exit(0);
+}

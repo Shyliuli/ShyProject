@@ -1,0 +1,113 @@
+#![no_main]
+
+#include "memlayout.h"
+#include "lock.h"
+
+void panic(char *msg);
+
+static Lock mem_lock;
+static unsigned int kheap;
+static int seg_free_list[USER_SEG_COUNT];
+static unsigned int kpage_free_list[4096];
+static int kpage_free_count;
+
+void mem_init(void) {
+    lock_init(&mem_lock);
+    kheap = KERN_HEAP_START;
+    kpage_free_count = 0;
+
+    for (int i = 0; i < USER_SEG_COUNT; i++) {
+        seg_free_list[i] = 1;
+    }
+}
+
+void *kalloc(unsigned int n) {
+    unsigned int old = kheap;
+
+    n = (n + 3) & ~3;
+    lock_acquire(&mem_lock);
+    if (kheap + n > KERN_HEAP_END) {
+        lock_release(&mem_lock);
+        panic("kalloc");
+    }
+
+    kheap = kheap + n;
+    lock_release(&mem_lock);
+    return (void *)old;
+}
+
+void *kalloc_page(void) {
+    lock_acquire(&mem_lock);
+    if (kpage_free_count > 0) {
+        kpage_free_count = kpage_free_count - 1;
+        void *page = (void *)kpage_free_list[kpage_free_count];
+        lock_release(&mem_lock);
+        return page;
+    }
+    lock_release(&mem_lock);
+
+    return kalloc(4096);
+}
+
+void kfree_page(void *p) {
+    unsigned int pa = (unsigned int)p;
+
+    if (pa < KERN_HEAP_START || pa >= KERN_HEAP_END) {
+        panic("kfree_page");
+    }
+    if (pa % 4096 != 0) {
+        panic("kfree_page");
+    }
+    lock_acquire(&mem_lock);
+    if (kpage_free_count >= 4096) {
+        lock_release(&mem_lock);
+        panic("kfree_page");
+    }
+
+    kpage_free_list[kpage_free_count] = pa;
+    kpage_free_count = kpage_free_count + 1;
+    lock_release(&mem_lock);
+}
+
+unsigned int seg_alloc(void) {
+    lock_acquire(&mem_lock);
+    for (int i = 0; i < USER_SEG_COUNT; i++) {
+        if (seg_free_list[i]) {
+            seg_free_list[i] = 0;
+            unsigned int pa = USER_SEG_START + i * USER_SEG_SIZE;
+            lock_release(&mem_lock);
+            return pa;
+        }
+    }
+    lock_release(&mem_lock);
+
+    panic("seg_alloc");
+    return 0;
+}
+
+void seg_free(unsigned int pa) {
+    unsigned int offset = 0;
+    unsigned int i = 0;
+
+    if (pa < USER_SEG_START) {
+        panic("seg_free");
+    }
+    if (pa >= USER_SEG_START + USER_SEG_COUNT * USER_SEG_SIZE) {
+        panic("seg_free");
+    }
+
+    offset = pa - USER_SEG_START;
+    if (offset % USER_SEG_SIZE != 0) {
+        panic("seg_free");
+    }
+
+    i = offset / USER_SEG_SIZE;
+    lock_acquire(&mem_lock);
+    if (seg_free_list[i]) {
+        lock_release(&mem_lock);
+        panic("seg_free");
+    }
+
+    seg_free_list[i] = 1;
+    lock_release(&mem_lock);
+}

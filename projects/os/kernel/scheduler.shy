@@ -1,0 +1,132 @@
+___DEFINE___
+
+CTX_R0_OFF 0
+CTX_R1_OFF 4
+CTX_R2_OFF 8
+CTX_R3_OFF 12
+CTX_R4_OFF 16
+CTX_R5_OFF 20
+CTX_R6_OFF 24
+CTX_R7_OFF 28
+CTX_R8_OFF 32
+CTX_R9_OFF 36
+CTX_RA_OFF 40
+CTX_RB_OFF 44
+CTX_RC_OFF 48
+CTX_RD_OFF 52
+CTX_RE_OFF 56
+CTX_RF_OFF 60
+CTX_SP_OFF 64
+CTX_KSP_OFF 68
+CTX_EPC_OFF 72
+CTX_SEGS_OFF 76
+CTX_SEGE_OFF 80
+CTX_VALID_OFF 84
+
+___DATA___
+
+___CODE___
+
+.section text.scheduler
+.symbol scheduler
+scheduler:
+    // Pick the next runnable process.
+    calln proc_next
+
+    // current = proc pointer (returned in 1x).
+    setn 2x current
+    puta 2x 1x
+
+    // Load general registers 0x..dx from current->ctx.regs[].
+    // Use fx as a pointer to the context.
+    setn fx current
+    geta fx fx
+
+    geta 0x fx
+    addn fx 4
+    geta 1x fx
+    addn fx 4
+    geta 2x fx
+    addn fx 4
+    geta 3x fx
+    addn fx 4
+    geta 4x fx
+    addn fx 4
+    geta 5x fx
+    addn fx 4
+    geta 6x fx
+    addn fx 4
+    geta 7x fx
+    addn fx 4
+    geta 8x fx
+    addn fx 4
+    geta 9x fx
+    addn fx 4
+    geta ax fx
+    addn fx 4
+    geta bx fx
+    addn fx 4
+    geta cx fx
+    addn fx 4
+    geta dx fx
+    addn fx 4
+
+    // Load the last two registers (ex, fx) using a temporary.
+    geta 2x fx
+    seta ex 2x
+    addn fx 4
+    geta 2x fx
+    seta fx 2x
+
+    // Load special registers from current->ctx.
+    // Load SP with the kernel stack pointer. enteruser/iret swap SP and KSP.
+    setn 2x current
+    geta 2x 2x
+    addn 2x 68
+    geta 2x 2x
+    seta sp 2x
+
+    // Load KSP with the user stack pointer. enteruser/iret swap SP and KSP.
+    setn 2x current
+    geta 2x 2x
+    addn 2x 64
+    geta 2x 2x
+    seta ksp 2x
+
+    // epc at offset 72.
+    setn 2x current
+    geta 2x 2x
+    addn 2x 72
+    geta 2x 2x
+    seta epc 2x
+
+    // segs at offset 76.
+    setn 2x current
+    geta 2x 2x
+    addn 2x 76
+    geta 2x 2x
+    seta segs 2x
+
+    // sege at offset 80.
+    setn 2x current
+    geta 2x 2x
+    addn 2x 80
+    geta 2x 2x
+    seta sege 2x
+
+    // Check ctx.valid at offset 84.
+    setn 2x current
+    geta 2x 2x
+    addn 2x 84
+    geta 2x 2x
+    equn 2x 0
+    jmpn do_enteruser
+
+    // Resume via iret.
+    iret
+
+do_enteruser:
+    enteruser 0x100
+
+    // Should never reach here.
+    ujmpn do_enteruser

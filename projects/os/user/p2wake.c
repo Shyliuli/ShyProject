@@ -1,0 +1,39 @@
+#![no_main]
+#![mem(1M)]
+#![stack(4K)]
+
+#include "usys.h"
+#include "ulib.h"
+
+#define P2_WAKE_CHAN 4242
+
+int main(void) {
+    int status = 0;
+    int pid = fork();
+
+    if (pid < 0) {
+        puts("p2wake fork failed\n");
+        exit(1);
+    }
+    if (pid == 0) {
+        sleep(P2_WAKE_CHAN);
+        puts("p2wake child woke\n");
+        exit(0);
+    }
+
+    yield();
+    wakeup(P2_WAKE_CHAN);
+    pid = wait(&status);
+    if (pid <= 0) {
+        puts("p2wake pid failed\n");
+        exit(1);
+    }
+    puts("p2wake parent done\n");
+    exit(0);
+    return 0;
+}
+
+void _start(void) {
+    main();
+    exit(0);
+}

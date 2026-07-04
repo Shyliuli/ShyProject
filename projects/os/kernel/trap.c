@@ -1,0 +1,207 @@
+#![no_main]
+
+#include <stdint.shyh>
+#include "fs.h"
+#include "lock.h"
+#include "trap.h"
+#include "proc.h"
+#include "memlayout.h"
+
+void uart_putc(int c);
+int uart_getc(void);
+struct proc *current;
+
+static int user_range_ok(unsigned int addr, unsigned int n) {
+    if (addr > USER_SEG_SIZE) {
+        return 0;
+    }
+    if (n > USER_SEG_SIZE) {
+        return 0;
+    }
+    if (addr + n < addr) {
+        return 0;
+    }
+    if (addr + n > USER_SEG_SIZE) {
+        return 0;
+    }
+    return 1;
+}
+
+static int sys_write(int fd, unsigned int buf, unsigned int n) {
+    unsigned char *p;
+
+    if (!user_range_ok(buf, n)) {
+        return -1;
+    }
+
+    if (fd != 1 || current->stdout_fd >= 3) {
+        return file_write(fd, (const void *)buf, n);
+    }
+
+    p = (unsigned char *)(current->segbase + buf);
+    for (unsigned int i = 0; i < n; i++) {
+        uart_putc(p[i]);
+    }
+    return (int)n;
+}
+
+static int sys_read(int fd, unsigned int buf, unsigned int n) {
+    unsigned char *p;
+    unsigned int i;
+
+    if (!user_range_ok(buf, n)) {
+        return -1;
+    }
+    if (n == 0) {
+        return 0;
+    }
+
+    if (fd == 0 && current->stdin_fd < 3) {
+        p = (unsigned char *)(current->segbase + buf);
+        i = 0;
+        while (i < n) {
+            int c = uart_getc();
+            if (c < 0) {
+                continue;
+            }
+            if (c == 0) {
+                if (i == 0) {
+                    asm("setn exit 0");
+                    return 0;
+                }
+                return (int)i;
+            }
+            p[i] = (unsigned char)c;
+            i = i + 1;
+            if (c == '\n') {
+                break;
+            }
+        }
+        return (int)i;
+    }
+
+    if (fd >= 3) {
+        return file_read(fd, (void *)buf, n);
+    }
+    if (fd == 0) {
+        return file_read(fd, (void *)buf, n);
+    }
+
+    return -1;
+}
+
+static void finish_file_result(int r) {
+    if (file_result_blocked(r)) {
+        ctx_retry_current_syscall();
+        return;
+    }
+    ctx_set_current_ret(r);
+    proc_set_current_state(RUNNABLE);
+}
+
+static void halt_if_no_user_work(void) {
+    if (current == 0) {
+        asm("setn exit 1");
+    }
+    if (getpid() == 1 || !proc_live_non_idle_exists()) {
+        asm("setn exit 0");
+    }
+}
+
+static void exit_if_killed(void) {
+    if (proc_current_killed_runnable()) {
+        exit(-1);
+        halt_if_no_user_work();
+    }
+}
+
+void trap_handler(uint32_t cause, uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3) {
+    if (cause == 1) {
+        if (r0 == 1) {
+            ctx_set_current_ret(fork());
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 2) {
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 3) {
+            ctx_set_current_ret(getpid());
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 4) {
+            exit(r1);
+            halt_if_no_user_work();
+        } else if (r0 == 5) {
+            finish_file_result(sys_write(r1, r2, r3));
+        } else if (r0 == 6) {
+            finish_file_result(sys_read(r1, r2, r3));
+        } else if (r0 == 7) {
+            ctx_set_current_ret(sys_exec((const char *)r1, (const char *)r2));
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 8) {
+            ctx_set_current_ret(wait((int *)r1));
+            if (!proc_current_state_is(SLEEPING)) {
+                proc_set_current_state(RUNNABLE);
+            }
+        } else if (r0 == 9) {
+            ctx_set_current_ret(file_open((const char *)r1));
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 10) {
+            ctx_set_current_ret(file_close_fd(r1));
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 11) {
+            ctx_set_current_ret(kill(r1));
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 12) {
+            ctx_set_current_ret(sleep(r1));
+            if (!proc_current_state_is(SLEEPING)) {
+                proc_set_current_state(RUNNABLE);
+            }
+        } else if (r0 == 13) {
+            wakeup(r1);
+            ctx_set_current_ret(0);
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 14) {
+            ctx_set_current_ret(p3_counter_op(r1));
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 15) {
+            ctx_set_current_ret(file_pipe((int *)r1));
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 16) {
+            ctx_set_current_ret(file_dup2(r1, r2));
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 17) {
+            ctx_set_current_ret(file_create((const char *)r1));
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 18) {
+            ctx_set_current_ret(fs_dirent(r1, (char *)r2, r3));
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 19) {
+            ctx_set_current_ret(fs_mkdir((const char *)r1));
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 20) {
+            ctx_set_current_ret(fs_rm((const char *)r1));
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 21) {
+            ctx_set_current_ret(proc_psline(r1, (char *)r2, r3));
+            proc_set_current_state(RUNNABLE);
+        } else if (r0 == 22) {
+            ctx_set_current_ret(proc_sbrk((int)r1));
+            proc_set_current_state(RUNNABLE);
+        } else {
+            ctx_set_current_ret((uint32_t)-1);
+            proc_set_current_state(RUNNABLE);
+        }
+        exit_if_killed();
+    } else if (cause == 2) {
+        proc_set_current_state(RUNNABLE);
+        asm("setn tm 100");
+        exit_if_killed();
+    } else if (cause == 3 || cause == 4 || cause == 5) {
+        if (current != 0 && getpid() != 0) {
+            exit((int)cause);
+            halt_if_no_user_work();
+        } else {
+            asm("setn exit 1");
+        }
+    } else {
+        asm("setn exit 1");
+    }
+}

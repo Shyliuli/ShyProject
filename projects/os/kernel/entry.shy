@@ -1,0 +1,16 @@
+___DEFINE___
+
+KERNEL_STACK_TOP 0x07f00000
+
+___DATA___
+
+___CODE___
+
+.section text._start
+.symbol _start
+setn sp KERNEL_STACK_TOP
+setn trap hang
+calln kmain
+
+hang:
+ujmpn hang

@@ -1,0 +1,166 @@
+___DEFINE___
+
+___DATA___
+
+___CODE___
+
+.section text.write
+.symbol write
+    setn 0x 5
+    seta 1x 4x
+    seta 2x 5x
+    seta 3x 6x
+    syscall
+    ret
+
+.section text.read
+.symbol read
+    setn 0x 6
+    seta 1x 4x
+    seta 2x 5x
+    seta 3x 6x
+    syscall
+    ret
+
+.section text.open
+.symbol open
+    setn 0x 9
+    seta 1x 4x
+    syscall
+    ret
+
+.section text.close
+.symbol close
+    setn 0x 10
+    seta 1x 4x
+    syscall
+    ret
+
+.section text.fork
+.symbol fork
+    setn 0x 1
+    syscall
+    ret
+
+.section text.getpid
+.symbol getpid
+    setn 0x 3
+    syscall
+    ret
+
+.section text.user_exit
+.symbol user_exit
+    setn 0x 4
+    seta 1x 4x
+    syscall
+    ujmpn user_exit
+
+.section text.yield
+.symbol yield
+    setn 0x 2
+    syscall
+    ret
+
+.section text.exec
+.symbol exec
+    setn 0x 7
+    seta 1x 4x
+    seta 2x 5x
+    syscall
+    ret
+
+.section text.wait
+.symbol wait
+    setn 0x 8
+    seta 1x 4x
+    syscall
+    ret
+
+.section text.kill
+.symbol kill
+    setn 0x 11
+    seta 1x 4x
+    syscall
+    ret
+
+.section text.sleep
+.symbol sleep
+    setn 0x 12
+    seta 1x 4x
+    syscall
+    ret
+
+.section text.wakeup
+.symbol wakeup
+    setn 0x 13
+    seta 1x 4x
+    syscall
+    ret
+
+.section text.p3counter
+.symbol p3counter
+    setn 0x 14
+    seta 1x 4x
+    syscall
+    ret
+
+.section text.pipe
+.symbol pipe
+    setn 0x 15
+    seta 1x 4x
+    syscall
+    ret
+
+.section text.dup2
+.symbol dup2
+    setn 0x 16
+    seta 1x 4x
+    seta 2x 5x
+    syscall
+    ret
+
+.section text.create
+.symbol create
+    setn 0x 17
+    seta 1x 4x
+    syscall
+    ret
+
+.section text.dirent
+.symbol dirent
+    setn 0x 18
+    seta 1x 4x
+    seta 2x 5x
+    seta 3x 6x
+    syscall
+    ret
+
+.section text.mkdir
+.symbol mkdir
+    setn 0x 19
+    seta 1x 4x
+    syscall
+    ret
+
+.section text.rm
+.symbol rm
+    setn 0x 20
+    seta 1x 4x
+    syscall
+    ret
+
+.section text.psline
+.symbol psline
+    setn 0x 21
+    seta 1x 4x
+    seta 2x 5x
+    seta 3x 6x
+    syscall
+    ret
+
+.section text.sbrk
+.symbol sbrk
+    setn 0x 22
+    seta 1x 4x
+    syscall
+    ret

@@ -1,0 +1,36 @@
+#![no_main]
+#![mem(1M)]
+#![stack(4K)]
+
+#include "usys.h"
+#include "ulib.h"
+
+int main(void) {
+    int status = 0;
+    int pid = fork();
+
+    if (pid < 0) {
+        puts("p2wait fork failed\n");
+        exit(1);
+    }
+    if (pid == 0) {
+        yield();
+        yield();
+        puts("p2wait child exit\n");
+        exit(7);
+    }
+
+    pid = wait(&status);
+    if (pid <= 0) {
+        puts("p2wait pid failed\n");
+        exit(1);
+    }
+    puts("p2wait parent woke\n");
+    exit(0);
+    return 0;
+}
+
+void _start(void) {
+    main();
+    exit(0);
+}
