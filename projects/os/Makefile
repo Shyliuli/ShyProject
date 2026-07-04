@@ -4,6 +4,9 @@ SHYLD = ../../target/bin/shyld
 SHYEMU = ../../target/bin/shyemu
 PYTHON ?= python3
 
+# Keep generated .shy assembly files (with source line numbers) by default.
+.SECONDARY:
+
 KERNEL_TARGET = target/kernel
 USER_TARGET = target/user
 FS_TARGET = target/fs
