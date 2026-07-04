@@ -206,3 +206,10 @@ ShyProject/
 │   └── chibicc/           # chibicc C 编译器分支
 └── vscode-shyc/           # VS Code 扩展
 ```
+
+## 许可证
+
+- 本项目自身代码以 [MIT 许可证](LICENSE) 发布，版权所有 (c) 2026 shyliuli。
+- `third_party/chibicc` 与 `projects/chibicc_shy` 基于 Rui Ueyama 的
+  [chibicc](https://github.com/rui314/chibicc)，遵循其 MIT 许可证；详见
+  `third_party/chibicc/LICENSE` 与 `projects/chibicc_shy/LICENSE`。
