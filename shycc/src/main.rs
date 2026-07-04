@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 static TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -30,6 +30,8 @@ struct Options {
     sym: Option<PathBuf>,
     save_temps: bool,
     print_only: bool,
+    emit_source_lines: bool,
+    emit_debug_info: bool,
     compile_args: Vec<String>,
     inputs: Vec<String>,
     libs: Vec<String>,
@@ -81,6 +83,8 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         sym: None,
         save_temps: false,
         print_only: false,
+        emit_source_lines: false,
+        emit_debug_info: false,
         compile_args: Vec::new(),
         inputs: Vec::new(),
         libs: Vec::new(),
@@ -153,7 +157,14 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                     }
                 }
             }
-            "--shy-emit-source-lines" => opts.compile_args.push(arg.clone()),
+            "--shy-emit-source-lines" => {
+                opts.emit_source_lines = true;
+                opts.compile_args.push(arg.clone());
+            }
+            "--shy-emit-debug-info" => {
+                opts.emit_debug_info = true;
+                opts.compile_args.push(arg.clone());
+            }
             _ if is_compile_option(arg) => opts.compile_args.push(arg.clone()),
             _ if arg.starts_with('-') => bail!("unknown option: {arg}"),
             _ => opts.inputs.push(arg.clone()),
@@ -175,6 +186,10 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
 
     if opts.stage != Stage::Link && !opts.libs.is_empty() {
         bail!("`-l...` libraries are only valid when linking");
+    }
+
+    if opts.emit_debug_info && !opts.emit_source_lines {
+        bail!("--shy-emit-debug-info requires --shy-emit-source-lines");
     }
 
     Ok(opts)
@@ -218,6 +233,7 @@ fn run(opts: Options) -> Result<()> {
     }
 
     let mut objects = Vec::new();
+    let mut debug_inputs: Vec<(PathBuf, PathBuf)> = Vec::new();
     for input in &opts.inputs {
         match input_kind(input)? {
             InputKind::C => {
@@ -231,6 +247,7 @@ fn run(opts: Options) -> Result<()> {
                     temps.temp_path(".shy")
                 };
                 run_chibicc(&repo, &opts, input, Some(&asm), false, false)?;
+                collect_debug_input(&opts, &mut temps, &mut debug_inputs, &asm)?;
                 if opts.stage == Stage::Asm {
                     continue;
                 }
@@ -258,6 +275,7 @@ fn run(opts: Options) -> Result<()> {
                     }
                     continue;
                 }
+                collect_debug_input(&opts, &mut temps, &mut debug_inputs, Path::new(input))?;
 
                 let obj = if opts.stage == Stage::Object {
                     opts.output
@@ -295,7 +313,19 @@ fn run(opts: Options) -> Result<()> {
         .output
         .clone()
         .unwrap_or_else(|| PathBuf::from("a.sfs"));
-    run_linker(&repo, &opts, &objects, &output, opts.sym.as_deref())?;
+    let temp_sym;
+    let sym = if opts.emit_debug_info {
+        temp_sym = opts.sym.clone().unwrap_or_else(|| temps.temp_path(".sym"));
+        Some(temp_sym.as_path())
+    } else {
+        opts.sym.as_deref()
+    };
+    run_linker(&repo, &opts, &objects, &output, sym)?;
+    if opts.emit_debug_info && !debug_inputs.is_empty() {
+        let sym = sym.expect("debug info path above always creates a sym file");
+        let debug_elf = debug_elf_path(&output);
+        run_shy_dwarf(&repo, &opts, &debug_inputs, sym, &debug_elf)?;
+    }
     Ok(())
 }
 
@@ -346,6 +376,53 @@ fn run_linker(
         cmd.arg("--sym").arg(sym);
     }
     run_command(opts, &mut cmd)
+}
+
+fn run_shy_dwarf(
+    repo: &Path,
+    opts: &Options,
+    debug_inputs: &[(PathBuf, PathBuf)],
+    sym: &Path,
+    output: &Path,
+) -> Result<()> {
+    let mut cmd = if let Ok(path) = env::var("SHYCC_SHY_DWARF") {
+        Command::new(path)
+    } else {
+        let mut cmd = Command::new("cargo");
+        cmd.current_dir(repo)
+            .arg("run")
+            .arg("-q")
+            .arg("-p")
+            .arg("shy-dwarf")
+            .arg("--");
+        cmd
+    };
+    for (asm, debug) in debug_inputs {
+        cmd.arg("--asm").arg(asm);
+        cmd.arg("--debug").arg(debug);
+    }
+    cmd.arg("--sym").arg(sym).arg("-o").arg(output);
+    run_command(opts, &mut cmd)
+}
+
+fn collect_debug_input(
+    opts: &Options,
+    temps: &mut TempFiles,
+    debug_inputs: &mut Vec<(PathBuf, PathBuf)>,
+    asm: &Path,
+) -> Result<()> {
+    if !opts.emit_debug_info {
+        return Ok(());
+    }
+    let debug = debug_sidecar_path(asm);
+    if !debug.exists() {
+        return Ok(());
+    }
+    if !opts.save_temps {
+        temps.paths.push(debug.clone());
+    }
+    debug_inputs.push((asm.to_path_buf(), debug));
+    Ok(())
 }
 
 fn build_float_lib(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result<PathBuf> {
@@ -504,6 +581,16 @@ fn replace_ext(path: &str, ext: &str) -> PathBuf {
     p
 }
 
+fn debug_sidecar_path(asm: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.debug.json", asm.display()))
+}
+
+fn debug_elf_path(output: &Path) -> PathBuf {
+    let mut p = output.to_path_buf();
+    p.set_extension("debug.elf");
+    p
+}
+
 fn copy_file(input: &str, output: &Path) -> Result<()> {
     fs::copy(input, output).with_context(|| {
         format!(
@@ -545,7 +632,7 @@ fn print_usage() {
         "usage: shycc [options] file...\n\
          stages: -E, -S, -c, or link to a.sfs by default\n\
          outputs: -o <file>, --sym <file>, -save-temps, -###\n\
-         debug: --shy-emit-source-lines\n\
+         debug: --shy-emit-source-lines, --shy-emit-debug-info\n\
          inputs: .shyc/.c, .shy, .sobj\n\
          libraries: -llibshy, -lfloat"
     );
