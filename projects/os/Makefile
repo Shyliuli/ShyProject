@@ -9,9 +9,9 @@ USER_TARGET = target/user
 FS_TARGET = target/fs
 
 KERNEL_SFS = target/kernel.sfs
-USER_SRCS := $(wildcard user/*.c user/*.shy)
+USER_SRCS := $(wildcard user/*.shyc user/*.shy)
 BUSYBOX_APPLETS := sh echo cat ls mkdir rm pwd wc grep ps kill exit
-USER_PROG_SRCS := $(filter-out user/usys.shy user/ulib.c user/sh.c user/echo.c user/cat.c,$(USER_SRCS))
+USER_PROG_SRCS := $(filter-out user/usys.shy user/ulib.shyc user/sh.shyc user/echo.shyc user/cat.shyc,$(USER_SRCS))
 USER_PROGS := $(basename $(notdir $(USER_PROG_SRCS)))
 USER_SFS := $(addprefix $(USER_TARGET)/,$(addsuffix .sfs,$(USER_PROGS)))
 BUSYBOX_APPLET_SFS := $(addprefix $(USER_TARGET)/,$(addsuffix .sfs,$(BUSYBOX_APPLETS)))
@@ -108,7 +108,7 @@ $(KERNEL_TARGET)/entry.sobj: kernel/entry.shy | dirs
 $(KERNEL_TARGET)/%.sobj: kernel/%.shy | dirs
 	$(SHYASM) $< -o $@
 
-$(KERNEL_TARGET)/%.shy: kernel/%.c | dirs
+$(KERNEL_TARGET)/%.shy: kernel/%.shyc | dirs
 	$(SHYCC) -S $< -o $@
 
 $(KERNEL_TARGET)/%.sobj: $(KERNEL_TARGET)/%.shy | dirs
@@ -126,7 +126,7 @@ $(FS_TARGET)/%.sobj: $(FS_TARGET)/%.shy | dirs
 $(USER_TARGET)/usys.sobj: user/usys.shy | dirs
 	$(SHYASM) $< -o $@
 
-$(USER_TARGET)/%.shy: user/%.c | dirs
+$(USER_TARGET)/%.shy: user/%.shyc | dirs
 	$(SHYCC) -S $< -o $@
 
 $(USER_TARGET)/%.sobj: $(USER_TARGET)/%.shy | dirs
