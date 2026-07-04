@@ -9,8 +9,8 @@
 //! - `wait` 仅内核态且中断使能时有效，唤醒时 EPC=PC+12。
 //! - 致命状态（未初始化 TRAP 时 trap、trap 栈溢出、空栈 iret）直接 panic。
 
-use std::collections::VecDeque;
-use std::io::{stdin, stdout, BufRead, BufReader, Read, Stdout, Write};
+use std::collections::{HashSet, VecDeque};
+use std::io::{BufRead, BufReader, Read, Stdout, Write, stdin, stdout};
 use std::time::{Duration, Instant};
 
 use shy_isa_lib::address::Address;
@@ -44,10 +44,71 @@ enum Flow {
     Exit(u32),
     /// 触发 trap，携带原因与 EPC。
     Trap { cause: TrapCause, epc: u32 },
+    /// 命中 GDB 数据 watchpoint，携带被监视地址。
+    Watchpoint(u32),
+}
+
+/// Public result of one emulator scheduling step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepOutcome {
+    Continue,
+    Exited(u32),
+    Watchpoint(u32),
+}
+
+/// Reason why debugger-controlled execution stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopReason {
+    Breakpoint,
+    SingleStep,
+    Exited(u32),
+    Interrupt,
+    Watchpoint(u32),
+}
+
+/// GDB data watchpoint access kind.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum WatchpointKind {
+    Read,
+    Write,
+    Access,
+}
+
+/// Guest virtual-address data watchpoint.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct Watchpoint {
+    pub addr: u32,
+    pub len: usize,
+    pub kind: WatchpointKind,
+}
+
+impl Watchpoint {
+    pub fn new(addr: u32, len: usize, kind: WatchpointKind) -> Self {
+        Self { addr, len, kind }
+    }
 }
 
 /// 取指失败原因。
 type FetchErr = TrapCause;
+
+#[derive(Clone, Copy)]
+enum MemAccessKind {
+    Read,
+    Write,
+}
+
+enum MemAccessErr {
+    Trap(TrapCause),
+    Watchpoint(u32),
+}
+
+type MemAccessResult<T> = Result<T, MemAccessErr>;
+
+impl From<TrapCause> for MemAccessErr {
+    fn from(cause: TrapCause) -> Self {
+        Self::Trap(cause)
+    }
+}
 
 #[derive(Clone, Copy)]
 struct CachedInstr {
@@ -85,6 +146,7 @@ pub struct Emu {
     input_chars: VecDeque<char>,
     output: Stdout,
     debug: bool,
+    pending_watchpoint: Option<u32>,
 }
 
 impl Emu {
@@ -115,6 +177,7 @@ impl Emu {
             input_chars: VecDeque::new(),
             output: stdout(),
             debug,
+            pending_watchpoint: None,
         }
     }
 
@@ -128,6 +191,60 @@ impl Emu {
             );
         }
         self.mem[..image.len()].copy_from_slice(image);
+        self.clear_instr_cache();
+        Ok(())
+    }
+
+    pub fn pc(&self) -> u32 {
+        self.pc
+    }
+
+    pub fn set_pc(&mut self, pc: u32) {
+        self.pc = pc;
+    }
+
+    pub fn read_debug_regs(&self) -> Vec<u32> {
+        // GDB 默认使用内置 MIPS 寄存器布局（38 个寄存器）。
+        // 将 ShyISA 的寄存器映射到 MIPS 布局，未覆盖的寄存器填 0。
+        let mut out = vec![0u32; 38];
+        out[0..16].copy_from_slice(&self.regs);
+        out[29] = self.sp;
+        out[32] = self.status;
+        out[36] = self.cause;
+        out[37] = self.pc;
+        out
+    }
+
+    pub fn write_debug_regs(&mut self, regs: &[u32]) -> anyhow::Result<()> {
+        if regs.len() != 38 {
+            anyhow::bail!("expected 38 MIPS-layout registers, got {}", regs.len());
+        }
+        self.regs.copy_from_slice(&regs[0..16]);
+        self.sp = regs[29];
+        self.status = regs[32] & 0b11;
+        self.cause = regs[36];
+        self.pc = regs[37];
+        Ok(())
+    }
+
+    pub fn debug_read_mem(&self, addr: u32, len: usize) -> anyhow::Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let phys = self
+            .translate_mem(addr, len)
+            .map_err(|cause| anyhow::anyhow!("debug memory read failed: {cause:?}"))?;
+        Ok(self.mem[phys..phys + len].to_vec())
+    }
+
+    pub fn debug_write_mem(&mut self, addr: u32, data: &[u8]) -> anyhow::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let phys = self
+            .translate_mem(addr, data.len())
+            .map_err(|cause| anyhow::anyhow!("debug memory write failed: {cause:?}"))?;
+        self.mem[phys..phys + data.len()].copy_from_slice(data);
         self.clear_instr_cache();
         Ok(())
     }
@@ -238,29 +355,95 @@ impl Emu {
         self.translate_mem(addr, size)
     }
 
-    fn clear_instr_cache(&mut self) {
+    pub fn clear_instr_cache(&mut self) {
         self.instr_cache.fill(None);
     }
 
-    fn read_mem32(&self, addr: u32) -> Result<u32, TrapCause> {
+    fn check_watchpoints(
+        watchpoints: &HashSet<Watchpoint>,
+        access: MemAccessKind,
+        addr: u32,
+        size: usize,
+    ) -> Option<u32> {
+        if size == 0 {
+            return None;
+        }
+        watchpoints.iter().find_map(|watchpoint| {
+            if watchpoint.len == 0 {
+                return None;
+            }
+            let kind_matches = match (access, watchpoint.kind) {
+                (MemAccessKind::Read, WatchpointKind::Read | WatchpointKind::Access) => true,
+                (MemAccessKind::Write, WatchpointKind::Write | WatchpointKind::Access) => true,
+                _ => false,
+            };
+            if !kind_matches {
+                return None;
+            }
+            let access_end = addr.saturating_add(size as u32);
+            let watch_end = watchpoint.addr.saturating_add(watchpoint.len as u32);
+            (addr < watch_end && watchpoint.addr < access_end).then_some(watchpoint.addr)
+        })
+    }
+
+    fn read_mem32_watched(
+        &self,
+        addr: u32,
+        watchpoints: &HashSet<Watchpoint>,
+    ) -> MemAccessResult<u32> {
+        if let Some(hit) = Self::check_watchpoints(watchpoints, MemAccessKind::Read, addr, 4) {
+            return Err(MemAccessErr::Watchpoint(hit));
+        }
         let phys = self.check_mem(addr, true, 4)?;
         let s = &self.mem[phys..phys + 4];
         Ok(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
     }
 
+    #[cfg(test)]
     fn write_mem32(&mut self, addr: u32, val: u32) -> Result<(), TrapCause> {
+        self.write_mem32_watched(addr, val, &HashSet::new())
+            .map_err(|err| match err {
+                MemAccessErr::Trap(cause) => cause,
+                MemAccessErr::Watchpoint(_) => unreachable!("empty watchpoint set cannot hit"),
+            })
+    }
+
+    fn write_mem32_watched(
+        &mut self,
+        addr: u32,
+        val: u32,
+        watchpoints: &HashSet<Watchpoint>,
+    ) -> MemAccessResult<()> {
+        if let Some(hit) = Self::check_watchpoints(watchpoints, MemAccessKind::Write, addr, 4) {
+            self.pending_watchpoint.get_or_insert(hit);
+        }
         let phys = self.check_mem(addr, true, 4)?;
         self.mem[phys..phys + 4].copy_from_slice(&val.to_be_bytes());
         Ok(())
     }
 
-    fn read_mem16(&self, addr: u32) -> Result<u32, TrapCause> {
+    fn read_mem16_watched(
+        &self,
+        addr: u32,
+        watchpoints: &HashSet<Watchpoint>,
+    ) -> MemAccessResult<u32> {
+        if let Some(hit) = Self::check_watchpoints(watchpoints, MemAccessKind::Read, addr, 2) {
+            return Err(MemAccessErr::Watchpoint(hit));
+        }
         let phys = self.check_mem(addr, false, 2)?;
         let s = &self.mem[phys..phys + 2];
         Ok(u32::from(((s[0] as u32) << 8) | s[1] as u32))
     }
 
-    fn write_mem16(&mut self, addr: u32, val: u32) -> Result<(), TrapCause> {
+    fn write_mem16_watched(
+        &mut self,
+        addr: u32,
+        val: u32,
+        watchpoints: &HashSet<Watchpoint>,
+    ) -> MemAccessResult<()> {
+        if let Some(hit) = Self::check_watchpoints(watchpoints, MemAccessKind::Write, addr, 2) {
+            self.pending_watchpoint.get_or_insert(hit);
+        }
         let phys = self.check_mem(addr, false, 2)?;
         let bytes = val.to_be_bytes();
         self.mem[phys] = bytes[2];
@@ -268,12 +451,27 @@ impl Emu {
         Ok(())
     }
 
-    fn read_mem8(&self, addr: u32) -> Result<u32, TrapCause> {
+    fn read_mem8_watched(
+        &self,
+        addr: u32,
+        watchpoints: &HashSet<Watchpoint>,
+    ) -> MemAccessResult<u32> {
+        if let Some(hit) = Self::check_watchpoints(watchpoints, MemAccessKind::Read, addr, 1) {
+            return Err(MemAccessErr::Watchpoint(hit));
+        }
         let phys = self.check_mem(addr, false, 1)?;
         Ok(self.mem[phys] as u32)
     }
 
-    fn write_mem8(&mut self, addr: u32, val: u32) -> Result<(), TrapCause> {
+    fn write_mem8_watched(
+        &mut self,
+        addr: u32,
+        val: u32,
+        watchpoints: &HashSet<Watchpoint>,
+    ) -> MemAccessResult<()> {
+        if let Some(hit) = Self::check_watchpoints(watchpoints, MemAccessKind::Write, addr, 1) {
+            self.pending_watchpoint.get_or_insert(hit);
+        }
         let phys = self.check_mem(addr, false, 1)?;
         self.mem[phys] = val as u8;
         Ok(())
@@ -344,20 +542,20 @@ impl Emu {
     }
 
     /// 读取地址参数的 32 位值：寄存器或普通内存。
-    fn r(&mut self, addr: u32) -> Result<u32, TrapCause> {
+    fn r(&mut self, addr: u32, watchpoints: &HashSet<Watchpoint>) -> MemAccessResult<u32> {
         if addr < SPECIAL_TOP {
-            self.read_reg(addr)
+            self.read_reg(addr).map_err(Into::into)
         } else {
-            self.read_mem32(addr)
+            self.read_mem32_watched(addr, watchpoints)
         }
     }
 
     /// 写入地址参数的 32 位值：寄存器或普通内存。
-    fn w(&mut self, addr: u32, val: u32) -> Result<(), TrapCause> {
+    fn w(&mut self, addr: u32, val: u32, watchpoints: &HashSet<Watchpoint>) -> MemAccessResult<()> {
         if addr < SPECIAL_TOP {
-            self.write_reg(addr, val)
+            self.write_reg(addr, val).map_err(Into::into)
         } else {
-            self.write_mem32(addr, val)
+            self.write_mem32_watched(addr, val, watchpoints)
         }
     }
 
@@ -403,7 +601,7 @@ impl Emu {
     }
 
     /// `ina`：从标准输入读取十六进制文本，解析为 u32。
-    fn op_ina(&mut self, addr: u32, cur: u32) -> Flow {
+    fn op_ina(&mut self, addr: u32, cur: u32, watchpoints: &HashSet<Watchpoint>) -> Flow {
         let Some(line) = self.read_input_line() else {
             return Flow::Exit(0);
         };
@@ -413,31 +611,34 @@ impl Emu {
             .or_else(|| trimmed.strip_prefix("0X"))
             .unwrap_or(trimmed);
         let val = u32::from_str_radix(hex, 16).unwrap_or(0);
-        match self.w(addr, val) {
+        match self.w(addr, val, watchpoints) {
             Ok(()) => Flow::Continue,
-            Err(cause) => Flow::Trap { cause, epc: cur },
+            Err(MemAccessErr::Trap(cause)) => Flow::Trap { cause, epc: cur },
+            Err(MemAccessErr::Watchpoint(addr)) => Flow::Watchpoint(addr),
         }
     }
 
     /// `inutfa`：从标准输入读取一个 UTF-8 字符，解码为 code point 写入地址。
-    fn op_inutfa(&mut self, addr: u32, cur: u32) -> Flow {
+    fn op_inutfa(&mut self, addr: u32, cur: u32, watchpoints: &HashSet<Watchpoint>) -> Flow {
         let Some(ch) = self.read_input_char() else {
             return Flow::Exit(0);
         };
-        match self.w(addr, ch as u32) {
+        match self.w(addr, ch as u32, watchpoints) {
             Ok(()) => Flow::Continue,
-            Err(cause) => Flow::Trap { cause, epc: cur },
+            Err(MemAccessErr::Trap(cause)) => Flow::Trap { cause, epc: cur },
+            Err(MemAccessErr::Watchpoint(addr)) => Flow::Watchpoint(addr),
         }
     }
 
-    fn op_outa(&mut self, addr: u32, cur: u32) -> Flow {
-        match self.r(addr) {
+    fn op_outa(&mut self, addr: u32, cur: u32, watchpoints: &HashSet<Watchpoint>) -> Flow {
+        match self.r(addr, watchpoints) {
             Ok(val) => {
                 let _ = write!(self.output, "{:08X}", val);
                 let _ = self.output.flush();
                 Flow::Continue
             }
-            Err(cause) => Flow::Trap { cause, epc: cur },
+            Err(MemAccessErr::Trap(cause)) => Flow::Trap { cause, epc: cur },
+            Err(MemAccessErr::Watchpoint(addr)) => Flow::Watchpoint(addr),
         }
     }
 
@@ -447,10 +648,11 @@ impl Emu {
         Flow::Continue
     }
 
-    fn op_oututfa(&mut self, addr: u32, cur: u32) -> Flow {
-        match self.r(addr) {
+    fn op_oututfa(&mut self, addr: u32, cur: u32, watchpoints: &HashSet<Watchpoint>) -> Flow {
+        match self.r(addr, watchpoints) {
             Ok(cp) => self.emit_utf8(cp, cur),
-            Err(cause) => Flow::Trap { cause, epc: cur },
+            Err(MemAccessErr::Trap(cause)) => Flow::Trap { cause, epc: cur },
+            Err(MemAccessErr::Watchpoint(addr)) => Flow::Watchpoint(addr),
         }
     }
 
@@ -475,21 +677,29 @@ impl Emu {
 
     // ── 栈操作 ────────────────────────────────────────────────────
 
-    fn push(&mut self, val: u32, cur: u32) -> Flow {
-        match self.write_mem32(self.sp, val) {
+    fn push(&mut self, val: u32, cur: u32, watchpoints: &HashSet<Watchpoint>) -> Flow {
+        match self.write_mem32_watched(self.sp, val, watchpoints) {
             Ok(()) => {
                 self.sp = self.sp.wrapping_add(4);
                 Flow::Continue
             }
-            Err(cause) => Flow::Trap { cause, epc: cur },
+            Err(MemAccessErr::Trap(cause)) => Flow::Trap { cause, epc: cur },
+            Err(MemAccessErr::Watchpoint(addr)) => Flow::Watchpoint(addr),
         }
     }
 
-    fn pop(&mut self, cur: u32) -> Result<u32, Flow> {
-        self.sp = self.sp.wrapping_sub(4);
-        match self.read_mem32(self.sp) {
-            Ok(v) => Ok(v),
-            Err(cause) => Err(Flow::Trap { cause, epc: cur }),
+    fn pop(&mut self, cur: u32, watchpoints: &HashSet<Watchpoint>) -> Result<u32, Flow> {
+        let sp = self.sp.wrapping_sub(4);
+        match self.read_mem32_watched(sp, watchpoints) {
+            Ok(v) => {
+                self.sp = sp;
+                Ok(v)
+            }
+            Err(MemAccessErr::Trap(cause)) => {
+                self.sp = sp;
+                Err(Flow::Trap { cause, epc: cur })
+            }
+            Err(MemAccessErr::Watchpoint(addr)) => Err(Flow::Watchpoint(addr)),
         }
     }
 
@@ -551,7 +761,18 @@ impl Emu {
 
     // ── 执行 ──────────────────────────────────────────────────────
 
+    #[cfg(test)]
     fn execute(&mut self, op: OpType, a1: u32, a2: u32) -> Flow {
+        self.execute_watched(op, a1, a2, &HashSet::new())
+    }
+
+    fn execute_watched(
+        &mut self,
+        op: OpType,
+        a1: u32,
+        a2: u32,
+        watchpoints: &HashSet<Watchpoint>,
+    ) -> Flow {
         let cur = self.pc;
         // 默认非控制流指令执行后 PC 推进 12 字节。
         // 控制流指令自行设置 PC 并提前返回。
@@ -559,7 +780,8 @@ impl Emu {
             ($e:expr) => {
                 match $e {
                     Ok(v) => v,
-                    Err(cause) => return Flow::Trap { cause, epc: cur },
+                    Err(MemAccessErr::Trap(cause)) => return Flow::Trap { cause, epc: cur },
+                    Err(MemAccessErr::Watchpoint(addr)) => return Flow::Watchpoint(addr),
                 }
             };
         }
@@ -567,7 +789,8 @@ impl Emu {
             ($e:expr) => {
                 match $e {
                     Ok(()) => {}
-                    Err(cause) => return Flow::Trap { cause, epc: cur },
+                    Err(MemAccessErr::Trap(cause)) => return Flow::Trap { cause, epc: cur },
+                    Err(MemAccessErr::Watchpoint(addr)) => return Flow::Watchpoint(addr),
                 }
             };
         }
@@ -575,140 +798,150 @@ impl Emu {
         match op {
             // ── 算术运算 ──
             OpType::Adda => {
-                let v = r![self.r(a1)].wrapping_add(r![self.r(a2)]);
-                w![self.w(a1, v)];
+                let v = r![self.r(a1, watchpoints)].wrapping_add(r![self.r(a2, watchpoints)]);
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Addn => {
-                let v = r![self.r(a1)].wrapping_add(a2);
-                w![self.w(a1, v)];
+                let v = r![self.r(a1, watchpoints)].wrapping_add(a2);
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Suba => {
-                let v = r![self.r(a1)].wrapping_sub(r![self.r(a2)]);
-                w![self.w(a1, v)];
+                let v = r![self.r(a1, watchpoints)].wrapping_sub(r![self.r(a2, watchpoints)]);
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Subn => {
-                let v = r![self.r(a1)].wrapping_sub(a2);
-                w![self.w(a1, v)];
+                let v = r![self.r(a1, watchpoints)].wrapping_sub(a2);
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Mula => {
-                let v = r![self.r(a1)].wrapping_mul(r![self.r(a2)]);
-                w![self.w(a1, v)];
+                let v = r![self.r(a1, watchpoints)].wrapping_mul(r![self.r(a2, watchpoints)]);
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Muln => {
-                let v = r![self.r(a1)].wrapping_mul(a2);
-                w![self.w(a1, v)];
+                let v = r![self.r(a1, watchpoints)].wrapping_mul(a2);
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Diva => {
-                let d = r![self.r(a2)];
-                let n = r![self.r(a1)];
-                w![self.w(a1, if d == 0 { 0xFFFFFFFF } else { n / d })];
+                let d = r![self.r(a2, watchpoints)];
+                let n = r![self.r(a1, watchpoints)];
+                w![self.w(a1, if d == 0 { 0xFFFFFFFF } else { n / d }, watchpoints)];
             }
             OpType::Divn => {
-                let n = r![self.r(a1)];
-                w![self.w(a1, if a2 == 0 { 0xFFFFFFFF } else { n / a2 })];
+                let n = r![self.r(a1, watchpoints)];
+                w![self.w(a1, if a2 == 0 { 0xFFFFFFFF } else { n / a2 }, watchpoints)];
             }
             // ── 位运算 ──
             OpType::Lsa => {
-                let sh = r![self.r(a2)];
-                let v = r![self.r(a1)];
-                w![self.w(a1, if sh >= 32 { 0 } else { v << sh })];
+                let sh = r![self.r(a2, watchpoints)];
+                let v = r![self.r(a1, watchpoints)];
+                w![self.w(a1, if sh >= 32 { 0 } else { v << sh }, watchpoints)];
             }
             OpType::Lsn => {
-                let v = r![self.r(a1)];
-                w![self.w(a1, if a2 >= 32 { 0 } else { v << a2 })];
+                let v = r![self.r(a1, watchpoints)];
+                w![self.w(a1, if a2 >= 32 { 0 } else { v << a2 }, watchpoints)];
             }
             OpType::Rsa => {
-                let sh = r![self.r(a2)];
-                let v = r![self.r(a1)];
-                w![self.w(a1, if sh >= 32 { 0 } else { v >> sh })];
+                let sh = r![self.r(a2, watchpoints)];
+                let v = r![self.r(a1, watchpoints)];
+                w![self.w(a1, if sh >= 32 { 0 } else { v >> sh }, watchpoints)];
             }
             OpType::Rsn => {
-                let v = r![self.r(a1)];
-                w![self.w(a1, if a2 >= 32 { 0 } else { v >> a2 })];
+                let v = r![self.r(a1, watchpoints)];
+                w![self.w(a1, if a2 >= 32 { 0 } else { v >> a2 }, watchpoints)];
             }
             OpType::Anda => {
-                let v = r![self.r(a1)] & r![self.r(a2)];
-                w![self.w(a1, v)];
+                let v = r![self.r(a1, watchpoints)] & r![self.r(a2, watchpoints)];
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Andn => {
-                let v = r![self.r(a1)] & a2;
-                w![self.w(a1, v)];
+                let v = r![self.r(a1, watchpoints)] & a2;
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Ora => {
-                let v = r![self.r(a1)] | r![self.r(a2)];
-                w![self.w(a1, v)];
+                let v = r![self.r(a1, watchpoints)] | r![self.r(a2, watchpoints)];
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Orn => {
-                let v = r![self.r(a1)] | a2;
-                w![self.w(a1, v)];
+                let v = r![self.r(a1, watchpoints)] | a2;
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Xora => {
-                let v = r![self.r(a1)] ^ r![self.r(a2)];
-                w![self.w(a1, v)];
+                let v = r![self.r(a1, watchpoints)] ^ r![self.r(a2, watchpoints)];
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Xorn => {
-                let v = r![self.r(a1)] ^ a2;
-                w![self.w(a1, v)];
+                let v = r![self.r(a1, watchpoints)] ^ a2;
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Nota => {
-                let v = !r![self.r(a1)];
-                w![self.w(a1, v)];
+                let v = !r![self.r(a1, watchpoints)];
+                w![self.w(a1, v, watchpoints)];
             }
             // ── 比较指令 ──
-            OpType::Equa => self.rs = u32::from(r![self.r(a1)] == r![self.r(a2)]),
-            OpType::Equn => self.rs = u32::from(r![self.r(a1)] == a2),
-            OpType::Biga => self.rs = u32::from(r![self.r(a1)] > r![self.r(a2)]),
-            OpType::Bign => self.rs = u32::from(r![self.r(a1)] > a2),
-            OpType::Bigequa => self.rs = u32::from(r![self.r(a1)] >= r![self.r(a2)]),
-            OpType::Bigequn => self.rs = u32::from(r![self.r(a1)] >= a2),
-            OpType::Smaa => self.rs = u32::from(r![self.r(a1)] < r![self.r(a2)]),
-            OpType::Sman => self.rs = u32::from(r![self.r(a1)] < a2),
-            OpType::Smaequa => self.rs = u32::from(r![self.r(a1)] <= r![self.r(a2)]),
-            OpType::Smaequn => self.rs = u32::from(r![self.r(a1)] <= a2),
+            OpType::Equa => {
+                self.rs = u32::from(r![self.r(a1, watchpoints)] == r![self.r(a2, watchpoints)])
+            }
+            OpType::Equn => self.rs = u32::from(r![self.r(a1, watchpoints)] == a2),
+            OpType::Biga => {
+                self.rs = u32::from(r![self.r(a1, watchpoints)] > r![self.r(a2, watchpoints)])
+            }
+            OpType::Bign => self.rs = u32::from(r![self.r(a1, watchpoints)] > a2),
+            OpType::Bigequa => {
+                self.rs = u32::from(r![self.r(a1, watchpoints)] >= r![self.r(a2, watchpoints)])
+            }
+            OpType::Bigequn => self.rs = u32::from(r![self.r(a1, watchpoints)] >= a2),
+            OpType::Smaa => {
+                self.rs = u32::from(r![self.r(a1, watchpoints)] < r![self.r(a2, watchpoints)])
+            }
+            OpType::Sman => self.rs = u32::from(r![self.r(a1, watchpoints)] < a2),
+            OpType::Smaequa => {
+                self.rs = u32::from(r![self.r(a1, watchpoints)] <= r![self.r(a2, watchpoints)])
+            }
+            OpType::Smaequn => self.rs = u32::from(r![self.r(a1, watchpoints)] <= a2),
             // ── 内存直接操作 ──
             OpType::Seta => {
-                let v = r![self.r(a2)];
-                w![self.w(a1, v)];
+                let v = r![self.r(a2, watchpoints)];
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Setn => {
-                w![self.w(a1, a2)];
+                w![self.w(a1, a2, watchpoints)];
             }
             // ── 内存间接操作 ──
             OpType::Geta => {
-                let ptr = r![self.r(a2)];
-                let v = r![self.read_mem32(ptr)];
-                w![self.w(a1, v)];
+                let ptr = r![self.r(a2, watchpoints)];
+                let v = r![self.read_mem32_watched(ptr, watchpoints)];
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Getn => {
-                let v = r![self.read_mem32(a2)];
-                w![self.w(a1, v)];
+                let v = r![self.read_mem32_watched(a2, watchpoints)];
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Puta => {
-                let ptr = r![self.r(a1)];
-                let v = r![self.r(a2)];
-                w![self.write_mem32(ptr, v)];
+                let ptr = r![self.r(a1, watchpoints)];
+                let v = r![self.r(a2, watchpoints)];
+                w![self.write_mem32_watched(ptr, v, watchpoints)];
             }
             OpType::Putn => {
-                let ptr = r![self.r(a1)];
-                w![self.write_mem32(ptr, a2)];
+                let ptr = r![self.r(a1, watchpoints)];
+                w![self.write_mem32_watched(ptr, a2, watchpoints)];
             }
             // ── 栈操作 ──
             OpType::Pusha => {
-                let v = r![self.r(a1)];
-                match self.push(v, cur) {
+                let v = r![self.r(a1, watchpoints)];
+                match self.push(v, cur, watchpoints) {
                     Flow::Continue => {}
                     other => return other,
                 }
             }
-            OpType::Pushn => match self.push(a1, cur) {
+            OpType::Pushn => match self.push(a1, cur, watchpoints) {
                 Flow::Continue => {}
                 other => return other,
             },
-            OpType::Popa => match self.pop(cur) {
-                Ok(v) => w![self.w(a1, v)],
+            OpType::Popa => match self.pop(cur, watchpoints) {
+                Ok(v) => w![self.w(a1, v, watchpoints)],
                 Err(flow) => return flow,
             },
-            OpType::Pop => match self.pop(cur) {
+            OpType::Pop => match self.pop(cur, watchpoints) {
                 Ok(_) => {}
                 Err(flow) => return flow,
             },
@@ -716,7 +949,7 @@ impl Emu {
             OpType::Jmpa => {
                 if self.rs == 1 {
                     self.rs = 0;
-                    let target = r![self.r(a1)];
+                    let target = r![self.r(a1, watchpoints)];
                     self.pc = target;
                     return Flow::Continue;
                 }
@@ -729,7 +962,7 @@ impl Emu {
                 }
             }
             OpType::Ujmpa => {
-                let target = r![self.r(a1)];
+                let target = r![self.r(a1, watchpoints)];
                 self.pc = target;
                 return Flow::Continue;
             }
@@ -738,9 +971,9 @@ impl Emu {
                 return Flow::Continue;
             }
             OpType::Calla => {
-                let target = r![self.r(a1)];
+                let target = r![self.r(a1, watchpoints)];
                 let ret = cur.wrapping_add(12);
-                return match self.push(ret, cur) {
+                return match self.push(ret, cur, watchpoints) {
                     Flow::Continue => {
                         self.pc = target;
                         Flow::Continue
@@ -750,7 +983,7 @@ impl Emu {
             }
             OpType::Calln => {
                 let ret = cur.wrapping_add(12);
-                return match self.push(ret, cur) {
+                return match self.push(ret, cur, watchpoints) {
                     Flow::Continue => {
                         self.pc = a1;
                         Flow::Continue
@@ -758,7 +991,7 @@ impl Emu {
                     other => other,
                 };
             }
-            OpType::Ret => match self.pop(cur) {
+            OpType::Ret => match self.pop(cur, watchpoints) {
                 Ok(target) => {
                     self.pc = target;
                     return Flow::Continue;
@@ -766,15 +999,15 @@ impl Emu {
                 Err(flow) => return flow,
             },
             // ── I/O 指令 ──
-            OpType::Ina => match self.op_ina(a1, cur) {
+            OpType::Ina => match self.op_ina(a1, cur, watchpoints) {
                 Flow::Continue => {}
                 other => return other,
             },
-            OpType::Inutfa => match self.op_inutfa(a1, cur) {
+            OpType::Inutfa => match self.op_inutfa(a1, cur, watchpoints) {
                 Flow::Continue => {}
                 other => return other,
             },
-            OpType::Outa => match self.op_outa(a1, cur) {
+            OpType::Outa => match self.op_outa(a1, cur, watchpoints) {
                 Flow::Continue => {}
                 other => return other,
             },
@@ -782,7 +1015,7 @@ impl Emu {
                 Flow::Continue => {}
                 other => return other,
             },
-            OpType::Oututfa => match self.op_oututfa(a1, cur) {
+            OpType::Oututfa => match self.op_oututfa(a1, cur, watchpoints) {
                 Flow::Continue => {}
                 other => return other,
             },
@@ -801,50 +1034,50 @@ impl Emu {
             OpType::Iret => return self.iret(),
             // ── 窄内存间接操作 ──
             OpType::Get8a => {
-                let ptr = r![self.r(a2)];
-                let v = r![self.read_mem8(ptr)];
-                w![self.w(a1, v)];
+                let ptr = r![self.r(a2, watchpoints)];
+                let v = r![self.read_mem8_watched(ptr, watchpoints)];
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Get8n => {
-                let v = r![self.read_mem8(a2)];
-                w![self.w(a1, v)];
+                let v = r![self.read_mem8_watched(a2, watchpoints)];
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Get16a => {
-                let ptr = r![self.r(a2)];
-                let v = r![self.read_mem16(ptr)];
-                w![self.w(a1, v)];
+                let ptr = r![self.r(a2, watchpoints)];
+                let v = r![self.read_mem16_watched(ptr, watchpoints)];
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Get16n => {
-                let v = r![self.read_mem16(a2)];
-                w![self.w(a1, v)];
+                let v = r![self.read_mem16_watched(a2, watchpoints)];
+                w![self.w(a1, v, watchpoints)];
             }
             OpType::Put8a => {
-                let ptr = r![self.r(a1)];
-                let v = r![self.r(a2)];
-                w![self.write_mem8(ptr, v)];
+                let ptr = r![self.r(a1, watchpoints)];
+                let v = r![self.r(a2, watchpoints)];
+                w![self.write_mem8_watched(ptr, v, watchpoints)];
             }
             OpType::Put8n => {
-                let ptr = r![self.r(a1)];
-                w![self.write_mem8(ptr, a2)];
+                let ptr = r![self.r(a1, watchpoints)];
+                w![self.write_mem8_watched(ptr, a2, watchpoints)];
             }
             OpType::Put16a => {
-                let ptr = r![self.r(a1)];
-                let v = r![self.r(a2)];
-                w![self.write_mem16(ptr, v)];
+                let ptr = r![self.r(a1, watchpoints)];
+                let v = r![self.r(a2, watchpoints)];
+                w![self.write_mem16_watched(ptr, v, watchpoints)];
             }
             OpType::Put16n => {
-                let ptr = r![self.r(a1)];
-                w![self.write_mem16(ptr, a2)];
+                let ptr = r![self.r(a1, watchpoints)];
+                w![self.write_mem16_watched(ptr, a2, watchpoints)];
             }
             // ── CPU 等待 ──
             OpType::Wait => return self.op_wait(cur),
             // ── 原子内存操作 ──
             OpType::Atoma => {
-                let ptr = r![self.r(a1)];
-                let new = r![self.r(a2)];
-                let old = r![self.read_mem32(ptr)];
-                w![self.write_mem32(ptr, new)];
-                w![self.w(a2, old)];
+                let ptr = r![self.r(a1, watchpoints)];
+                let new = r![self.r(a2, watchpoints)];
+                let old = r![self.read_mem32_watched(ptr, watchpoints)];
+                w![self.write_mem32_watched(ptr, new, watchpoints)];
+                w![self.w(a2, old, watchpoints)];
             }
             // ── 缓存维护 ──
             OpType::Fencei => {
@@ -906,50 +1139,113 @@ impl Emu {
         eprintln!("regs={:08X?}", self.regs);
     }
 
+    fn prepare_for_fetch(&mut self) -> Option<StepOutcome> {
+        self.tick_timer();
+
+        // 重新开启中断后交付 pending 定时器（在当前 PC 指向的指令执行前）。
+        if self.deliverable_interrupt() {
+            self.timer_pending = false;
+            self.enter_trap(TrapCause::Timer, self.pc);
+            return Some(StepOutcome::Continue);
+        }
+
+        self.exit_code.map(StepOutcome::Exited)
+    }
+
+    fn execute_one_prepared(&mut self, watchpoints: &HashSet<Watchpoint>) -> StepOutcome {
+        if self.debug {
+            self.dump_state();
+        }
+
+        let (op, a1, a2) = match self.fetch() {
+            Ok(t) => t,
+            Err(cause) => {
+                if self.debug {
+                    eprintln!("fetch trap: cause={cause:?} pc=0x{:08X}", self.pc);
+                }
+                self.enter_trap(cause, self.pc);
+                return StepOutcome::Continue;
+            }
+        };
+
+        self.pending_watchpoint = None;
+        match self.execute_watched(op, a1, a2, watchpoints) {
+            Flow::Continue => match self.exit_code {
+                Some(code) => StepOutcome::Exited(code),
+                None => match self.pending_watchpoint.take() {
+                    Some(addr) => StepOutcome::Watchpoint(addr),
+                    None => StepOutcome::Continue,
+                },
+            },
+            Flow::Exit(code) => {
+                self.pending_watchpoint = None;
+                StepOutcome::Exited(code)
+            }
+            Flow::Watchpoint(addr) => {
+                self.pending_watchpoint = None;
+                StepOutcome::Watchpoint(addr)
+            }
+            Flow::Trap { cause, epc } => {
+                self.pending_watchpoint = None;
+                if self.debug {
+                    eprintln!("exec trap: cause={cause:?} epc=0x{epc:08X}");
+                }
+                self.enter_trap(cause, epc);
+                StepOutcome::Continue
+            }
+        }
+    }
+
+    pub fn step_one(&mut self) -> StepOutcome {
+        self.step_one_with_watchpoints(&HashSet::new())
+    }
+
+    pub fn step_one_with_watchpoints(&mut self, watchpoints: &HashSet<Watchpoint>) -> StepOutcome {
+        if let Some(outcome) = self.prepare_for_fetch() {
+            return outcome;
+        }
+        self.execute_one_prepared(watchpoints)
+    }
+
+    pub fn run_until_stop(
+        &mut self,
+        breakpoints: &HashSet<u32>,
+        watchpoints: &HashSet<Watchpoint>,
+        single_step: bool,
+    ) -> StopReason {
+        let mut ignore_current_breakpoint = breakpoints.contains(&self.pc);
+        loop {
+            if let Some(outcome) = self.prepare_for_fetch() {
+                match outcome {
+                    StepOutcome::Continue => continue,
+                    StepOutcome::Exited(code) => return StopReason::Exited(code),
+                    StepOutcome::Watchpoint(addr) => return StopReason::Watchpoint(addr),
+                }
+            }
+
+            if ignore_current_breakpoint {
+                ignore_current_breakpoint = false;
+            } else if breakpoints.contains(&self.pc) {
+                return StopReason::Breakpoint;
+            }
+
+            match self.execute_one_prepared(watchpoints) {
+                StepOutcome::Continue => {
+                    if single_step {
+                        return StopReason::SingleStep;
+                    }
+                }
+                StepOutcome::Exited(code) => return StopReason::Exited(code),
+                StepOutcome::Watchpoint(addr) => return StopReason::Watchpoint(addr),
+            }
+        }
+    }
+
     /// 运行直到程序退出，返回退出码。
     pub fn run(&mut self) -> u32 {
         loop {
-            self.tick_timer();
-
-            // 重新开启中断后交付 pending 定时器（在当前 PC 指向的指令执行前）。
-            if self.deliverable_interrupt() {
-                self.timer_pending = false;
-                self.enter_trap(TrapCause::Timer, self.pc);
-                continue;
-            }
-
-            if let Some(code) = self.exit_code {
+            if let StepOutcome::Exited(code) = self.step_one() {
                 return code;
-            }
-
-            if self.debug {
-                self.dump_state();
-            }
-
-            let (op, a1, a2) = match self.fetch() {
-                Ok(t) => t,
-                Err(cause) => {
-                    if self.debug {
-                        eprintln!("fetch trap: cause={cause:?} pc=0x{:08X}", self.pc);
-                    }
-                    self.enter_trap(cause, self.pc);
-                    continue;
-                }
-            };
-
-            match self.execute(op, a1, a2) {
-                Flow::Continue => {
-                    if let Some(code) = self.exit_code {
-                        return code;
-                    }
-                }
-                Flow::Exit(code) => return code,
-                Flow::Trap { cause, epc } => {
-                    if self.debug {
-                        eprintln!("exec trap: cause={cause:?} epc=0x{epc:08X}");
-                    }
-                    self.enter_trap(cause, epc);
-                }
             }
         }
     }
