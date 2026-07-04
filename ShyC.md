@@ -58,8 +58,19 @@ The format is:
 ```
 
 These lines are ordinary Shy assembly comments, so existing assembly and linking
-behavior is unchanged. They are intended as input for future debug-info
-generation and emulator debugger support. The option is off by default.
+behavior is unchanged. They are consumed by `shy-dwarf` (via the `.shy.debug.json`
+sidecar produced by `chibicc`) to generate DWARF debug info for GDB.
+
+To produce a debug ELF alongside the `.sfs` image, use:
+
+```sh
+cargo run -q -p shycc -- --shy-emit-source-lines --shy-emit-debug-info \
+  input.c -o app.sfs --sym app.sym
+```
+
+This writes `app.debug.elf`, which the emulator serves to GDB over the RSP
+`qXfer:exec-file:read:` packet. GDB can then show source lines, local variables,
+function parameters, and struct/array/pointer values. The option is off by default.
 
 ## Execution Model
 
