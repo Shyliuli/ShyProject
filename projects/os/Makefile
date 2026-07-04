@@ -112,7 +112,7 @@ $(KERNEL_TARGET)/%.sobj: kernel/%.shy | dirs
 	$(SHYASM) $< -o $@
 
 $(KERNEL_TARGET)/%.shy: kernel/%.shyc | dirs
-	$(SHYCC) -S $< -o $@
+	$(SHYCC) -S --shy-emit-source-lines $< -o $@
 
 $(KERNEL_TARGET)/%.sobj: $(KERNEL_TARGET)/%.shy | dirs
 	$(SHYASM) $< -o $@
@@ -121,7 +121,7 @@ $(FS_TARGET)/fsdata.c: tools/bin2shy.py $(FS_INPUTS) | dirs
 	$(PYTHON) tools/bin2shy.py -o $@ $(FS_INPUTS)
 
 $(FS_TARGET)/%.shy: $(FS_TARGET)/%.c | dirs
-	$(SHYCC) -S $< -o $@
+	$(SHYCC) -S --shy-emit-source-lines $< -o $@
 
 $(FS_TARGET)/%.sobj: $(FS_TARGET)/%.shy | dirs
 	$(SHYASM) $< -o $@
@@ -130,7 +130,7 @@ $(USER_TARGET)/usys.sobj: user/usys.shy | dirs
 	$(SHYASM) $< -o $@
 
 $(USER_TARGET)/%.shy: user/%.shyc | dirs
-	$(SHYCC) -S $< -o $@
+	$(SHYCC) -S --shy-emit-source-lines $< -o $@
 
 $(USER_TARGET)/%.sobj: $(USER_TARGET)/%.shy | dirs
 	$(SHYASM) $< -o $@
