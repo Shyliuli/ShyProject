@@ -4,6 +4,9 @@ ShyProject 是一个面向教学的完整计算机系统实验项目。它从零
 计算机——包括自定义指令集、汇编器、模拟器、链接器、C 编译器以及裸机运行时库。
 目标不是只定义一套纸上规范，而是让学习者亲手跑通从源代码到硅片的完整链路。
 
+> Shy 是一台 AI 辅助开发的全栈计算机。ShyProject 是它的软件栈；硬件描述语言是
+> [ShyHDL](https://github.com/Shyliuli/shyhdl)，处理器是 [ShyCPU](https://github.com/Shyliuli/ShyCPU)。
+
 ## 项目概览
 
 ```
@@ -16,7 +19,7 @@ ShyProject 是一个面向教学的完整计算机系统实验项目。它从零
                                        shyld ──→ .sfs 内存镜像
                                                     │
                                                     ▼
-                                                 shyemu 执行
+                                            shyemu / ShyCPU 执行
 ```
 
 核心组件：
@@ -30,6 +33,9 @@ ShyProject 是一个面向教学的完整计算机系统实验项目。它从零
 | **shycc** | `shycc/` | C 编译器驱动，基于 chibicc 分支，支持 ShyC 语言扩展 |
 | **libshy** | `libshy/` | 裸机 C 支持库——`stdio`、`string`、`ctype`、`stdlib` 等 |
 | **chibicc\_shy** | `projects/chibicc_shy/` | 自举实验——在 Shy 裸机上运行的 chibicc/ShyC 编译器移植 |
+| **ShyOS** | `projects/os/` | 最小操作系统：进程、段式隔离、Trap、调度、只读文件系统与 shell |
+| **ShyHDL** | 独立仓库 | 用 Rust 风格源码描述硬件、导出 Verilog 的 HDL |
+| **ShyCPU** | 独立仓库 | ShyISA 的单周期硬件实现，全部 RTL 用 ShyHDL 描述 |
 
 ## ShyISA 一览
 
@@ -56,6 +62,21 @@ ShyC 是面向 ShyISA 的裸机 C 前端。基于 chibicc 分支实现，提供�
 - 软件浮点支持、基础原子操作
 
 详细规范见 [ShyC.md](ShyC.md)，libshy 库说明见 [libshy/README.md](libshy/README.md)。
+
+## 硬件实现
+
+同一份 `.sfs` 既能交给 `shyemu`，也能装进硬件：
+
+- [ShyCPU](https://github.com/Shyliuli/ShyCPU)：ShyISA 的单周期实现。控制器、寄存器堆、
+  ALU 和 Trap/段转换全部用 [ShyHDL](https://github.com/Shyliuli/shyhdl) 描述，导出
+  Verilog-2005；测试里直接加载本仓库 `shycc` 编出的 `.sfs`，并能启动 `projects/os/` 的
+  ShyOS 跑 shell 命令。
+- [ShyHDL](https://github.com/Shyliuli/shyhdl)：Rust 风格的硬件描述层，负责位宽检查、
+  组合过程检查、Verilog 导出、Verilator 仿真与 NVBoard 上板。
+
+```console
+$ cargo run -- os        # 在 ShyCPU 上启动 ShyOS（在 ShyCPU 仓库里执行）
+```
 
 ## 环境要求
 
@@ -201,11 +222,16 @@ ShyProject/
 ├── shy_isa_lib/           # 共享 ISA 定义库
 ├── test/                  # 测试用例
 ├── projects/              # 子项目
-│   └── chibicc_shy/       # 自举编译器实验
+│   ├── chibicc_shy/       # 自举编译器实验
+│   └── os/                # ShyOS
 ├── third_party/           # 第三方依赖
 │   └── chibicc/           # chibicc C 编译器分支
 └── vscode-shyc/           # VS Code 扩展
 ```
+
+硬件部分是两个独立仓库：[ShyHDL](https://github.com/Shyliuli/shyhdl) 与
+[ShyCPU](https://github.com/Shyliuli/ShyCPU)。ShyCPU 通过 `cargo run -- os` 直接加载
+这里的 `projects/os/target/kernel.sfs`。
 
 ## 许可证
 
