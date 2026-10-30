@@ -1429,6 +1429,65 @@ impl FnLower<'_> {
     // Assignment
     // -----------------------------------------------------------------------
 
+    /// Bit-field access: the field shares a storage unit with its neighbours,
+    /// so a read masks and shifts, and a write clears and sets the same bits.
+    pub(super) fn bit_field_value(
+        &mut self,
+        address: ir::Address,
+        ty: TypeId,
+        width: u32,
+        bit_offset: u32,
+        span: Span,
+    ) -> ir::Operand {
+        let unit = self.load_value(address, ty, Qualifiers::NONE);
+        let unit_ty = self.l.ir_type(ty);
+        let bits = self.l.size_of(ty, span).unwrap_or(4) * 8;
+        let mut value = unit;
+        if bit_offset > 0 {
+            value = self.shift_bits(value, bit_offset, ir::BinaryOp::LShr, unit_ty);
+        }
+        if width < bits {
+            let mask = if width >= 32 {
+                u64::from(u32::MAX)
+            } else {
+                (1u64 << width) - 1
+            };
+            value = self.mask_bits(value, mask, unit_ty);
+        }
+        if !self.l.is_unsigned(ty) && width < bits {
+            // Sign-extend from the field width.
+            value = self.shift_bits(value, bits - width, ir::BinaryOp::Shl, unit_ty);
+            value = self.shift_bits(value, bits - width, ir::BinaryOp::AShr, unit_ty);
+        }
+        value
+    }
+
+    fn shift_bits(
+        &mut self,
+        value: ir::Operand,
+        amount: u32,
+        op: ir::BinaryOp,
+        ty: ir::Type,
+    ) -> ir::Operand {
+        let amount = ir::Operand::Constant(ir::Constant::int(ty, i64::from(amount)));
+        ir::Operand::Value(self.emit_value(ir::InstKind::Binary {
+            op,
+            lhs: value,
+            rhs: amount,
+            ty,
+        }))
+    }
+
+    fn mask_bits(&mut self, value: ir::Operand, mask: u64, ty: ir::Type) -> ir::Operand {
+        let mask = ir::Operand::Constant(ir::Constant::int(ty, mask as i64));
+        ir::Operand::Value(self.emit_value(ir::InstKind::Binary {
+            op: ir::BinaryOp::And,
+            lhs: value,
+            rhs: mask,
+            ty,
+        }))
+    }
+
     fn lower_assignment(
         &mut self,
         op: ast::AssignOp,

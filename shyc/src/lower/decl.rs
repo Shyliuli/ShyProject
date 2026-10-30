@@ -672,6 +672,18 @@ impl Lowerer {
             .map(|(_, ty, offset)| (ty, offset))
     }
 
+    /// Type, storage offset, and bit placement of a bit-field member.
+    pub(super) fn bit_field(&self, record: TypeId, name: &str) -> Option<(TypeId, u32, u32, u32)> {
+        let info = self.types.record_info(record)?;
+        let field = info
+            .fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some(name))?;
+        field
+            .bit_width
+            .map(|width| (field.ty.ty, field.offset, width, field.bit_offset))
+    }
+
     pub(super) fn field_index(
         &self,
         record: TypeId,

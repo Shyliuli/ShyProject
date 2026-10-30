@@ -25,6 +25,31 @@ impl FnLower<'_> {
         op: ast::MemberOp,
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
+        // A bit-field shares its storage unit with its neighbours, so it is
+        // read through a mask instead of as an ordinary member.
+        let object_ty = self.type_of(object)?;
+        let record = if self.l.types.is_record(object_ty) {
+            Some(object_ty)
+        } else {
+            self.l
+                .pointee(object_ty)
+                .map(|pointee| pointee.ty)
+                .filter(|ty| self.l.types.is_record(*ty))
+        };
+        let object_value = self.lower_expr(object)?;
+        if let Some(record) = record
+            && let Some((field_ty, offset, width, bit_offset)) =
+                self.l.bit_field(record, &name.text)
+        {
+            let base = self.object_address(object_value, span)?;
+            let address = base.with_offset(i64::from(offset));
+            let value = self.bit_field_value(address, field_ty, width, bit_offset, span);
+            return Ok(ExprVal {
+                ty: field_ty,
+                qualifiers: Qualifiers::NONE,
+                kind: ExprKind::Value(value),
+            });
+        }
         let target = self.member_target(object, name, op, span)?;
         Ok(ExprVal {
             ty: target.ty,
