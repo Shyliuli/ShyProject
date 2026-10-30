@@ -41,6 +41,9 @@ struct Options {
     emit_source_lines: bool,
     /// `-nostdlib` / `-nodefaultlibs`: do not add libshy or the float runtime.
     no_default_libs: bool,
+    /// Target triple. `shy` selects the Shy ISA pipeline; anything else is
+    /// lowered to LLVM IR and finished by clang.
+    target: String,
     emit_debug_info: bool,
     compile_args: Vec<String>,
     inputs: Vec<String>,
@@ -100,6 +103,7 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         print_only: false,
         emit_source_lines: false,
         no_default_libs: false,
+        target: "shy".to_string(),
         emit_debug_info: false,
         compile_args: Vec::new(),
         inputs: Vec::new(),
@@ -126,6 +130,16 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                 };
             }
             "-nostdlib" | "-nodefaultlibs" | "-nolibc" => opts.no_default_libs = true,
+            "--target" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    bail!("option `--target` requires an argument");
+                };
+                opts.target = value.clone();
+            }
+            flag if flag.starts_with("--target=") => {
+                opts.target = flag["--target=".len()..].to_string();
+            }
             "-###" => opts.print_only = true,
             "-save-temps" | "--save-temps" => opts.save_temps = true,
             "-E" => opts.stage = Stage::Preprocess,
@@ -249,6 +263,9 @@ fn is_compile_option(arg: &str) -> bool {
 
 fn run(opts: Options) -> Result<()> {
     let repo = repo_root();
+    if opts.target != "shy" {
+        return run_llvm(&repo, &opts);
+    }
     let mut temps = TempFiles::new(opts.save_temps || opts.print_only);
 
     if opts.stage == Stage::Preprocess {
@@ -438,6 +455,81 @@ fn shyc_command(repo: &Path, print_only: bool) -> Result<Command> {
         .arg("shyc")
         .arg("--");
     Ok(cmd)
+}
+
+/// Lower to LLVM IR with `shyc`, then let clang do instruction selection and
+/// linking. This is the same shape as the Shy pipeline, which hands its
+/// assembly to `shyasm` and the objects to `shyld`.
+fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
+    let mut temps = TempFiles::new(opts.save_temps || opts.print_only);
+    let mut clang_inputs: Vec<PathBuf> = Vec::new();
+
+    for input in &opts.inputs {
+        match input_kind(input)? {
+            InputKind::C => {
+                let ll = if opts.stage == Stage::Link {
+                    temps.temp_path(".ll")
+                } else {
+                    opts.output
+                        .clone()
+                        .unwrap_or_else(|| replace_ext(input, ".ll"))
+                };
+                let mut cmd = shyc_command(repo, opts.print_only)?;
+                cmd.arg("--emit=llvm")
+                    .arg(format!("--target={}", opts.target))
+                    .arg(format!("-I{}", repo.join("libshy/include").display()));
+                for arg in &opts.compile_args {
+                    if arg.starts_with("-I") || arg.starts_with("-D") || arg.starts_with("-U") {
+                        cmd.arg(arg);
+                    }
+                }
+                cmd.arg("-o").arg(&ll).arg(input);
+                run_command(opts, &mut cmd)?;
+                clang_inputs.push(ll);
+            }
+            InputKind::Obj => clang_inputs.push(PathBuf::from(input)),
+            _ => bail!("`{input}` cannot be compiled for `{}`", opts.target),
+        }
+    }
+
+    let clang = env::var("SHYCC_CLANG").unwrap_or_else(|_| "clang".to_string());
+    let mut cmd = Command::new(clang);
+    cmd.arg(format!("--target={}", opts.target));
+    match opts.stage {
+        Stage::Asm => {
+            cmd.arg("-S");
+            if let Some(output) = &opts.output {
+                cmd.arg("-o").arg(output);
+            }
+            cmd.args(&clang_inputs);
+        }
+        Stage::Object => {
+            cmd.arg("-c");
+            for (index, input) in clang_inputs.iter().enumerate() {
+                let output = match (&opts.output, clang_inputs.len()) {
+                    (Some(output), 1) => output.clone(),
+                    _ => {
+                        let mut path = replace_ext(&input.to_string_lossy(), ".o");
+                        if index > 0 {
+                            path = PathBuf::from(format!("{index}-{}", path.display()));
+                        }
+                        path
+                    }
+                };
+                cmd.arg(input).arg("-o").arg(output);
+            }
+        }
+        _ => {
+            if let Some(output) = &opts.output {
+                cmd.arg("-o").arg(output);
+            }
+            for lib in &opts.libs {
+                cmd.arg(format!("-l{lib}"));
+            }
+            cmd.args(&clang_inputs);
+        }
+    }
+    run_command(opts, &mut cmd)
 }
 
 fn run_chibicc(
