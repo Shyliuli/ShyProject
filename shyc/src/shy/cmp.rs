@@ -4,12 +4,49 @@ use super::fallback_span;
 use super::frame::is_64;
 use super::function::FnWriter;
 use super::inst::result;
-use crate::ir::{Inst, IntPredicate, Operand, Type};
+use crate::ir::{FloatPredicate, Inst, IntPredicate, Operand, Type};
 use crate::source::Diagnostic;
 
 impl FnWriter<'_> {
     // Comparisons
     // -----------------------------------------------------------------------
+
+    /// Floating-point comparison through the soft-float runtime.
+    ///
+    /// The helpers take raw bit patterns and return 0 or 1, so an `f32` needs
+    /// one argument slot and an `f64` an ordinary 64-bit pair. `>` and `>=`
+    /// are the `<` and `<=` helpers with the operands exchanged.
+    pub(crate) fn fcmp(
+        &mut self,
+        instruction: &Inst,
+        pred: FloatPredicate,
+        lhs: &Operand,
+        rhs: &Operand,
+        ty: Type,
+    ) -> Result<(), Diagnostic> {
+        let prefix = if ty == Type::F32 { "f32" } else { "f64" };
+        let (name, first, second) = match pred {
+            FloatPredicate::Eq => ("eq", lhs, rhs),
+            FloatPredicate::Ne => ("ne", lhs, rhs),
+            FloatPredicate::Lt => ("lt", lhs, rhs),
+            FloatPredicate::Le => ("le", lhs, rhs),
+            FloatPredicate::Gt => ("lt", rhs, lhs),
+            FloatPredicate::Ge => ("le", rhs, lhs),
+        };
+        let wide = is_64(ty);
+        if wide {
+            self.load_operand(first, "4x", Some("5x"))?;
+            self.load_operand(second, "6x", Some("7x"))?;
+        } else {
+            self.load_operand(first, "4x", None)?;
+            self.load_operand(second, "5x", None)?;
+        }
+        self.line(format!("calln __shy_{prefix}_{name}"));
+        self.line("andn 1x 1");
+        let result = result(instruction)?;
+        self.store_value_word(result, "1x");
+        Ok(())
+    }
 
     pub(crate) fn icmp(
         &mut self,

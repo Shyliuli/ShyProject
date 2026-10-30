@@ -20,10 +20,7 @@ impl FnWriter<'_> {
         ty: Type,
     ) -> Result<(), Diagnostic> {
         if op.is_float() || ty.is_float() {
-            return Err(Diagnostic::new(
-                instruction.span.unwrap_or_else(fallback_span),
-                "floating-point arithmetic is not implemented by the Shy backend",
-            ));
+            return self.float_binary(instruction, op, lhs, rhs, ty);
         }
         if ty.is_aggregate() || ty.is_void() {
             return Err(Diagnostic::new(
@@ -42,6 +39,48 @@ impl FnWriter<'_> {
         } else {
             self.binary_narrow(op, ty)?;
             self.mask_to("1x", ty);
+            self.store_value_word(result, "1x");
+        }
+        Ok(())
+    }
+
+    /// Floating-point arithmetic through the runtime helpers.
+    ///
+    /// `f32` operands are single words in `4x`/`5x`; `f64` operands are
+    /// 64-bit pairs, so the second operand starts at `6x`.
+    fn float_binary(
+        &mut self,
+        instruction: &Inst,
+        op: BinaryOp,
+        lhs: &Operand,
+        rhs: &Operand,
+        ty: Type,
+    ) -> Result<(), Diagnostic> {
+        let suffix = match op {
+            BinaryOp::FAdd => "add",
+            BinaryOp::FSub => "sub",
+            BinaryOp::FMul => "mul",
+            BinaryOp::FDiv => "div",
+            _ => {
+                return Err(Diagnostic::new(
+                    instruction.span.unwrap_or_else(fallback_span),
+                    "unsupported floating-point operation",
+                ));
+            }
+        };
+        let prefix = if ty == Type::F32 { "f32" } else { "f64" };
+        if is_64(ty) {
+            self.load_operand(lhs, "4x", Some("5x"))?;
+            self.load_operand(rhs, "6x", Some("7x"))?;
+        } else {
+            self.load_operand(lhs, "4x", None)?;
+            self.load_operand(rhs, "5x", None)?;
+        }
+        self.line(format!("calln __shy_{prefix}_{suffix}"));
+        let result = result(instruction)?;
+        if is_64(ty) {
+            self.store_value_pair(result, "2x", "1x");
+        } else {
             self.store_value_word(result, "1x");
         }
         Ok(())
@@ -294,6 +333,129 @@ impl FnWriter<'_> {
     // Casts
     // -----------------------------------------------------------------------
 
+    /// Floating-point conversions through the soft-float runtime.
+    ///
+    /// The helpers exchange raw bit patterns: an `f32` is one word, an `f64` a
+    /// 64-bit pair, and the integer helpers always work on `i64`/`u64`, so
+    /// narrower integers are widened first and results are truncated after.
+    fn cast_float(
+        &mut self,
+        instruction: &Inst,
+        op: CastOp,
+        value: &Operand,
+        from: Type,
+        to: Type,
+    ) -> Result<(), Diagnostic> {
+        let result = result(instruction)?;
+        let wide_to = is_64(to);
+        match (op, from, to) {
+            (CastOp::FPTrunc, Type::F64, Type::F32) => {
+                self.load_operand(value, "4x", Some("5x"))?;
+                self.line("calln __shy_f64_to_f32");
+                self.store_value_word(result, "1x");
+            }
+            (CastOp::FPExt, Type::F32, Type::F64) => {
+                self.load_operand(value, "4x", None)?;
+                self.line("calln __shy_f32_to_f64");
+                self.store_value_pair(result, "2x", "1x");
+            }
+            (CastOp::Bitcast, _, _) => {
+                // Same width reinterpretation: copy the words unchanged.
+                self.load_operand(value, "1x", if is_64(from) { Some("2x") } else { None })?;
+                if wide_to {
+                    self.store_value_pair(result, "2x", "1x");
+                } else {
+                    self.store_value_word(result, "1x");
+                }
+            }
+            (CastOp::SIToFP | CastOp::UIToFP, _, Type::F32 | Type::F64) => {
+                self.widen_for_float(value, from, op == CastOp::SIToFP)?;
+                let unsigned = op == CastOp::UIToFP;
+                let symbol = match (to, unsigned) {
+                    (Type::F32, false) => "__shy_i64_to_f32",
+                    (Type::F32, true) => "__shy_u64_to_f32",
+                    (Type::F64, false) => "__shy_i64_to_f64",
+                    (Type::F64, true) => "__shy_u64_to_f64",
+                    _ => {
+                        return Err(Diagnostic::new(
+                            instruction.span.unwrap_or_else(fallback_span),
+                            "unsupported integer-to-float conversion",
+                        ));
+                    }
+                };
+                self.line("seta 4x 1x");
+                self.line("seta 5x 2x");
+                self.line(format!("calln {symbol}"));
+                if wide_to {
+                    self.store_value_pair(result, "2x", "1x");
+                } else {
+                    self.store_value_word(result, "1x");
+                }
+            }
+            (CastOp::FPToSI | CastOp::FPToUI, Type::F32 | Type::F64, _) => {
+                if is_64(from) {
+                    self.load_operand(value, "4x", Some("5x"))?;
+                } else {
+                    self.load_operand(value, "4x", None)?;
+                }
+                let unsigned = op == CastOp::FPToUI;
+                let symbol = match (from, unsigned) {
+                    (Type::F32, false) => "__shy_f32_to_i64",
+                    (Type::F32, true) => "__shy_f32_to_u64",
+                    (Type::F64, false) => "__shy_f64_to_i64",
+                    (Type::F64, true) => "__shy_f64_to_u64",
+                    _ => {
+                        return Err(Diagnostic::new(
+                            instruction.span.unwrap_or_else(fallback_span),
+                            "unsupported float-to-integer conversion",
+                        ));
+                    }
+                };
+                self.line(format!("calln {symbol}"));
+                if is_64(to) {
+                    self.store_value_pair(result, "2x", "1x");
+                } else {
+                    if to.integer_bits().unwrap_or(32) < 32 {
+                        self.line("andn 1x 0xffffffff");
+                    }
+                    self.store_value_word(result, "1x");
+                }
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    instruction.span.unwrap_or_else(fallback_span),
+                    "conversion between these types is not supported by the Shy backend",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Get an integer operand into `1x`/`2x` as a sign- or zero-extended
+    /// 64-bit value, which is what the runtime's integer helpers expect.
+    fn widen_for_float(
+        &mut self,
+        value: &Operand,
+        from: Type,
+        signed: bool,
+    ) -> Result<(), Diagnostic> {
+        self.load_operand(value, "1x", if is_64(from) { Some("2x") } else { None })?;
+        if is_64(from) {
+            return Ok(());
+        }
+        self.line("setn 2x 0");
+        if from != Type::I1 && signed {
+            let done = self.fresh("float_sext");
+            self.line("seta ex 1x");
+            self.line("rsn ex 31");
+            self.line("equn ex 0");
+            self.line(format!("jmpn {done}"));
+            self.line("setn 2x 0xffffffff");
+            self.line(format!("{done}:"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn cast(
         &mut self,
         instruction: &Inst,
@@ -303,10 +465,7 @@ impl FnWriter<'_> {
     ) -> Result<(), Diagnostic> {
         let from = self.operand_type(value);
         if from.is_float() || to.is_float() {
-            return Err(Diagnostic::new(
-                instruction.span.unwrap_or_else(fallback_span),
-                "floating-point conversions are not implemented by the Shy backend",
-            ));
+            return self.cast_float(instruction, op, value, from, to);
         }
         if from.is_aggregate() || to.is_aggregate() || from.is_void() || to.is_void() {
             return Err(Diagnostic::new(

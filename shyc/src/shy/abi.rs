@@ -20,10 +20,6 @@ use crate::abi::{
 use crate::ir::{Function, Layout, Signature, Type};
 use crate::source::{Diagnostic, Span};
 
-pub(crate) fn is_float(ty: Type) -> bool {
-    ty.is_float()
-}
-
 /// Map one IR type to the ABI classifier's type.
 ///
 /// The IR does not record integer signedness, and the ShyV1 classifier only
@@ -73,12 +69,6 @@ pub(crate) fn plan_signature(
         return Err(Diagnostic::new(
             span,
             "variadic functions and calls are not implemented by the Shy backend",
-        ));
-    }
-    if is_float(signature.ret) || signature.params.iter().any(|ty| is_float(*ty)) {
-        return Err(Diagnostic::new(
-            span,
-            "floating-point arguments and return values are not implemented by the Shy backend",
         ));
     }
     let abi_signature = FunctionSignature {

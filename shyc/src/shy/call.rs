@@ -90,7 +90,9 @@ impl FnWriter<'_> {
         }
 
         match &call.target {
-            CallTarget::Direct(symbol) => self.line(format!("calln {}", super::operand_symbol(symbol))),
+            CallTarget::Direct(symbol) => {
+                self.line(format!("calln {}", super::operand_symbol(symbol)))
+            }
             CallTarget::Indirect(operand) => {
                 self.load_operand(operand, "ex", None)?;
                 self.line("calla ex");

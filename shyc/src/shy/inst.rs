@@ -51,10 +51,7 @@ impl FnWriter<'_> {
             InstKind::Binary { op, lhs, rhs, ty } => self.binary(instruction, *op, lhs, rhs, *ty),
             InstKind::Unary { op, value, ty } => self.unary(instruction, *op, value, *ty),
             InstKind::ICmp { pred, lhs, rhs, ty } => self.icmp(instruction, *pred, lhs, rhs, *ty),
-            InstKind::FCmp { .. } => Err(Diagnostic::new(
-                instruction.span.unwrap_or_else(fallback_span),
-                "floating-point comparisons are not implemented by the Shy backend",
-            )),
+            InstKind::FCmp { pred, lhs, rhs, ty } => self.fcmp(instruction, *pred, lhs, rhs, *ty),
             InstKind::Cast { op, value, to } => self.cast(instruction, *op, value, *to),
             InstKind::Call(call) => self.emit_call(instruction, call, instruction.span),
             InstKind::MemCpy { dst, src, bytes } => {

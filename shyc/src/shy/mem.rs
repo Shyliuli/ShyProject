@@ -24,12 +24,6 @@ impl FnWriter<'_> {
                 "atomic memory operations are not implemented by the Shy backend",
             ));
         }
-        if ty.is_float() {
-            return Err(Diagnostic::new(
-                instruction.span.unwrap_or_else(fallback_span),
-                "floating-point loads are not implemented by the Shy backend",
-            ));
-        }
         let result = result(instruction)?;
         self.emit_address(address, "3x")?;
         let layout = self.function.layout;
@@ -82,12 +76,6 @@ impl FnWriter<'_> {
             return Err(Diagnostic::new(
                 fallback_span(),
                 "atomic memory operations are not implemented by the Shy backend",
-            ));
-        }
-        if ty.is_float() {
-            return Err(Diagnostic::new(
-                fallback_span(),
-                "floating-point stores are not implemented by the Shy backend",
             ));
         }
         self.emit_address(address, "3x")?;
@@ -161,12 +149,6 @@ impl FnWriter<'_> {
         high: Option<&str>,
     ) -> Result<Type, Diagnostic> {
         let ty = self.operand_type(operand);
-        if ty.is_float() {
-            return Err(Diagnostic::new(
-                fallback_span(),
-                "floating-point values are not implemented by the Shy backend",
-            ));
-        }
         match operand {
             Operand::Value(value) => {
                 let offset = self.frame.value(*value);

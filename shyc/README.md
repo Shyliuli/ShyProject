@@ -50,11 +50,19 @@ honoured, and the resource hints reach the linked image.
 
 Working: integers, pointers, arrays, structs and unions, enums, control flow,
 direct and indirect calls, recursion, global initialisers with symbol
-relocations, and ShyC's `impl`/`self`/`drop`.
+relocations, ShyC's `impl`/`self`/`drop`, and floating point through the
+soft-float runtime.
 
-Diagnosed rather than miscompiled: floating point, variadic functions, inline
-assembly, atomics, bit-fields, variable-length arrays, and thread-local
-storage. The LLVM backend additionally treats aggregate parameters and returns
+Floating point on the Shy target needs the runtime object linked in; build it
+once with the existing toolchain:
+
+```sh
+target/bin/shycc -S third_party/chibicc/shy_runtime_softfloat.c -o float.shy
+target/bin/shyasm float.shy -o float.sobj
+```
+
+Diagnosed rather than miscompiled: variadic functions, inline assembly,
+atomics, bit-fields, variable-length arrays, and thread-local storage. The LLVM backend additionally treats aggregate parameters and returns
 as this compiler's own byte-blob convention until target C ABI lowering is
 enabled for them.
 

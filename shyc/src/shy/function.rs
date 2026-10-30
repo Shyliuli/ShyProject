@@ -267,12 +267,6 @@ impl FnWriter<'_> {
         for (index, argument) in plan_args.iter().enumerate() {
             let ty = signature.params[index];
             let value = self.function.params[index];
-            if ty.is_float() {
-                return Err(Diagnostic::new(
-                    fallback_span(),
-                    "floating-point parameters are not implemented by the Shy backend",
-                ));
-            }
             if ty.is_aggregate() {
                 let offset = match &argument.passing {
                     Passing::Direct { parts } => {
@@ -527,12 +521,6 @@ impl FnWriter<'_> {
     ) -> Result<(), Diagnostic> {
         let layout = self.function.layout;
         let ret = self.function.signature.ret;
-        if ret.is_float() {
-            return Err(Diagnostic::new(
-                span.unwrap_or_else(fallback_span),
-                "floating-point return values are not implemented by the Shy backend",
-            ));
-        }
         if ret.is_void() {
             if value.is_some() {
                 return Err(Diagnostic::new(
