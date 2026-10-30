@@ -758,10 +758,17 @@ impl Lowerer {
         match value.kind {
             ConstKind::Int(bits) => {
                 if self.types.is_integer(target) {
-                    Ok(ConstValue::int(
-                        target,
-                        mask_width(bits, self.int_width(target)),
-                    ))
+                    // C conversion preserves the value: widening a signed
+                    // constant sign-extends (`case -1:` of a `long` switch is
+                    // all ones, not 0xffffffff), while widening an unsigned
+                    // one zero-extends. Narrowing just truncates either way.
+                    let bits = if self.is_unsigned(value.ty) {
+                        mask_width(bits, self.int_width(target))
+                    } else {
+                        let sign_extended = sign_extend(bits, self.int_width(value.ty)) as u64;
+                        mask_width(sign_extended, self.int_width(target))
+                    };
+                    Ok(ConstValue::int(target, bits))
                 } else if self.types.is_floating(target) {
                     let value = if self.is_unsigned(value.ty) {
                         bits as f64
