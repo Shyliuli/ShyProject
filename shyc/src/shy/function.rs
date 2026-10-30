@@ -251,6 +251,54 @@ impl FnWriter<'_> {
     // Prologue
     // -----------------------------------------------------------------------
 
+    /// Build the `__va_area__` descriptor described in `libshy/include/stdarg.shyh`.
+    ///
+    /// Layout: `+0` next register slot, `+4` pointer to the saved register
+    /// area, `+8` descending stack cursor, `+12` eight saved 32-bit registers.
+    fn variadic_prologue(&mut self) -> Result<(), Diagnostic> {
+        let plan = self.plan.clone();
+        let Some(area) = self
+            .function
+            .slots
+            .iter()
+            .position(|slot| slot.name == "__va_area__")
+        else {
+            return Err(Diagnostic::new(
+                fallback_span(),
+                "a variadic function needs the `__va_area__` local",
+            ));
+        };
+        let offset = self.frame.slot(crate::ir::SlotId(area as u32));
+
+        // Named parameters already occupy this many register slots; variadic
+        // arguments start after them.
+        let named_slots: u32 = plan
+            .args
+            .iter()
+            .map(|argument| match &argument.passing {
+                Passing::Direct { parts } => parts
+                    .iter()
+                    .filter(|part| matches!(part.location, Location::Register(_)))
+                    .count() as u32,
+                _ => 0,
+            })
+            .sum();
+
+        for (index, register) in super::abi::ARGUMENT_REGISTERS.iter().enumerate() {
+            self.store_word(offset + 12 + index as u32 * 4, register);
+        }
+        self.line(format!("setn 1x {named_slots}"));
+        self.store_word(offset, "1x");
+
+        self.frame_addr(offset + 12, "1x");
+        self.store_word(offset + 4, "1x");
+
+        self.line("seta 1x fx");
+        self.line(format!("subn 1x {}", 8 + plan.stack.argument_bytes));
+        self.store_word(offset + 8, "1x");
+        Ok(())
+    }
+
     fn prologue(&mut self) -> Result<(), Diagnostic> {
         let layout = self.function.layout;
         let signature = self.function.signature.clone();
@@ -261,6 +309,12 @@ impl FnWriter<'_> {
         }
         if let Some(sret) = self.frame.sret() {
             self.store_word(sret, "4x");
+        }
+        // A variadic function builds the `va_list` descriptor here, before the
+        // parameters are copied into the frame, because copying them reuses
+        // the argument registers.
+        if signature.variadic {
+            self.variadic_prologue()?;
         }
 
         let plan_args = self.plan.args.clone();

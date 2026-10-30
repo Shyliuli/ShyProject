@@ -65,12 +65,6 @@ pub(crate) fn plan_signature(
     layout: Layout,
     span: Span,
 ) -> Result<CallPlan, Diagnostic> {
-    if signature.variadic {
-        return Err(Diagnostic::new(
-            span,
-            "variadic functions and calls are not implemented by the Shy backend",
-        ));
-    }
     let abi_signature = FunctionSignature {
         ret: abi_type(signature.ret, layout),
         params: signature
@@ -78,7 +72,7 @@ pub(crate) fn plan_signature(
             .iter()
             .map(|ty| abi_type(*ty, layout))
             .collect(),
-        variadic: false,
+        variadic: signature.variadic,
     };
     plan(AbiKind::ShyV1, &abi_signature)
         .map_err(|error| Diagnostic::new(span, format!("Shy ABI v1: {error}")))
@@ -88,10 +82,31 @@ pub(crate) fn plan_function(function: &Function, span: Span) -> Result<CallPlan,
     plan_signature(&function.signature, function.layout, span)
 }
 
+/// Plan a call from the argument types actually passed.
+///
+/// A variadic call carries more arguments than the signature names, and every
+/// one of them occupies slots by the same rules, so the plan is built from the
+/// real list rather than from the fixed parameter list.
+pub(crate) fn plan_call(
+    signature: &Signature,
+    arguments: &[crate::ir::Type],
+    layout: Layout,
+    span: Span,
+) -> Result<CallPlan, Diagnostic> {
+    let abi_signature = FunctionSignature {
+        ret: abi_type(signature.ret, layout),
+        params: arguments.iter().map(|ty| abi_type(*ty, layout)).collect(),
+        variadic: signature.variadic,
+    };
+    plan(AbiKind::ShyV1, &abi_signature)
+        .map_err(|error| Diagnostic::new(span, format!("Shy ABI v1: {error}")))
+}
+
 /// Map an argument register slot index (0..7) to its Shy register name.
+pub(crate) const ARGUMENT_REGISTERS: [&str; 8] = ["4x", "5x", "6x", "7x", "8x", "9x", "ax", "bx"];
+
 pub(crate) fn argument_register(index: u16) -> Option<&'static str> {
-    const REGISTERS: [&str; 8] = ["4x", "5x", "6x", "7x", "8x", "9x", "ax", "bx"];
-    REGISTERS.get(index as usize).copied()
+    ARGUMENT_REGISTERS.get(index as usize).copied()
 }
 
 /// Map a return register slot index to its Shy register name.

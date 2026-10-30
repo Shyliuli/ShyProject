@@ -61,8 +61,12 @@ target/bin/shycc -S third_party/chibicc/shy_runtime_softfloat.c -o float.shy
 target/bin/shyasm float.shy -o float.sobj
 ```
 
-Diagnosed rather than miscompiled: variadic functions, inline assembly,
-atomics, bit-fields, variable-length arrays, and thread-local storage. The LLVM backend additionally treats aggregate parameters and returns
+Variadic functions follow the same ABI: fixed parameters take their slots, the
+callee saves the argument registers into `__va_area__`, and `stdarg.shyh`
+walks the register area and the descending stack cursor.
+
+Diagnosed rather than miscompiled: inline assembly, atomics, bit-fields,
+variable-length arrays, and thread-local storage. The LLVM backend additionally treats aggregate parameters and returns
 as this compiler's own byte-blob convention until target C ABI lowering is
 enabled for them.
 
