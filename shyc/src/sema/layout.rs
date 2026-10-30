@@ -44,6 +44,14 @@ use super::types::{Builtin, IntegerRank, QualifiedType, RecordKind, TypeId, Type
 /// `offset` is filled in by `TypeStore::complete_record`; it is 0 before the
 /// record is completed. `name` is `None` for an anonymous struct/union member
 /// and for an unnamed bit-field.
+/// Where one field sits: byte offset of its storage, and the bit offset inside
+/// that storage for a bit-field.
+pub type FieldSlot = (u32, u32);
+
+/// Field slots, the record layout they produce, and whether the record ends
+/// with a flexible array member.
+pub type RecordLayout = (Vec<FieldSlot>, Layout, bool);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordField {
     pub name: Option<String>,
@@ -52,6 +60,8 @@ pub struct RecordField {
     /// reports [`TypeError::UnsupportedBitField`] instead of inventing a
     /// bit numbering.
     pub bit_width: Option<u32>,
+    /// Bit offset inside the storage unit, for a bit-field.
+    pub bit_offset: u32,
     /// Explicit `_Alignas`/`aligned` alignment. The parser rejects those
     /// spellings today; if one ever reaches layout, it is reported as
     /// [`TypeError::UnsupportedExplicitAlignment`], never ignored.
@@ -65,6 +75,7 @@ impl RecordField {
             name: Some(name.into()),
             ty,
             bit_width: None,
+            bit_offset: 0,
             explicit_align: None,
             offset: 0,
         }
@@ -75,6 +86,7 @@ impl RecordField {
             name: None,
             ty,
             bit_width: None,
+            bit_offset: 0,
             explicit_align: None,
             offset: 0,
         }
@@ -210,8 +222,9 @@ impl TypeStore {
 
         let (offsets, layout, is_flexible) = self.layout_record(kind, &fields)?;
         let mut fields = fields;
-        for (field, offset) in fields.iter_mut().zip(offsets) {
+        for (field, (offset, bit_offset)) in fields.iter_mut().zip(offsets) {
             field.offset = offset;
+            field.bit_offset = bit_offset;
         }
 
         self.records[record_id.index()] = RecordInfo {
@@ -228,7 +241,7 @@ impl TypeStore {
         &self,
         kind: RecordKind,
         fields: &[RecordField],
-    ) -> Result<(Vec<u32>, Layout, bool), TypeError> {
+    ) -> Result<RecordLayout, TypeError> {
         for field in fields {
             if field.explicit_align.is_some() {
                 return Err(TypeError::UnsupportedExplicitAlignment);
@@ -258,7 +271,7 @@ impl TypeStore {
         &self,
         fields: &[RecordField],
         flexible: Option<usize>,
-    ) -> Result<(Vec<u32>, Layout, bool), TypeError> {
+    ) -> Result<RecordLayout, TypeError> {
         let mut offsets = Vec::with_capacity(fields.len());
         let mut offset = 0u32;
         let mut align = 1u32;
@@ -289,7 +302,7 @@ impl TypeStore {
                         in_unit = false;
                     }
                     offset = align_up(offset, field_align).ok_or(TypeError::LayoutOverflow)?;
-                    offsets.push(offset);
+                    offsets.push((offset, 0));
                     continue;
                 }
                 if !in_unit {
@@ -305,7 +318,7 @@ impl TypeStore {
                     bits_used = 0;
                     unit_bits = bits_per_unit;
                 }
-                offsets.push(unit_start);
+                offsets.push((unit_start, bits_used));
                 bits_used += width;
                 align = align.max(field_align);
                 if bits_used >= unit_bits {
@@ -320,7 +333,7 @@ impl TypeStore {
                 in_unit = false;
             }
             offset = align_up(offset, field_align).ok_or(TypeError::LayoutOverflow)?;
-            offsets.push(offset);
+            offsets.push((offset, 0));
             offset = offset
                 .checked_add(field_size)
                 .ok_or(TypeError::LayoutOverflow)?;
@@ -334,7 +347,7 @@ impl TypeStore {
         Ok((offsets, Layout { size, align }, flexible.is_some()))
     }
 
-    fn layout_union(&self, fields: &[RecordField]) -> Result<(Vec<u32>, Layout, bool), TypeError> {
+    fn layout_union(&self, fields: &[RecordField]) -> Result<RecordLayout, TypeError> {
         let mut offsets = Vec::with_capacity(fields.len());
         let mut size = 0u32;
         let mut align = 1u32;
@@ -342,7 +355,7 @@ impl TypeStore {
         for field in fields {
             let field_size = self.size_of(field.ty.ty)?;
             let field_align = self.align_of(field.ty.ty)?;
-            offsets.push(0);
+            offsets.push((0, 0));
             size = size.max(field_size);
             align = align.max(field_align);
         }
