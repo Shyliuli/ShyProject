@@ -173,7 +173,15 @@ impl Parser<'_> {
             "_Alignas" | "_Static_assert" | "_Thread_local" | "__thread" | "typeof"
             | "__typeof" | "__typeof__" | "_Generic" | "_Complex" | "_Imaginary"
             | "__attribute__" | "__attribute" | "__declspec" => true,
-            "self" => self.impl_depth > 0,
+            // `self` is the receiver's type name, but `self.x` and `self->x`
+            // start an expression, not a declaration.
+            "self" => {
+                self.impl_depth > 0
+                    && !matches!(
+                        &self.peek_ahead(ahead + 1).kind,
+                        TokenKind::Punct(punct) if punct == "." || punct == "->"
+                    )
+            }
             other => self.is_type_name(other),
         }
     }
