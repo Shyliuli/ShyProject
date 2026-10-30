@@ -1595,8 +1595,13 @@ impl FnLower<'_> {
             is_restrict: false,
             is_atomic: false,
         };
+        // `with_offset` replaces the displacement, so a nested member has to
+        // add to the base object's offset instead of overwriting it:
+        // `o.v.x` is `o + offsetof(v) + offsetof(x)`, not `o + offsetof(x)`.
+        let displacement = address.offset + i64::from(offset);
+        let address = address.with_offset(displacement);
         Ok(MemberTarget {
-            address: address.with_offset(i64::from(offset)),
+            address,
             ty: field_ty,
             qualifiers,
         })
