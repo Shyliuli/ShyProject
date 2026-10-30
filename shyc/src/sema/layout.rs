@@ -230,9 +230,6 @@ impl TypeStore {
         fields: &[RecordField],
     ) -> Result<(Vec<u32>, Layout, bool), TypeError> {
         for field in fields {
-            if field.bit_width.is_some() {
-                return Err(TypeError::UnsupportedBitField);
-            }
             if field.explicit_align.is_some() {
                 return Err(TypeError::UnsupportedExplicitAlignment);
             }
@@ -266,6 +263,14 @@ impl TypeStore {
         let mut offset = 0u32;
         let mut align = 1u32;
 
+        // Bit-fields pack into a storage unit of their declared type without
+        // straddling it, as GNU C lays them out: a field that does not fit
+        // starts a new unit.
+        let mut unit_start = 0u32;
+        let mut unit_bits = 0u32;
+        let mut bits_used = 0u32;
+        let mut in_unit = false;
+
         for (index, field) in fields.iter().enumerate() {
             let field_align = self.align_of(field.ty.ty)?;
             let field_size = if flexible == Some(index) {
@@ -275,12 +280,54 @@ impl TypeStore {
                 self.size_of(field.ty.ty)?
             };
 
+            if let Some(width) = field.bit_width {
+                let bits_per_unit = field_size * 8;
+                if width == 0 {
+                    // A zero-width field only pads to the next unit.
+                    if in_unit {
+                        offset = unit_start + bits_used.div_ceil(8);
+                        in_unit = false;
+                    }
+                    offset = align_up(offset, field_align).ok_or(TypeError::LayoutOverflow)?;
+                    offsets.push(offset);
+                    continue;
+                }
+                if !in_unit {
+                    offset = align_up(offset, field_align).ok_or(TypeError::LayoutOverflow)?;
+                    unit_start = offset;
+                    bits_used = 0;
+                    unit_bits = bits_per_unit;
+                    in_unit = true;
+                } else if bits_used + width > unit_bits {
+                    offset = unit_start + unit_bits.div_ceil(8);
+                    offset = align_up(offset, field_align).ok_or(TypeError::LayoutOverflow)?;
+                    unit_start = offset;
+                    bits_used = 0;
+                    unit_bits = bits_per_unit;
+                }
+                offsets.push(unit_start);
+                bits_used += width;
+                align = align.max(field_align);
+                if bits_used >= unit_bits {
+                    offset = unit_start + unit_bits.div_ceil(8);
+                    in_unit = false;
+                }
+                continue;
+            }
+
+            if in_unit {
+                offset = offset.max(unit_start + bits_used.div_ceil(8));
+                in_unit = false;
+            }
             offset = align_up(offset, field_align).ok_or(TypeError::LayoutOverflow)?;
             offsets.push(offset);
             offset = offset
                 .checked_add(field_size)
                 .ok_or(TypeError::LayoutOverflow)?;
             align = align.max(field_align);
+        }
+        if in_unit {
+            offset = offset.max(unit_start + bits_used.div_ceil(8));
         }
 
         let size = align_up(offset, align).ok_or(TypeError::LayoutOverflow)?;
