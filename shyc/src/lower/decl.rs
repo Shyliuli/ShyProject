@@ -513,8 +513,8 @@ impl Lowerer {
                 }
                 None => {
                     let width = size as usize;
-                    let bytes = (*addend as u64).to_be_bytes();
-                    put_bytes(global, offset, &bytes[8 - width..], span)?;
+                    let bytes = target_bytes(*addend as u64, width, self.layout.endian);
+                    put_bytes(global, offset, &bytes, span)?;
                 }
             }
             return Ok(());
@@ -522,16 +522,12 @@ impl Lowerer {
         let value = self.const_cast(value, ty, span)?;
         match value.kind {
             ConstKind::Int(bits) => {
-                let bytes = bits.to_be_bytes();
-                let width = size as usize;
-                put_bytes(global, offset, &bytes[8 - width..], span)
+                let bytes = target_bytes(bits, size as usize, self.layout.endian);
+                put_bytes(global, offset, &bytes, span)
             }
             ConstKind::Float(bits) => {
-                if size == 4 {
-                    put_bytes(global, offset, &(bits as u32).to_be_bytes(), span)
-                } else {
-                    put_bytes(global, offset, &bits.to_be_bytes(), span)
-                }
+                let bytes = target_bytes(bits, size as usize, self.layout.endian);
+                put_bytes(global, offset, &bytes, span)
             }
             ConstKind::Address { .. } => Err(Diagnostic::new(
                 span,
@@ -1204,4 +1200,14 @@ fn put_bytes(
     };
     global.bytes[start..end].copy_from_slice(bytes);
     Ok(())
+}
+
+/// Encode the low `width` bytes of `value` in the target's byte order.
+fn target_bytes(value: u64, width: usize, endian: crate::ir::Endian) -> Vec<u8> {
+    let all = value.to_be_bytes();
+    let tail = &all[8 - width..];
+    match endian {
+        crate::ir::Endian::Big => tail.to_vec(),
+        crate::ir::Endian::Little => tail.iter().rev().copied().collect(),
+    }
 }

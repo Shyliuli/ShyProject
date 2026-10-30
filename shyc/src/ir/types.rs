@@ -38,6 +38,15 @@ pub struct SlotId(pub u32);
 pub struct Layout {
     pub pointer_bytes: u32,
     pub pointer_align: u32,
+    /// Byte order of every multi-byte object on this target. ShyISA is
+    /// big-endian; the 64-bit hosts we emit for are little-endian.
+    pub endian: Endian,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Endian {
+    Little,
+    Big,
 }
 
 impl Layout {
@@ -45,12 +54,14 @@ impl Layout {
     pub const SHY: Layout = Layout {
         pointer_bytes: 4,
         pointer_align: 4,
+        endian: Endian::Big,
     };
 
     /// Usual LP64 targets (x86-64, RISC-V 64, LoongArch 64).
     pub const LP64: Layout = Layout {
         pointer_bytes: 8,
         pointer_align: 8,
+        endian: Endian::Little,
     };
 }
 
