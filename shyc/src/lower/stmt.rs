@@ -494,7 +494,7 @@ impl FnLower<'_> {
         };
         let target = context.target;
         let depth = context.depth;
-        self.emit_drops_from(depth);
+        self.emit_drops_on_exit(depth);
         self.jump_to(target);
         Ok(())
     }
@@ -505,7 +505,7 @@ impl FnLower<'_> {
         };
         let target = context.continue_target;
         let depth = context.continue_depth;
-        self.emit_drops_from(depth);
+        self.emit_drops_on_exit(depth);
         self.jump_to(target);
         Ok(())
     }
@@ -518,7 +518,7 @@ impl FnLower<'_> {
                     return Err(Diagnostic::new(span, "void function cannot return a value"));
                 }
             }
-            self.emit_all_drops();
+            self.emit_drops_on_exit(0);
             self.terminate(ir::Terminator::ret(None));
             return Ok(());
         }
@@ -531,8 +531,23 @@ impl FnLower<'_> {
         let (operand, ty) = self.rvalue(value)?;
         let operand = self.convert(operand, ty, self.return_ty, span, false)?;
         self.deactivate_if_local(value);
-        self.emit_all_drops();
+        self.emit_drops_on_exit(0);
         self.terminate(ir::Terminator::ret(Some(operand)));
         Ok(())
+    }
+
+    /// Emit drops for a jump that leaves the current path, then restore the
+    /// locals' live flags.
+    ///
+    /// `return`, `break`, and `continue` end only one path. Statements after
+    /// the enclosing `if` still run on the other path, where those locals are
+    /// still live, so the linear "already dropped" marks must not leak past
+    /// the jump.
+    fn emit_drops_on_exit(&mut self, depth: usize) {
+        let saved: Vec<bool> = self.locals.iter().map(|local| local.drop_active).collect();
+        self.emit_drops_from(depth);
+        for (local, active) in self.locals.iter_mut().zip(saved) {
+            local.drop_active = active;
+        }
     }
 }
