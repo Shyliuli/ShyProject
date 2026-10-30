@@ -8,6 +8,30 @@
 //! so they keep the opaque byte-array form.
 use crate::ir::{Layout, Type};
 
+/// How AArch64 passes an aggregate that is not memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Arm {
+    /// One SIMD register per element, all of the same floating type.
+    Hfa { elem: &'static str, count: u32 },
+    /// One or two general registers holding the bytes.
+    Integers,
+}
+
+impl Arm {
+    pub(super) fn llvm_type(self, size: u32) -> String {
+        match self {
+            Arm::Hfa { elem, count } => format!("[{count} x {elem}]"),
+            Arm::Integers => {
+                if size <= 8 {
+                    "i64".to_string()
+                } else {
+                    "[2 x i64]".to_string()
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Kind {
     SysV,
@@ -80,6 +104,43 @@ impl Kind {
                 })
                 .collect(),
         )
+    }
+
+    /// The AArch64 rule for a small aggregate.
+    ///
+    /// A homogeneous aggregate of one floating type travels in one SIMD
+    /// register per element, even past 16 bytes. Everything else up to 16 bytes
+    /// travels in one or two general registers. The IR mask plus the alignment
+    /// identifies the element type: an all-float aggregate whose alignment is 4
+    /// holds floats, and one aligned to 8 holds doubles.
+    pub(super) fn arm_small(self, ty: Type, layout: Layout) -> Option<Arm> {
+        if self != Kind::Aapcs64 || !ty.is_aggregate() {
+            return None;
+        }
+        let size = ty.size(layout)?;
+        let align = ty.align(layout)?;
+        let eightbytes = size.div_ceil(8);
+        let floats = ty.aggregate_floats();
+        let covered = if eightbytes >= 8 {
+            u8::MAX
+        } else {
+            (1u8 << eightbytes) - 1
+        };
+        if size > 0
+            && floats & covered == covered
+            && (align == 4 || align == 8)
+            && size % align == 0
+            && size / align <= 4
+        {
+            return Some(Arm::Hfa {
+                elem: if align == 4 { "float" } else { "double" },
+                count: size / align,
+            });
+        }
+        if size <= 16 {
+            return Some(Arm::Integers);
+        }
+        None
     }
 
     /// Aggregates over two eightbytes travel as a pointer instead of a value.

@@ -339,6 +339,22 @@ impl Body<'_> {
                 .get(index)
                 .copied()
                 .unwrap_or_else(|| self.function.operand_type(*argument));
+            if let Some(arm) = self.abi.arm_small(wanted, layout) {
+                let arm_ty = arm.llvm_type(wanted.size(layout).unwrap_or(0));
+                let slot = self.temp();
+                let value = self.as_untyped(*argument, wanted)?;
+                self.w.line(format!(
+                    "{slot} = alloca [{} x i8], align {}",
+                    wanted.size(layout).unwrap_or(0).div_ceil(8) * 8,
+                    wanted.align(layout).unwrap_or(1).max(1)
+                ));
+                self.w
+                    .line(format!("store {} {value}, ptr {slot}", ty(wanted)));
+                let piece = self.temp();
+                self.w.line(format!("{piece} = load {arm_ty}, ptr {slot}"));
+                arguments.push(format!("{arm_ty} {piece}"));
+                continue;
+            }
             if let Some(chunks) = self.abi.chunks(wanted, layout) {
                 // Pass one register per eightbyte, loaded from a scratch copy.
                 let slot = self.temp();
@@ -393,6 +409,23 @@ impl Body<'_> {
             let prefix = self.result_prefix(inst, "call")?;
             self.w
                 .line(format!("{prefix}load {}, ptr {buffer}", ty(ret)));
+            return Ok(());
+        }
+        if let Some(arm) = self.abi.arm_small(ret, layout) {
+            let arm_ty = arm.llvm_type(ret.size(layout).unwrap_or(0));
+            let returned = self.temp();
+            self.w
+                .line(format!("{returned} = call {arm_ty} {callee}({arguments})"));
+            let slot = self.temp();
+            self.w.line(format!(
+                "{slot} = alloca [{} x i8], align {}",
+                ret.size(layout).unwrap_or(0).div_ceil(8) * 8,
+                ret.align(layout).unwrap_or(1).max(1)
+            ));
+            self.w
+                .line(format!("store {arm_ty} {returned}, ptr {slot}"));
+            let prefix = self.result_prefix(inst, "call")?;
+            self.w.line(format!("{prefix}load {}, ptr {slot}", ty(ret)));
             return Ok(());
         }
         if let Some(chunks) = self.abi.chunks(ret, layout) {
@@ -608,7 +641,20 @@ impl Body<'_> {
                         ));
                     };
                     let value = self.as_untyped(*value, ret)?;
-                    if let Some(chunks) = self.abi.chunks(ret, self.options.layout) {
+                    if let Some(arm) = self.abi.arm_small(ret, self.options.layout) {
+                        let arm_ty = arm.llvm_type(ret.size(self.options.layout).unwrap_or(0));
+                        let slot = self.temp();
+                        self.w.line(format!(
+                            "{slot} = alloca [{} x i8], align {}",
+                            ret.size(self.options.layout).unwrap_or(0).div_ceil(8) * 8,
+                            ret.align(self.options.layout).unwrap_or(1).max(1)
+                        ));
+                        self.w
+                            .line(format!("store {} {value}, ptr {slot}", ty(ret)));
+                        let piece = self.temp();
+                        self.w.line(format!("{piece} = load {arm_ty}, ptr {slot}"));
+                        self.w.line(format!("ret {arm_ty} {piece}"));
+                    } else if let Some(chunks) = self.abi.chunks(ret, self.options.layout) {
                         let slot = self.temp();
                         self.w.line(format!(
                             "{slot} = alloca [{} x i8], align {}",

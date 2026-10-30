@@ -82,7 +82,11 @@ impl Body<'_> {
         let ret = function.signature.ret;
         let sret = self.abi.by_reference(ret, layout);
         let ret_chunks = self.abi.chunks(ret, layout);
+        let ret_arm = self.abi.arm_small(ret, layout);
         let ret_text = match (&ret_chunks, sret) {
+            (_, _) if ret_arm.is_some() => ret_arm
+                .map(|arm| arm.llvm_type(ret.size(layout).unwrap_or(0)))
+                .unwrap_or_default(),
             (_, true) => "void".to_string(),
             (Some(chunks), false) if chunks.len() > 1 => format!(
                 "{{ {} }}",
@@ -116,6 +120,14 @@ impl Body<'_> {
                 .get(index)
                 .copied()
                 .unwrap_or_else(|| function.value_type(*value));
+            if let Some(arm) = self.abi.arm_small(param_ty, layout) {
+                signature.push_str(&format!(
+                    "{} {}.0",
+                    arm.llvm_type(param_ty.size(layout).unwrap_or(0)),
+                    self.value(*value)
+                ));
+                continue;
+            }
             if let Some(chunks) = self.abi.chunks(param_ty, layout) {
                 for (chunk_index, chunk) in chunks.iter().enumerate() {
                     if chunk_index > 0 {
@@ -223,6 +235,25 @@ impl Body<'_> {
             })
             .collect();
         for (value, param_ty) in params {
+            if let Some(arm) = self.abi.arm_small(param_ty, layout) {
+                let slot = self.temp();
+                self.w.line(format!(
+                    "{slot} = alloca [{} x i8], align {}",
+                    param_ty.size(layout).unwrap_or(0).div_ceil(8) * 8,
+                    param_ty.align(layout).unwrap_or(1).max(1)
+                ));
+                let piece = format!("{}.0", self.value(value));
+                self.w.line(format!(
+                    "store {} {piece}, ptr {slot}",
+                    arm.llvm_type(param_ty.size(layout).unwrap_or(0))
+                ));
+                self.w.line(format!(
+                    "{} = load {}, ptr {slot}",
+                    self.value(value),
+                    super::abi::array(param_ty, layout)
+                ));
+                continue;
+            }
             if let Some(chunks) = self.abi.chunks(param_ty, layout) {
                 // Rebuild the object from one register per eightbyte.
                 let slot = self.temp();

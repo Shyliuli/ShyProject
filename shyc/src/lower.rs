@@ -251,13 +251,13 @@ impl Lowerer {
 
     fn walk_leaves(&self, ty: TypeId, base: u32, integer: &mut u8, float: &mut u8) {
         let size = self.types.size_of(ty).unwrap_or(0);
-        if size == 0 || base >= 16 {
+        if size == 0 || base >= 32 {
             return;
         }
         let first = base / 8;
         let last = (base + size - 1) / 8;
         let span = |mask: &mut u8| {
-            for eightbyte in first..=last.min(1) {
+            for eightbyte in first..=last.min(3) {
                 *mask |= 1 << eightbyte;
             }
         };
@@ -268,7 +268,7 @@ impl Lowerer {
                 let element_ty = element.ty;
                 let element_size = self.types.size_of(element_ty).unwrap_or(0).max(1);
                 for index in 0..*len {
-                    if base + index * element_size >= 16 {
+                    if base + index * element_size >= 32 {
                         break;
                     }
                     self.walk_leaves(element_ty, base + index * element_size, integer, float);
