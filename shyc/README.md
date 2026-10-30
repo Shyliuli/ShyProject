@@ -46,18 +46,19 @@ Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `-O0`..`-O3`,
 `--target <triple>`. `#![no_main]`, `#![mem(...)]`, and `#![stack(...)]` are
 honoured, and the resource hints reach the linked image.
 
-## Linking policy
+## Linking
 
-The two targets have different C libraries, so `shycc` keeps one policy per
-backend:
+The two backends have different C libraries, and each one gets its own default:
 
-| Backend | Default | Opt out | Extra library |
-|---|---|---|---|
-| Shy (`--backend shyc`, `-S`) | libshy + soft-float runtime | `-nostdlib`, `-nodefaultlibs` | `-llibshy`, `-lfloat` (never duplicated) |
-| LLVM (`--emit=llvm`) | the host libc, linked by `clang` | `-nostdlib` | `-llibshy` is not supported yet: libshy uses ShyISA inline assembly |
+| Backend | Default library | Turn it off |
+|---|---|---|
+| Shy (`--backend shyc`, `-S`) | libshy plus the soft-float runtime | `-nostdlib`, `-nodefaultlibs` |
+| LLVM (`--emit=llvm`) | the system libc, linked by `clang` | `clang -nostdlib` |
 
-Emitted LLVM IR is one translation unit, so linking stays with the host
-compiler and its default C library.
+`shycc` links libshy by default because it owns the whole Shy link step;
+`-llibshy` and `-lfloat` are still accepted and never duplicated. LLVM
+emission stops at LLVM IR — the module is hosted, its `main` is called by the
+C runtime — so the system libc comes from whatever links the IR.
 
 ## Status
 
