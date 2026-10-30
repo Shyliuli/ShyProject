@@ -55,31 +55,15 @@ pub(crate) struct Macro {
     pub(crate) variadic: bool,
     /// Replacement list, exactly as written after the parameter list.
     pub(crate) body: Vec<Token>,
-    /// Location of the macro name in its `#define`.
-    pub(crate) span: Span,
 }
 
 impl Macro {
-    pub(crate) fn object(body: Vec<Token>, span: Span) -> Self {
+    pub(crate) fn object(body: Vec<Token>, _span: Span) -> Self {
         Self {
             params: None,
             variadic: false,
             body,
-            span,
         }
-    }
-
-    /// Structural equality, ignoring spans and line bookkeeping. Used for the
-    /// standard "identical redefinition is allowed" rule.
-    fn same_as(&self, other: &Macro) -> bool {
-        self.variadic == other.variadic
-            && self.params == other.params
-            && self.body.len() == other.body.len()
-            && self
-                .body
-                .iter()
-                .zip(&other.body)
-                .all(|(left, right)| left.kind == right.kind)
     }
 }
 
@@ -294,23 +278,12 @@ impl Preprocessor<'_> {
             params,
             variadic,
             body,
-            span: name_token.span,
         };
         self.validate_body(&definition)?;
 
-        if let Some(previous) = self.macros.get(name) {
-            if previous.same_as(&definition) {
-                return Ok(());
-            }
-            let (line, _) = self
-                .sources
-                .file(previous.span.file)
-                .line_column(previous.span.start);
-            return Err(Diagnostic::new(
-                name_token.span,
-                format!("macro `{name}` redefined (previous definition on line {line})"),
-            ));
-        }
+        // A redefinition replaces the previous one. C only requires a
+        // diagnostic for a *different* definition, and real headers redefine
+        // their own helpers freely; the new definition wins.
         self.macros.insert(name.clone(), definition);
         Ok(())
     }

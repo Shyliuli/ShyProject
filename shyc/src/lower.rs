@@ -448,13 +448,23 @@ impl Lowerer {
         ty: TypeId,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        let innermost = self.type_scopes.last_mut().expect("type scope stack");
-        if innermost.typedefs.contains_key(name) {
+        // C allows a typedef to be repeated with a compatible type, and the
+        // standard headers rely on it when two of them define the same width.
+        if let Some(previous) = self
+            .type_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.typedefs.get(name).copied())
+        {
+            if previous == ty || self.types.is_compatible(previous, ty) {
+                return Ok(());
+            }
             return Err(Diagnostic::new(
                 span,
                 format!("redefinition of typedef name '{name}'"),
             ));
         }
+        let innermost = self.type_scopes.last_mut().expect("type scope stack");
         innermost.typedefs.insert(name.to_string(), ty);
         Ok(())
     }

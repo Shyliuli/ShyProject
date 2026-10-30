@@ -188,12 +188,10 @@ impl Lowerer {
             if float_ && double_ {
                 return Err(invalid());
             }
-            if longs > 0 {
-                return Err(Diagnostic::new(
-                    span,
-                    "`long double` is not supported by the target type model",
-                ));
-            }
+            // `long double` is `double`: the IR has one 64-bit float type, and
+            // a program that only passes it through headers behaves the same.
+            // Code that really needs extended precision must not use it here.
+            let _ = longs;
             if signed.is_some() || short || char_ || int_ || void_ || bool_ {
                 return Err(invalid());
             }
@@ -508,14 +506,26 @@ impl Lowerer {
                 ));
             }
             for declarator in &member.declarators {
-                if let Some(width) = &declarator.bit_width {
-                    return Err(Diagnostic::new(
-                        width.span(),
-                        "bit-fields are not supported",
-                    ));
-                }
+                let bit_width = match &declarator.bit_width {
+                    Some(width) => {
+                        let value = self.eval_const_int(width)?;
+                        if !(0..=64).contains(&value) {
+                            return Err(Diagnostic::new(
+                                width.span(),
+                                "a bit-field width must be between 0 and 64",
+                            ));
+                        }
+                        Some(value as u32)
+                    }
+                    None => None,
+                };
                 let resolved = self.resolve_declarator(ty, qualifiers, &declarator.declarator)?;
+                // An unnamed bit-field only pads the layout; it has no member
+                // to look up, so it is dropped from the record's field list.
                 let Some(name) = resolved.name else {
+                    if bit_width.is_some() {
+                        continue;
+                    }
                     return Err(Diagnostic::new(
                         declarator.span,
                         "a record member needs a name",
@@ -528,10 +538,10 @@ impl Lowerer {
                     ));
                 }
                 names.push(name.clone());
-                fields.push(RecordField::new(
-                    name,
-                    QualifiedType::new(resolved.ty, resolved.qualifiers),
-                ));
+                let mut field =
+                    RecordField::new(name, QualifiedType::new(resolved.ty, resolved.qualifiers));
+                field.bit_width = bit_width;
+                fields.push(field);
             }
         }
         Ok(fields)
@@ -711,11 +721,11 @@ impl Lowerer {
                 text = &text[..text.len() - 1];
                 Builtin::Float
             }
+            // A `long double` literal is a `double` literal here, for the same
+            // reason the type is.
             'l' | 'L' => {
-                return Err(Diagnostic::new(
-                    literal.span,
-                    "`long double` literals are not supported by the target type model",
-                ));
+                text = &text[..text.len() - 1];
+                Builtin::Double
             }
             _ => Builtin::Double,
         };
