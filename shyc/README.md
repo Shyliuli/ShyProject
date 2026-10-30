@@ -62,20 +62,19 @@ The two backends have different C libraries, and each one gets its own default:
 emission stops at LLVM IR — the module is hosted, its `main` is called by the
 C runtime — so the system libc comes from whatever links the IR.
 
-## C ABI for aggregates
+## C ABI
 
-Aggregates larger than 16 bytes follow the target C ABI: they are passed by
-reference (System V and Windows add `byval`, so the callee gets its own copy)
-and returned through a hidden `sret` pointer. Verified in both directions
-against clang: our code calling a clang-built `sum_big(struct Big)` and
-`make_big(int)`, and clang calling ours.
+Every rule about where an argument or a return value lives belongs to
+`abi-plan`: System V eightbytes, AArch64 homogeneous float aggregates, RISC-V
+and LoongArch field flattening, memory passing with `byval`, and hidden `sret`
+pointers. Lowering asks for the plan while the field layout is still known and
+stores it in the IR, so the backends never re-derive a convention from
+`(size, align)`.
 
-On System V, smaller aggregates are split per eightbyte: each piece goes in an
-integer or an SSE register, and multi-register returns are assembled with
-`insertvalue`. The IR carries the one fact that needs field knowledge, a mask
-of which eightbytes are floating point only; `int`+`float` is an integer
-eightbyte, `float`+`float` is an SSE one. AArch64, RISC-V, and LoongArch still
-pass small aggregates as opaque byte arrays.
+The LLVM emitter turns each plan part into one LLVM value: integer parts by
+width, floating parts as `float`/`double`, and multi-part returns assembled
+with `insertvalue` because LLVM only accepts constant aggregate literals.
+Checked against clang for x86-64, aarch64, riscv64, and loongarch64.
 
 ## Status
 

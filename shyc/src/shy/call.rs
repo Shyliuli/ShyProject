@@ -19,9 +19,7 @@ impl FnWriter<'_> {
         span: Option<Span>,
     ) -> Result<(), Diagnostic> {
         let span = span.unwrap_or_else(fallback_span);
-        let argument_types: Vec<crate::ir::Type> =
-            call.args.iter().map(|arg| self.operand_type(arg)).collect();
-        let plan = abi::plan_call(&call.signature, &argument_types, self.function.layout, span)?;
+        let plan = call.abi.clone();
         // A variadic call passes more arguments than the signature names;
         // the plan above was built from the real list, so the only invariant
         // left is that the fixed parameters are present.

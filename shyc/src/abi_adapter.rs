@@ -38,6 +38,61 @@ pub fn plan_shy_function(types: &TypeStore, function_ty: TypeId) -> Result<CallP
     plan_shy(&function_signature(types, function_ty)?)
 }
 
+/// Plan one ShyC function for the target ABI the IR is being built for.
+///
+/// Lowering calls this while field layout is still available; the backends read
+/// the plan back from the IR instead of re-deriving a convention from
+/// `(size, align)`, which cannot describe field order.
+pub fn plan_target_function(
+    types: &TypeStore,
+    function_ty: TypeId,
+    kind: AbiKind,
+) -> Result<CallPlan, AbiError> {
+    abi_plan::plan(kind, &function_signature(types, function_ty)?)
+}
+
+/// Plan a call, including arguments the signature does not name.
+///
+/// A variadic call passes more arguments than the prototype describes; those
+/// extras are planned from the IR type they lowered to, which keeps their byte
+/// layout but loses field order.
+pub fn plan_target_call(
+    types: &TypeStore,
+    function_ty: TypeId,
+    extras: &[crate::ir::Type],
+    layout: crate::ir::Layout,
+    kind: AbiKind,
+) -> Result<CallPlan, AbiError> {
+    let mut signature = function_signature(types, function_ty)?;
+    for extra in extras {
+        signature.params.push(ir_abi_type(*extra, layout));
+    }
+    abi_plan::plan(kind, &signature)
+}
+
+fn ir_abi_type(ty: crate::ir::Type, layout: crate::ir::Layout) -> AbiType {
+    use crate::ir::Type;
+    match ty {
+        Type::F32 => AbiType::Float { bits: 32 },
+        Type::F64 => AbiType::Float { bits: 64 },
+        Type::Ptr => AbiType::Pointer {
+            bits: (layout.pointer_bytes * 8) as u16,
+        },
+        Type::I1 => AbiType::Bool,
+        // Field order is gone by now, so an aggregate travels as one opaque
+        // object; this only affects aggregates passed through `...`.
+        Type::Aggregate { size, align, .. } => AbiType::Struct {
+            fields: Vec::new(),
+            size,
+            align: align as u16,
+        },
+        other => AbiType::Integer {
+            bits: other.integer_bits().unwrap_or(32) as u16,
+            signed: false,
+        },
+    }
+}
+
 /// Convert one ShyC function type without classifying it.
 pub fn function_signature(
     types: &TypeStore,

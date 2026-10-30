@@ -345,19 +345,36 @@ impl FnLower<'_> {
             return Err(Diagnostic::new(span, "called object is not a function"));
         };
         let result_ty = *result;
+        // Variadic calls pass more arguments than the prototype names, so the
+        // plan is built from every argument that was actually lowered.
+        let extras: Vec<ir::Type> = arguments
+            .iter()
+            .skip(signature.params.len())
+            .map(|argument| self.f.operand_type(*argument))
+            .collect();
+        let abi = crate::abi_adapter::plan_target_call(
+            &self.l.types,
+            function_ty,
+            &extras,
+            self.l.layout,
+            self.l.abi,
+        )
+        .map_err(|error| Diagnostic::new(span, format!("cannot plan the target ABI: {error}")))?;
         let call = match target {
-            ir::CallTarget::Direct(symbol) => ir::Call::direct(symbol, arguments, signature),
-            ir::CallTarget::Indirect(callee) => ir::Call::indirect(callee, arguments, signature),
+            ir::CallTarget::Direct(symbol) => ir::Call::direct(symbol, arguments, signature, abi),
+            ir::CallTarget::Indirect(callee) => {
+                ir::Call::indirect(callee, arguments, signature, abi)
+            }
         };
         if self.l.types.is_void(result_ty) {
-            self.emit_statement(ir::InstKind::Call(call));
+            self.emit_statement(ir::InstKind::Call(Box::new(call)));
             Ok(ExprVal {
                 ty: result_ty,
                 qualifiers: Qualifiers::NONE,
                 kind: ExprKind::Void,
             })
         } else {
-            let value = self.emit_value(ir::InstKind::Call(call));
+            let value = self.emit_value(ir::InstKind::Call(Box::new(call)));
             Ok(ExprVal {
                 ty: result_ty,
                 qualifiers: Qualifiers::NONE,

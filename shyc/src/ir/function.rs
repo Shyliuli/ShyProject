@@ -95,6 +95,8 @@ pub enum Definition {
 pub struct Function {
     pub name: String,
     pub signature: Signature,
+    /// Placement of parameters and the return value under the target ABI.
+    pub abi: abi_plan::CallPlan,
     /// Target facts this function was built for. Every size, alignment, and
     /// derived result type in the function is computed from it.
     pub layout: Layout,
@@ -114,11 +116,17 @@ pub struct Function {
 impl Function {
     /// Create a function with an empty `bb0` entry block and SSA parameter
     /// values matching `signature.params`.
-    pub fn new(name: impl Into<String>, signature: Signature, layout: Layout) -> Function {
+    pub fn new(
+        name: impl Into<String>,
+        signature: Signature,
+        layout: Layout,
+        abi: abi_plan::CallPlan,
+    ) -> Function {
         let param_types = signature.params.clone();
         let mut function = Function {
             name: name.into(),
             signature,
+            abi,
             layout,
             params: Vec::new(),
             entry: BlockId(0),

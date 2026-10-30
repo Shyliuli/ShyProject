@@ -21,7 +21,6 @@ pub(super) fn emit(
         w,
         function,
         options,
-        abi: super::abi::kind(&options.triple),
         next_temp: 0,
         split_entry: false,
     }
@@ -32,7 +31,6 @@ struct Body<'a> {
     w: &'a mut Writer,
     function: &'a Function,
     options: &'a Options,
-    abi: super::abi::Kind,
     next_temp: u32,
     /// The IR entry block has predecessors, so a fresh LLVM entry block is
     /// emitted in front of it to hold the slots.
@@ -80,15 +78,11 @@ impl Body<'_> {
 
         let layout = self.options.layout;
         let ret = function.signature.ret;
-        let sret = self.abi.by_reference(ret, layout);
-        let ret_chunks = self.abi.chunks(ret, layout);
-        let ret_arm = self.abi.arm_small(ret, layout);
-        let ret_text = match (&ret_chunks, sret) {
-            (_, _) if ret_arm.is_some() => ret_arm
-                .map(|arm| arm.llvm_type(ret.size(layout).unwrap_or(0)))
-                .unwrap_or_default(),
-            (_, true) => "void".to_string(),
-            (Some(chunks), false) if chunks.len() > 1 => format!(
+        let (sret, ret_shape) = super::abi::returns(&function.abi, ret);
+        let ret_text = match &ret_shape {
+            super::abi::Shape::Value => ty(ret),
+            super::abi::Shape::Indirect { .. } => "void".to_string(),
+            super::abi::Shape::Registers(chunks) if chunks.len() > 1 => format!(
                 "{{ {} }}",
                 chunks
                     .iter()
@@ -96,8 +90,7 @@ impl Body<'_> {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            (Some(chunks), false) => chunks[0].llvm_type(),
-            _ => ty(ret),
+            super::abi::Shape::Registers(chunks) => chunks[0].llvm_type(),
         };
         let mut signature = format!("define {ret_text} {}(", symbol(&function.name));
         let mut first = true;
@@ -120,43 +113,38 @@ impl Body<'_> {
                 .get(index)
                 .copied()
                 .unwrap_or_else(|| function.value_type(*value));
-            if let Some(arm) = self.abi.arm_small(param_ty, layout) {
-                signature.push_str(&format!(
-                    "{} {}.0",
-                    arm.llvm_type(param_ty.size(layout).unwrap_or(0)),
-                    self.value(*value)
-                ));
-                continue;
-            }
-            if let Some(chunks) = self.abi.chunks(param_ty, layout) {
-                for (chunk_index, chunk) in chunks.iter().enumerate() {
-                    if chunk_index > 0 {
-                        signature.push_str(", ");
+            match super::abi::param(&function.abi, index, param_ty) {
+                super::abi::Shape::Value => {
+                    signature.push_str(&format!("{} {}", ty(param_ty), self.value(*value)));
+                }
+                super::abi::Shape::Registers(chunks) => {
+                    for (chunk_index, chunk) in chunks.iter().enumerate() {
+                        if chunk_index > 0 {
+                            signature.push_str(", ");
+                        }
+                        signature.push_str(&format!(
+                            "{} {}.{}",
+                            chunk.llvm_type(),
+                            self.value(*value),
+                            chunk_index
+                        ));
                     }
-                    signature.push_str(&format!(
-                        "{} {}.{}",
-                        chunk.llvm_type(),
-                        self.value(*value),
-                        chunk_index
-                    ));
                 }
-                continue;
-            }
-            if self.abi.by_reference(param_ty, layout) {
-                if self.abi.copies() {
-                    signature.push_str(&format!(
-                        "ptr byval({}) {} %arg{}",
-                        super::abi::array(param_ty, layout),
-                        super::abi::alignment(param_ty, layout),
-                        value.0
-                    ));
-                } else {
-                    signature.push_str(&format!("ptr %arg{}", value.0));
+                super::abi::Shape::Indirect { byval } => {
+                    if byval {
+                        signature.push_str(&format!(
+                            "ptr byval({}) {} %arg{}",
+                            super::abi::array(param_ty, layout),
+                            super::abi::alignment(param_ty, layout),
+                            value.0
+                        ));
+                    } else {
+                        signature.push_str(&format!("ptr %arg{}", value.0));
+                    }
                 }
-            } else {
-                signature.push_str(&format!("{} {}", ty(param_ty), self.value(*value)));
             }
         }
+
         if function.signature.variadic {
             if !function.params.is_empty() {
                 signature.push_str(", ");
@@ -234,56 +222,39 @@ impl Body<'_> {
                 (*value, param_ty)
             })
             .collect();
-        for (value, param_ty) in params {
-            if let Some(arm) = self.abi.arm_small(param_ty, layout) {
-                let slot = self.temp();
-                self.w.line(format!(
-                    "{slot} = alloca [{} x i8], align {}",
-                    param_ty.size(layout).unwrap_or(0).div_ceil(8) * 8,
-                    param_ty.align(layout).unwrap_or(1).max(1)
-                ));
-                let piece = format!("{}.0", self.value(value));
-                self.w.line(format!(
-                    "store {} {piece}, ptr {slot}",
-                    arm.llvm_type(param_ty.size(layout).unwrap_or(0))
-                ));
-                self.w.line(format!(
-                    "{} = load {}, ptr {slot}",
-                    self.value(value),
-                    super::abi::array(param_ty, layout)
-                ));
-                continue;
-            }
-            if let Some(chunks) = self.abi.chunks(param_ty, layout) {
-                // Rebuild the object from one register per eightbyte.
-                let slot = self.temp();
-                self.w.line(format!(
-                    "{slot} = alloca [{} x i8], align {}",
-                    param_ty.size(layout).unwrap_or(0).div_ceil(8) * 8,
-                    param_ty.align(layout).unwrap_or(1).max(1)
-                ));
-                for (index, chunk) in chunks.iter().enumerate() {
-                    let piece = format!("{}.{}", self.value(value), index);
-                    let address = self.chunk_address(&slot, chunk.offset);
+        for (index, (value, param_ty)) in params.into_iter().enumerate() {
+            match super::abi::param(&self.function.abi, index, param_ty) {
+                super::abi::Shape::Value => {}
+                super::abi::Shape::Indirect { .. } => {
                     self.w.line(format!(
-                        "store {} {piece}, ptr {address}",
-                        chunk.llvm_type()
+                        "{} = load {}, ptr %arg{}",
+                        self.value(value),
+                        super::abi::array(param_ty, layout),
+                        value.0
                     ));
                 }
-                self.w.line(format!(
-                    "{} = load {}, ptr {slot}",
-                    self.value(value),
-                    super::abi::array(param_ty, layout)
-                ));
-                continue;
-            }
-            if self.abi.by_reference(param_ty, layout) {
-                self.w.line(format!(
-                    "{} = load {}, ptr %arg{}",
-                    self.value(value),
-                    super::abi::array(param_ty, layout),
-                    value.0
-                ));
+                super::abi::Shape::Registers(chunks) => {
+                    // Rebuild the object from one register per plan part.
+                    let slot = self.temp();
+                    self.w.line(format!(
+                        "{slot} = alloca [{} x i8], align {}",
+                        param_ty.size(layout).unwrap_or(0).div_ceil(8) * 8,
+                        param_ty.align(layout).unwrap_or(1).max(1)
+                    ));
+                    for (chunk_index, chunk) in chunks.iter().enumerate() {
+                        let piece = format!("{}.{}", self.value(value), chunk_index);
+                        let address = self.chunk_address(&slot, chunk.offset);
+                        self.w.line(format!(
+                            "store {} {piece}, ptr {address}",
+                            chunk.llvm_type()
+                        ));
+                    }
+                    self.w.line(format!(
+                        "{} = load {}, ptr {slot}",
+                        self.value(value),
+                        super::abi::array(param_ty, layout)
+                    ));
+                }
             }
         }
     }

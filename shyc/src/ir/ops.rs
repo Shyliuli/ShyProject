@@ -190,22 +190,37 @@ pub struct Call {
     pub target: CallTarget,
     pub args: Vec<Operand>,
     pub signature: Signature,
+    /// Argument and return placement for the target ABI this module is built
+    /// for, planned by `abi-plan` while the field layout was still available.
+    pub abi: abi_plan::CallPlan,
 }
 
 impl Call {
-    pub fn direct(symbol: impl Into<String>, args: Vec<Operand>, signature: Signature) -> Call {
+    pub fn direct(
+        symbol: impl Into<String>,
+        args: Vec<Operand>,
+        signature: Signature,
+        abi: abi_plan::CallPlan,
+    ) -> Call {
         Call {
             target: CallTarget::Direct(symbol.into()),
             args,
             signature,
+            abi,
         }
     }
 
-    pub fn indirect(callee: Operand, args: Vec<Operand>, signature: Signature) -> Call {
+    pub fn indirect(
+        callee: Operand,
+        args: Vec<Operand>,
+        signature: Signature,
+        abi: abi_plan::CallPlan,
+    ) -> Call {
         Call {
             target: CallTarget::Indirect(callee),
             args,
             signature,
+            abi,
         }
     }
 
@@ -405,7 +420,7 @@ pub enum InstKind {
     },
     /// Direct or indirect call. The result is the signature's return value,
     /// or no value for `void`.
-    Call(Call),
+    Call(Box<Call>),
     /// Copy `bytes` bytes from `src` to `dst`. The ranges must not partially
     /// overlap; an exact same-range copy is allowed. Side-effecting and
     /// potentially trapping.

@@ -14,92 +14,13 @@
 //! Floating-point values and variadic signatures are diagnosed earlier because
 //! the backend does not implement them.
 
-use crate::abi::{
-    AbiKind, AbiType, CallPlan, FunctionSignature, Location, RegisterClass, ReturnPlan, plan,
-};
-use crate::ir::{Function, Layout, Signature, Type};
+use crate::abi::{CallPlan, Location, RegisterClass, ReturnPlan};
+use crate::ir::{Function, Type};
 use crate::source::{Diagnostic, Span};
 
-/// Map one IR type to the ABI classifier's type.
-///
-/// The IR does not record integer signedness, and the ShyV1 classifier only
-/// consults sizes, so signedness is irrelevant here.
-fn abi_type(ty: Type, layout: Layout) -> AbiType {
-    match ty {
-        Type::Void => AbiType::Void,
-        Type::I1 => AbiType::Bool,
-        Type::I8 => AbiType::Integer {
-            bits: 8,
-            signed: false,
-        },
-        Type::I16 => AbiType::Integer {
-            bits: 16,
-            signed: false,
-        },
-        Type::I32 => AbiType::Integer {
-            bits: 32,
-            signed: false,
-        },
-        Type::I64 => AbiType::Integer {
-            bits: 64,
-            signed: false,
-        },
-        Type::F32 => AbiType::Float { bits: 32 },
-        Type::F64 => AbiType::Float { bits: 64 },
-        Type::Ptr => AbiType::Pointer {
-            bits: (layout.pointer_bytes * 8) as u16,
-        },
-        // `abi-plan` recognises Struct/Union as aggregate but keeps Opaque as a
-        // scalar shape, so an IR aggregate must become a field-less Struct.
-        Type::Aggregate { size, align, .. } => AbiType::Struct {
-            fields: Vec::new(),
-            size,
-            align: align as u16,
-        },
-    }
-}
-
-/// Ask `abi-plan` for the Shy ABI v1 plan of one IR signature.
-pub(crate) fn plan_signature(
-    signature: &Signature,
-    layout: Layout,
-    span: Span,
-) -> Result<CallPlan, Diagnostic> {
-    let abi_signature = FunctionSignature {
-        ret: abi_type(signature.ret, layout),
-        params: signature
-            .params
-            .iter()
-            .map(|ty| abi_type(*ty, layout))
-            .collect(),
-        variadic: signature.variadic,
-    };
-    plan(AbiKind::ShyV1, &abi_signature)
-        .map_err(|error| Diagnostic::new(span, format!("Shy ABI v1: {error}")))
-}
-
-pub(crate) fn plan_function(function: &Function, span: Span) -> Result<CallPlan, Diagnostic> {
-    plan_signature(&function.signature, function.layout, span)
-}
-
-/// Plan a call from the argument types actually passed.
-///
-/// A variadic call carries more arguments than the signature names, and every
-/// one of them occupies slots by the same rules, so the plan is built from the
-/// real list rather than from the fixed parameter list.
-pub(crate) fn plan_call(
-    signature: &Signature,
-    arguments: &[crate::ir::Type],
-    layout: Layout,
-    span: Span,
-) -> Result<CallPlan, Diagnostic> {
-    let abi_signature = FunctionSignature {
-        ret: abi_type(signature.ret, layout),
-        params: arguments.iter().map(|ty| abi_type(*ty, layout)).collect(),
-        variadic: signature.variadic,
-    };
-    plan(AbiKind::ShyV1, &abi_signature)
-        .map_err(|error| Diagnostic::new(span, format!("Shy ABI v1: {error}")))
+/// The plan lowering attached to this function.
+pub(crate) fn plan_function(function: &Function, _span: Span) -> Result<CallPlan, Diagnostic> {
+    Ok(function.abi.clone())
 }
 
 /// Map an argument register slot index (0..7) to its Shy register name.

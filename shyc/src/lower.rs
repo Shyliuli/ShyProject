@@ -62,6 +62,9 @@ pub struct Options {
     pub module_name: String,
     pub layout: ir::Layout,
     pub startup: StartupMode,
+    /// Target ABI the module is lowered for. The plan is computed here, while
+    /// the field layout is still known, and stored in the IR.
+    pub abi: abi_plan::AbiKind,
 }
 
 impl Default for Options {
@@ -70,6 +73,7 @@ impl Default for Options {
             module_name: "module".to_string(),
             layout: ir::Layout::SHY,
             startup: StartupMode::Main,
+            abi: abi_plan::AbiKind::ShyV1,
         }
     }
 }
@@ -149,6 +153,7 @@ pub(super) struct ResolvedSpecs {
 pub(super) struct Lowerer {
     pub types: TypeStore,
     pub layout: ir::Layout,
+    pub abi: abi_plan::AbiKind,
     pub module: ir::Module,
     pub objects: Vec<ObjectInfo>,
     pub functions: Vec<FunctionInfo>,
@@ -177,6 +182,7 @@ impl Lowerer {
         Lowerer {
             types,
             layout: options.layout,
+            abi: options.abi,
             module,
             objects: Vec::new(),
             functions: Vec::new(),
@@ -228,66 +234,10 @@ impl Lowerer {
             TypeKind::Float32 => ir::Type::F32,
             TypeKind::Float64 => ir::Type::F64,
             TypeKind::Pointer { .. } | TypeKind::Function { .. } => ir::Type::Ptr,
-            TypeKind::Array { .. } | TypeKind::Record { .. } => ir::Type::aggregate_classified(
+            TypeKind::Array { .. } | TypeKind::Record { .. } => ir::Type::aggregate(
                 self.types.size_of(ty).unwrap_or(0),
                 self.types.align_of(ty).unwrap_or(1),
-                self.float_eightbytes(ty),
             ),
-        }
-    }
-
-    /// Which eightbytes of an aggregate hold only floating-point fields.
-    ///
-    /// System V passes those in SSE registers, so the C ABI needs this to split
-    /// a small aggregate. An eightbyte that also contains an integer field is
-    /// an integer eightbyte, and only the first two matter: larger aggregates
-    /// are memory.
-    fn float_eightbytes(&self, ty: TypeId) -> u8 {
-        let mut integer = 0u8;
-        let mut float = 0u8;
-        self.walk_leaves(ty, 0, &mut integer, &mut float);
-        float & !integer
-    }
-
-    fn walk_leaves(&self, ty: TypeId, base: u32, integer: &mut u8, float: &mut u8) {
-        let size = self.types.size_of(ty).unwrap_or(0);
-        if size == 0 || base >= 32 {
-            return;
-        }
-        let first = base / 8;
-        let last = (base + size - 1) / 8;
-        let span = |mask: &mut u8| {
-            for eightbyte in first..=last.min(3) {
-                *mask |= 1 << eightbyte;
-            }
-        };
-        match self.types.kind(ty) {
-            TypeKind::Float32 | TypeKind::Float64 => span(float),
-            TypeKind::Array { element, len } => {
-                let Some(len) = len else { return };
-                let element_ty = element.ty;
-                let element_size = self.types.size_of(element_ty).unwrap_or(0).max(1);
-                for index in 0..*len {
-                    if base + index * element_size >= 32 {
-                        break;
-                    }
-                    self.walk_leaves(element_ty, base + index * element_size, integer, float);
-                }
-            }
-            TypeKind::Record { .. } => {
-                let Some(info) = self.types.record_info(ty) else {
-                    return;
-                };
-                let fields: Vec<(u32, TypeId)> = info
-                    .fields
-                    .iter()
-                    .map(|field| (field.offset, field.ty.ty))
-                    .collect();
-                for (offset, field_ty) in fields {
-                    self.walk_leaves(field_ty, base + offset, integer, float);
-                }
-            }
-            _ => span(integer),
         }
     }
 
@@ -690,8 +640,15 @@ impl<'a> FnLower<'a> {
             }
         };
         let signature = l.ir_signature(function_type);
+        let abi = crate::abi_adapter::plan_target_function(&l.types, function_type, l.abi)
+            .map_err(|error| {
+                Diagnostic::new(
+                    pending.decl.declarator.span,
+                    format!("cannot plan the target ABI: {error}"),
+                )
+            })?;
         let symbol = pending.symbol;
-        let f = ir::Function::new(&symbol, signature, l.layout);
+        let f = ir::Function::new(&symbol, signature, l.layout, abi);
         let function_declarator = match pending.decl.declarator.derived.first() {
             Some(ast::DerivedDeclarator::Function(function)) => Some(function),
             _ => None,

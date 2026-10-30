@@ -90,39 +90,13 @@ pub enum Type {
     Aggregate {
         size: u32,
         align: u32,
-        /// Bit `i` is set when eightbyte `i` is floating point only. System V
-        /// passes those in SSE registers, so the C ABI needs this to split a
-        /// small aggregate; everything else about an aggregate is only its
-        /// size and alignment.
-        floats: u8,
     },
 }
 
 impl Type {
     /// Build an aggregate type from a byte size and alignment.
     pub fn aggregate(size: u32, align: u32) -> Type {
-        Type::Aggregate {
-            size,
-            align,
-            floats: 0,
-        }
-    }
-
-    /// Same, recording which eightbytes hold only floating-point fields.
-    pub fn aggregate_classified(size: u32, align: u32, floats: u8) -> Type {
-        Type::Aggregate {
-            size,
-            align,
-            floats,
-        }
-    }
-
-    /// Which eightbytes of a small aggregate are floating point.
-    pub fn aggregate_floats(self) -> u8 {
-        match self {
-            Type::Aggregate { floats, .. } => floats,
-            _ => 0,
-        }
+        Type::Aggregate { size, align }
     }
 
     /// Storage size in bytes, or `None` for `void`.

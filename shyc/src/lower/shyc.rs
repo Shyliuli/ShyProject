@@ -77,15 +77,45 @@ impl FnLower<'_> {
         }
         self.locals[local].drop_active = false;
         let argument = self.address_value(ir::Address::slot(slot));
-        let signature = match self.l.drop_method(ty) {
-            Some(method) => self.l.ir_signature(method.ty),
-            None => ir::Signature::new(ir::Type::Void, vec![ir::Type::Ptr]),
+        let (signature, abi) = match self.l.drop_method(ty) {
+            Some(method) => {
+                let abi =
+                    crate::abi_adapter::plan_target_function(&self.l.types, method.ty, self.l.abi)
+                        .unwrap_or_else(|_| {
+                            abi_plan::plan(
+                                self.l.abi,
+                                &abi_plan::FunctionSignature {
+                                    ret: abi_plan::AbiType::Void,
+                                    params: vec![abi_plan::AbiType::Pointer {
+                                        bits: (self.l.layout.pointer_bytes * 8) as u16,
+                                    }],
+                                    variadic: false,
+                                },
+                            )
+                            .expect("a pointer parameter always plans")
+                        });
+                (self.l.ir_signature(method.ty), abi)
+            }
+            None => (
+                ir::Signature::new(ir::Type::Void, vec![ir::Type::Ptr]),
+                abi_plan::plan(
+                    self.l.abi,
+                    &abi_plan::FunctionSignature {
+                        ret: abi_plan::AbiType::Void,
+                        params: vec![abi_plan::AbiType::Pointer {
+                            bits: (self.l.layout.pointer_bytes * 8) as u16,
+                        }],
+                        variadic: false,
+                    },
+                )
+                .expect("a pointer parameter always plans"),
+            ),
         };
-        let call = ir::Call::direct(symbol, vec![argument], signature);
+        let call = ir::Call::direct(symbol, vec![argument], signature, abi);
         if call.signature.ret.is_void() {
-            self.emit_statement(ir::InstKind::Call(call));
+            self.emit_statement(ir::InstKind::Call(Box::new(call)));
         } else {
-            self.emit_value(ir::InstKind::Call(call));
+            self.emit_value(ir::InstKind::Call(Box::new(call)));
         }
     }
 

@@ -92,6 +92,7 @@ fn run() -> Result<(), String> {
                     module_name: module_name(&options.input),
                     layout: target.layout,
                     startup,
+                    abi: target.abi,
                 },
             )
             .map_err(|error| sources.render(&error))?;
@@ -137,6 +138,7 @@ fn run() -> Result<(), String> {
 
 struct Target {
     triple: String,
+    abi: abi_plan::AbiKind,
     layout: Layout,
 }
 
@@ -155,6 +157,7 @@ fn resolve_target(options: &Options) -> Result<Target, String> {
             Some(Backend::Llvm) => Err("--emit=llvm requires --target <triple>".into()),
             _ => Ok(Target {
                 triple: "shy".into(),
+                abi: abi_plan::AbiKind::ShyV1,
                 layout: Layout::SHY,
             }),
         };
@@ -168,6 +171,7 @@ fn resolve_target(options: &Options) -> Result<Target, String> {
         Some(Backend::Llvm) => match arch {
             "x86_64" | "riscv64" | "loongarch64" | "aarch64" => Ok(Target {
                 triple: name.into(),
+                abi: abi_kind(name),
                 layout: Layout::LP64,
             }),
             _ => Err(format!(
@@ -178,10 +182,12 @@ fn resolve_target(options: &Options) -> Result<Target, String> {
         _ => match arch {
             "shy" if name == "shy" => Ok(Target {
                 triple: name.into(),
+                abi: abi_plan::AbiKind::ShyV1,
                 layout: Layout::SHY,
             }),
             "x86_64" | "riscv64" | "loongarch64" | "aarch64" => Ok(Target {
                 triple: name.into(),
+                abi: abi_kind(name),
                 layout: Layout::LP64,
             }),
             _ => Err(format!(
@@ -189,6 +195,18 @@ fn resolve_target(options: &Options) -> Result<Target, String> {
                  (x86_64, riscv64, loongarch64, aarch64)"
             )),
         },
+    }
+}
+
+/// The target C ABI behind a triple.
+fn abi_kind(triple: &str) -> abi_plan::AbiKind {
+    match triple.split('-').next().unwrap_or(triple) {
+        "x86_64" if triple.contains("windows") => abi_plan::AbiKind::WindowsX64,
+        "x86_64" => abi_plan::AbiKind::SysV64,
+        "aarch64" => abi_plan::AbiKind::Aapcs64,
+        "riscv64" => abi_plan::AbiKind::Riscv64,
+        "loongarch64" => abi_plan::AbiKind::LoongArch64,
+        _ => abi_plan::AbiKind::ShyV1,
     }
 }
 

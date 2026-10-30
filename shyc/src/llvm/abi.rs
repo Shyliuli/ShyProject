@@ -1,58 +1,15 @@
-//! C ABI shapes for aggregates that a target passes in memory.
+//! Reading the target ABI plan that lowering attached to the IR.
 //!
-//! The IR records an aggregate only as `(size, align)`. That is enough for the
-//! one rule every supported target shares: an aggregate larger than 16 bytes
-//! is passed by reference, and System V additionally copies it into the callee
-//! frame (`byval`) and returns it through a hidden pointer (`sret`). Smaller
-//! aggregates need per-eightbyte classification, which the IR cannot express,
-//! so they keep the opaque byte-array form.
+//! Every rule that decides where an argument or a return value lives — System V
+//! eightbytes, AArch64 homogeneous float aggregates, RISC-V field flattening,
+//! memory passing, hidden return pointers — belongs to `abi-plan`. Lowering
+//! asks for the plan while field layout is still known and stores it in the IR,
+//! so this module only turns plan parts into LLVM types.
+use abi_plan::{CallPlan, Location, Passing, RegisterClass, ReturnPlan, ValuePart};
+
 use crate::ir::{Layout, Type};
 
-/// How AArch64 passes an aggregate that is not memory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Arm {
-    /// One SIMD register per element, all of the same floating type.
-    Hfa { elem: &'static str, count: u32 },
-    /// One or two general registers holding the bytes.
-    Integers,
-}
-
-impl Arm {
-    pub(super) fn llvm_type(self, size: u32) -> String {
-        match self {
-            Arm::Hfa { elem, count } => format!("[{count} x {elem}]"),
-            Arm::Integers => {
-                if size <= 8 {
-                    "i64".to_string()
-                } else {
-                    "[2 x i64]".to_string()
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Kind {
-    SysV,
-    Windows,
-    Aapcs64,
-    Riscv64,
-    LoongArch64,
-}
-
-pub(super) fn kind(triple: &str) -> Kind {
-    match triple.split('-').next().unwrap_or(triple) {
-        "x86_64" if triple.contains("windows") => Kind::Windows,
-        "x86_64" => Kind::SysV,
-        "aarch64" => Kind::Aapcs64,
-        "riscv64" => Kind::Riscv64,
-        "loongarch64" => Kind::LoongArch64,
-        _ => Kind::SysV,
-    }
-}
-
-/// One register-sized piece of a small aggregate.
+/// One register-sized piece of an aggregate.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Chunk {
     pub offset: u32,
@@ -80,79 +37,50 @@ impl Chunk {
     }
 }
 
-impl Kind {
-    /// Split a small aggregate into its eightbytes, System V style.
-    ///
-    /// `None` keeps the IR form: the value is a scalar or memory, or the
-    /// target classifies small aggregates by rules this backend does not
-    /// model yet.
-    pub(super) fn chunks(self, ty: Type, layout: Layout) -> Option<Vec<Chunk>> {
-        if self != Kind::SysV || !ty.is_aggregate() {
-            return None;
-        }
-        let size = ty.size(layout)?;
-        if size == 0 || size > 16 {
-            return None;
-        }
-        let floats = ty.aggregate_floats();
-        Some(
-            (0..size.div_ceil(8))
-                .map(|index| Chunk {
-                    offset: index * 8,
-                    size: size.saturating_sub(index * 8).min(8),
-                    float: floats & (1 << index) != 0,
-                })
-                .collect(),
-        )
-    }
+#[derive(Debug)]
+pub(super) enum Shape {
+    /// The value crosses the boundary as its IR type.
+    Value,
+    /// One LLVM argument or result per plan part.
+    Registers(Vec<Chunk>),
+    /// Passed by reference; `byval` means the callee owns a copy.
+    Indirect { byval: bool },
+}
 
-    /// The AArch64 rule for a small aggregate.
-    ///
-    /// A homogeneous aggregate of one floating type travels in one SIMD
-    /// register per element, even past 16 bytes. Everything else up to 16 bytes
-    /// travels in one or two general registers. The IR mask plus the alignment
-    /// identifies the element type: an all-float aggregate whose alignment is 4
-    /// holds floats, and one aligned to 8 holds doubles.
-    pub(super) fn arm_small(self, ty: Type, layout: Layout) -> Option<Arm> {
-        if self != Kind::Aapcs64 || !ty.is_aggregate() {
-            return None;
-        }
-        let size = ty.size(layout)?;
-        let align = ty.align(layout)?;
-        let eightbytes = size.div_ceil(8);
-        let floats = ty.aggregate_floats();
-        let covered = if eightbytes >= 8 {
-            u8::MAX
-        } else {
-            (1u8 << eightbytes) - 1
-        };
-        if size > 0
-            && floats & covered == covered
-            && (align == 4 || align == 8)
-            && size % align == 0
-            && size / align <= 4
-        {
-            return Some(Arm::Hfa {
-                elem: if align == 4 { "float" } else { "double" },
-                count: size / align,
-            });
-        }
-        if size <= 16 {
-            return Some(Arm::Integers);
-        }
-        None
+pub(super) fn param(plan: &CallPlan, index: usize, ty: Type) -> Shape {
+    let Some(argument) = plan.args.get(index) else {
+        return Shape::Value;
+    };
+    match &argument.passing {
+        Passing::Direct { parts } if ty.is_aggregate() => Shape::Registers(chunks(parts)),
+        Passing::Indirect { byval, .. } => Shape::Indirect { byval: *byval },
+        _ => Shape::Value,
     }
+}
 
-    /// Aggregates over two eightbytes travel as a pointer instead of a value.
-    pub(super) fn by_reference(self, ty: Type, layout: Layout) -> bool {
-        ty.is_aggregate() && ty.size(layout).unwrap_or(0) > 16
+/// The return shape, and whether the function takes a hidden pointer.
+pub(super) fn returns(plan: &CallPlan, ty: Type) -> (bool, Shape) {
+    match &plan.return_value {
+        ReturnPlan::Indirect { .. } => (true, Shape::Indirect { byval: false }),
+        ReturnPlan::Direct { parts } if ty.is_aggregate() => {
+            (false, Shape::Registers(chunks(parts)))
+        }
+        _ => (false, Shape::Value),
     }
+}
 
-    /// Only System V and Windows copy the aggregate into the callee frame.
-    /// AArch64, RISC-V, and LoongArch pass a pointer to the caller's temporary.
-    pub(super) fn copies(self) -> bool {
-        matches!(self, Kind::SysV | Kind::Windows)
-    }
+fn chunks(parts: &[ValuePart]) -> Vec<Chunk> {
+    parts
+        .iter()
+        .map(|part| Chunk {
+            offset: part.source_offset,
+            size: part.size,
+            float: matches!(
+                part.location,
+                Location::Register(register) if register.class == RegisterClass::Fpr
+            ),
+        })
+        .collect()
 }
 
 /// The LLVM form of an aggregate: a byte array of its size.
