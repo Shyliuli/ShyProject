@@ -194,6 +194,15 @@ void trap_handler(uint32_t cause, uint32_t r0, uint32_t r1, uint32_t r2, uint32_
         proc_set_current_state(RUNNABLE);
         asm("setn tm 100");
         exit_if_killed();
+    } else if (cause == 6) {
+        // 用户态写 EXIT：模拟器把退出码放在 0x（trap_handler 的第一个参数），
+        // 这里只结束当前进程，机器继续运行。
+        if (current != 0 && getpid() != 0) {
+            exit((int)r0);
+            halt_if_no_user_work();
+        } else {
+            asm("setn exit 1");
+        }
     } else if (cause == 3 || cause == 4 || cause == 5) {
         if (current != 0 && getpid() != 0) {
             exit((int)cause);

@@ -34,6 +34,8 @@ enum TrapCause {
     IllegalInstr = 3,
     IllegalAddr = 4,
     Permission = 5,
+    /// 用户态程序写 EXIT：请求内核结束当前进程，而不是停机。
+    UserExit = 6,
 }
 
 /// 单条指令执行后的控制流。
@@ -521,8 +523,15 @@ impl Emu {
             0x15 if !self.is_user() => self.trap = val,
             0x16..=0x19 => self.music[(addr - 0x16) as usize] = val,
             0x1A => self.rs = val,
+            0x1B if self.is_user() => {
+                // 用户态写 EXIT 是退出请求，不是停机。内核结束当前进程，
+                // 否则一个用户程序就能把整个操作系统停掉。退出码放在 0x，
+                // trap 处理函数的第一个参数就是它。
+                self.regs[0] = val;
+                return Err(TrapCause::UserExit);
+            }
             0x1B => {
-                // 任何改变都触发程序退出。
+                // 内核态写 EXIT 仍然直接停机。
                 self.exit_code = Some(val);
             }
             0x1C if !self.is_user() => self.epc = val,
