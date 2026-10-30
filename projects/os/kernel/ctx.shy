@@ -1,7 +1,8 @@
 ___DEFINE___
 
 USER_ENTRY 0x00000100
-USER_SEG_SIZE 0x00100000
+KSTACK_SIZE 4096
+TF_SIZE 88
 
 CTX_R0_OFF 0
 CTX_R1_OFF 4
@@ -209,6 +210,8 @@ ___CODE___
     geta 2x 2x
     addn 2x PROC_KSTACK_OFF
     geta 2x 2x
+    addn 2x KSTACK_SIZE
+    subn 2x TF_SIZE
     puta 1x 2x
 
     setn 1x current
@@ -233,13 +236,16 @@ ___CODE___
     geta 2x 2x
     addn 2x PROC_SEGBASE_OFF
     geta 2x 2x
-    addn 2x USER_SEG_SIZE
+    setn 3x user_seg_size
+    geta 3x 3x
+    adda 2x 3x
     puta 1x 2x
 
+    // exec 走 iret 返回，弹出 exec 自己压入的 trap 状态，不能再用 enteruser。
     setn 1x current
     geta 1x 1x
     addn 1x CTX_VALID_OFF
-    setn 2x 0
+    setn 2x 1
     puta 1x 2x
     ret
 

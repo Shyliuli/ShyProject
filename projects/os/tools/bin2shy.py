@@ -46,15 +46,18 @@ def byte_initializer(data):
 def write_c(output, inputs):
     used = set()
     files = []
+    data_ids = {}
     for path in inputs:
         with open(path, "rb") as f:
             data = f.read()
         embedded_name = Path(path).stem if Path(path).suffix == ".sfs" else Path(path).name
+        ident = c_identifier(path, used)
         files.append({
-            "path": path,
             "name": embedded_name,
-            "id": c_identifier(path, used),
+            "id": ident,
             "data": data,
+            # 内容相同的文件（例如 busybox 的各个 applet）共用一个 data 数组。
+            "data_id": data_ids.setdefault(data, ident),
         })
 
     with open(output, "w", encoding="utf-8") as out:
@@ -67,11 +70,16 @@ def write_c(output, inputs):
 
         for item in files:
             ident = item["id"]
-            data = item["data"]
             name_bytes = item["name"].encode("utf-8") + b"\0"
             out.write(f"unsigned char {ident}_name[] = {{\n")
             out.write(byte_initializer(name_bytes))
             out.write("\n};\n\n")
+
+        for item in files:
+            if item["data_id"] != item["id"]:
+                continue
+            ident = item["id"]
+            data = item["data"]
             out.write(f"unsigned char {ident}_data[] = {{\n")
             out.write(byte_initializer(data))
             out.write("\n};\n\n")
@@ -80,8 +88,9 @@ def write_c(output, inputs):
         if files:
             out.write(f"struct fs_file fs_files[{len(files)}] = {{\n")
             for item in files:
-                ident = item["id"]
-                out.write(f"    {{ (char *){ident}_name, {ident}_data, {len(item['data'])} }},\n")
+                out.write(
+                    f"    {{ (char *){item['id']}_name, {item['data_id']}_data, {len(item['data'])} }},\n"
+                )
             out.write("};\n")
         else:
             out.write("struct fs_file fs_files[1] = {\n")

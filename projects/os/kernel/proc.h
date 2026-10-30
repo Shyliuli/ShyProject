@@ -3,7 +3,11 @@
 
 #include "trap.h"
 
+#ifdef SHYOS_SMALL
+#define NPROC 12
+#else
 #define NPROC 16
+#endif
 #define PROC_NAME_MAX 16
 
 enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };

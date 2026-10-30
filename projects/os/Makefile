@@ -4,6 +4,9 @@ SHYLD = ../../target/bin/shyld
 SHYEMU = ../../target/bin/shyemu
 PYTHON ?= python3
 
+# small_mem 用它切到 4 MiB 内存布局。
+SHYC_DEFS ?=
+
 # Keep generated .shy assembly files (with source line numbers) by default.
 .SECONDARY:
 
@@ -12,6 +15,7 @@ USER_TARGET = target/user
 FS_TARGET = target/fs
 
 KERNEL_SFS = target/kernel.sfs
+SMALL_KERNEL_SFS = target/small/kernel.sfs
 USER_SRCS := $(wildcard user/*.shyc user/*.shy)
 BUSYBOX_APPLETS := sh echo cat ls mkdir rm pwd wc grep ps kill exit
 USER_PROG_SRCS := $(filter-out user/usys.shy user/ulib.shyc user/sh.shyc user/echo.shyc user/cat.shyc,$(USER_SRCS))
@@ -36,12 +40,22 @@ KERNEL_OBJS = \
 	$(KERNEL_TARGET)/kmain.sobj \
 	$(FS_TARGET)/fsdata.sobj
 
-.PHONY: build run test clean dirs
+.PHONY: build run test clean dirs small_mem small_run
 
 build: $(KERNEL_SFS)
 
 run: $(KERNEL_SFS)
 	$(SHYEMU) $(KERNEL_SFS) --mem 128M
+
+small_mem:
+	$(MAKE) SHYC_DEFS=-DSHYOS_SMALL \
+		KERNEL_TARGET=target/small/kernel \
+		USER_TARGET=target/small/user \
+		FS_TARGET=target/small/fs \
+		KERNEL_SFS=$(SMALL_KERNEL_SFS) build
+
+small_run: small_mem
+	$(SHYEMU) $(SMALL_KERNEL_SFS) --mem 4M
 
 test: $(KERNEL_SFS)
 	@set -eu; \
@@ -112,7 +126,7 @@ $(KERNEL_TARGET)/%.sobj: kernel/%.shy | dirs
 	$(SHYASM) $< -o $@
 
 $(KERNEL_TARGET)/%.shy: kernel/%.shyc | dirs
-	$(SHYCC) -S --shy-emit-source-lines $< -o $@
+	$(SHYCC) -S $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
 
 $(KERNEL_TARGET)/%.sobj: $(KERNEL_TARGET)/%.shy | dirs
 	$(SHYASM) $< -o $@
@@ -121,7 +135,7 @@ $(FS_TARGET)/fsdata.c: tools/bin2shy.py $(FS_INPUTS) | dirs
 	$(PYTHON) tools/bin2shy.py -o $@ $(FS_INPUTS)
 
 $(FS_TARGET)/%.shy: $(FS_TARGET)/%.c | dirs
-	$(SHYCC) -S --shy-emit-source-lines $< -o $@
+	$(SHYCC) -S $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
 
 $(FS_TARGET)/%.sobj: $(FS_TARGET)/%.shy | dirs
 	$(SHYASM) $< -o $@
@@ -130,7 +144,7 @@ $(USER_TARGET)/usys.sobj: user/usys.shy | dirs
 	$(SHYASM) $< -o $@
 
 $(USER_TARGET)/%.shy: user/%.shyc | dirs
-	$(SHYCC) -S --shy-emit-source-lines $< -o $@
+	$(SHYCC) -S $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
 
 $(USER_TARGET)/%.sobj: $(USER_TARGET)/%.shy | dirs
 	$(SHYASM) $< -o $@

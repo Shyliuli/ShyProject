@@ -1,5 +1,5 @@
 #![no_main]
-#![mem(1M)]
+#![mem(256K)]
 #![stack(4K)]
 
 #include "usys.h"

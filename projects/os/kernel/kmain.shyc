@@ -13,6 +13,11 @@ void scheduler(void);
 
 extern struct proc *current;
 
+// 引导栈和调度栈都从低地址向上生长，入口汇编按符号取它们的栈底。
+unsigned char boot_stack[4096];
+unsigned int sched_stack_top = SCHED_STACK_TOP;
+unsigned int user_seg_size = USER_SEG_SIZE;
+
 static void load_init(struct proc *p) {
     struct fs_file *file = fs_lookup("init");
     unsigned char *dst = (unsigned char *)p->segbase;

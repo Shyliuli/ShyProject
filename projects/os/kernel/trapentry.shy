@@ -1,7 +1,5 @@
 ___DEFINE___
 
-SCHED_STACK_TOP 0x07f00000
-
 TF_SIZE 88
 TF_R0_OFF 0
 TF_R1_OFF 4
@@ -98,7 +96,9 @@ ___CODE___
     geta 8x 3x
 
     // Switch to the scheduler stack.
-    setn sp SCHED_STACK_TOP
+    setn 2x sched_stack_top
+    geta 2x 2x
+    seta sp 2x
 
     // Call the C syscall/timer dispatcher.
     calln trap_handler
