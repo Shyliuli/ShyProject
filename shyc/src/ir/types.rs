@@ -24,6 +24,37 @@ pub struct BlockId(pub u32);
 pub struct SlotId(pub u32);
 
 // ---------------------------------------------------------------------------
+// Target layout
+// ---------------------------------------------------------------------------
+
+/// Target facts the IR itself does not fix.
+///
+/// The IR is shared by several code generators: the Shy backend keeps the
+/// 32-bit address model of ShyISA, while an LLVM backend can target a 64-bit
+/// host. Only pointer width differs here; `int` is 4 bytes and `long` is 8
+/// bytes on every ShyC target, and aggregates already carry the size and
+/// alignment their frontend computed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Layout {
+    pub pointer_bytes: u32,
+    pub pointer_align: u32,
+}
+
+impl Layout {
+    /// ShyISA: 32-bit addresses.
+    pub const SHY: Layout = Layout {
+        pointer_bytes: 4,
+        pointer_align: 4,
+    };
+
+    /// Usual LP64 targets (x86-64, RISC-V 64, LoongArch 64).
+    pub const LP64: Layout = Layout {
+        pointer_bytes: 8,
+        pointer_align: 8,
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -59,26 +90,29 @@ impl Type {
 
     /// Storage size in bytes, or `None` for `void`.
     ///
-    /// These widths belong to ShyC's target data model, never to the host.
-    pub fn size(self) -> Option<u32> {
+    /// Pointer width comes from [`Layout`], because one IR serves several
+    /// targets. Every other width is fixed by the ShyC data model.
+    pub fn size(self, layout: Layout) -> Option<u32> {
         match self {
             Type::Void => None,
             Type::I1 | Type::I8 => Some(1),
             Type::I16 => Some(2),
-            Type::I32 | Type::F32 | Type::Ptr => Some(4),
+            Type::I32 | Type::F32 => Some(4),
             Type::I64 | Type::F64 => Some(8),
+            Type::Ptr => Some(layout.pointer_bytes),
             Type::Aggregate { size, .. } => Some(size),
         }
     }
 
     /// Natural alignment in bytes, or `None` for `void`.
-    pub fn align(self) -> Option<u32> {
+    pub fn align(self, layout: Layout) -> Option<u32> {
         match self {
             Type::Void => None,
             Type::I1 | Type::I8 => Some(1),
             Type::I16 => Some(2),
-            Type::I32 | Type::F32 | Type::Ptr => Some(4),
+            Type::I32 | Type::F32 => Some(4),
             Type::I64 | Type::F64 => Some(8),
+            Type::Ptr => Some(layout.pointer_align),
             Type::Aggregate { align, .. } => Some(align),
         }
     }
@@ -235,7 +269,7 @@ impl Constant {
             Type::I1 => write!(f, "{}", self.bits != 0),
             Type::F32 => write!(f, "0x{:08x}", self.bits as u32),
             Type::F64 => write!(f, "0x{:016x}", self.bits),
-            Type::Ptr => write!(f, "0x{:08x}", self.bits as u32),
+            Type::Ptr => write!(f, "0x{:x}", self.bits),
             ty if ty.is_integer() => write!(f, "{}", self.as_i64()),
             _ => write!(f, "0x{:x}", self.bits),
         }
@@ -243,14 +277,15 @@ impl Constant {
 }
 
 /// Mask `bits` to the storage width of `ty`. Non-integer types only mask
-/// `f32`; other widths pass through unchanged.
+/// `f32`; pointer constants keep their full 64-bit pattern so a 64-bit target
+/// does not lose address bits, and a 32-bit target truncates when it emits.
 fn mask_for(ty: Type, bits: u64) -> u64 {
     match ty {
         Type::I1 => bits & 1,
         Type::I8 => bits & 0xff,
         Type::I16 => bits & 0xffff,
-        Type::I32 | Type::F32 | Type::Ptr => bits & 0xffff_ffff,
-        Type::I64 | Type::F64 => bits,
+        Type::I32 | Type::F32 => bits & 0xffff_ffff,
+        Type::I64 | Type::F64 | Type::Ptr => bits,
         Type::Void | Type::Aggregate { .. } => bits,
     }
 }
@@ -429,8 +464,8 @@ pub struct Slot {
 }
 
 impl Slot {
-    pub fn new(name: impl Into<String>, ty: Type) -> Slot {
-        let align = ty.align().unwrap_or(1);
+    pub fn new(name: impl Into<String>, ty: Type, layout: Layout) -> Slot {
+        let align = ty.align(layout).unwrap_or(1);
         Slot {
             name: name.into(),
             ty,
@@ -448,8 +483,8 @@ impl Slot {
 
     /// Storage size in bytes; `void` slots have size zero and are invalid in
     /// well-formed IR.
-    pub fn size(&self) -> u32 {
-        self.ty.size().unwrap_or(0)
+    pub fn size(&self, layout: Layout) -> u32 {
+        self.ty.size(layout).unwrap_or(0)
     }
 }
 

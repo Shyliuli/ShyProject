@@ -95,6 +95,9 @@ pub enum Definition {
 pub struct Function {
     pub name: String,
     pub signature: Signature,
+    /// Target facts this function was built for. Every size, alignment, and
+    /// derived result type in the function is computed from it.
+    pub layout: Layout,
     /// SSA values for the function parameters, in signature order.
     pub params: Vec<ValueId>,
     pub entry: BlockId,
@@ -111,11 +114,12 @@ pub struct Function {
 impl Function {
     /// Create a function with an empty `bb0` entry block and SSA parameter
     /// values matching `signature.params`.
-    pub fn new(name: impl Into<String>, signature: Signature) -> Function {
+    pub fn new(name: impl Into<String>, signature: Signature, layout: Layout) -> Function {
         let param_types = signature.params.clone();
         let mut function = Function {
             name: name.into(),
             signature,
+            layout,
             params: Vec::new(),
             entry: BlockId(0),
             values: Vec::new(),
@@ -154,7 +158,7 @@ impl Function {
     }
 
     pub fn alloc_slot(&mut self, name: impl Into<String>, ty: Type) -> SlotId {
-        let align = ty.align().unwrap_or(1);
+        let align = ty.align(self.layout).unwrap_or(1);
         self.alloc_slot_aligned(name, ty, align)
     }
 

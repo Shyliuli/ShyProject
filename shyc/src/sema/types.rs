@@ -1,0 +1,574 @@
+//! Semantic types for the ShyC target, stored in a plain arena.
+//!
+//! The arena owns every type by [`TypeId`]. Types are immutable from the
+//! outside: a record can start incomplete and be completed later, but its
+//! identity never changes. This is the type layer used by declaration binding
+//! and the expression checker; it knows nothing about AST nodes, symbols, or
+//! constant evaluation.
+//!
+//! Target model, matching the existing ShyC frontend:
+//!
+//! | type | size | align |
+//! | --- | ---: | ---: |
+//! | `char`, `_Bool` | 1 | 1 |
+//! | `short` | 2 | 2 |
+//! | `int`, pointer | 4 | 4 |
+//! | `long`, `long long` | 8 | 8 |
+//! | `float` | 4 | 4 |
+//! | `double` | 8 | 8 |
+//!
+//! `char` is signed. `long` and `long long` have the same width but different
+//! ranks, so they remain distinct integer types. Record layout, `sizeof`,
+//! `_Alignof`, type compatibility, integer promotions, and the usual arithmetic
+//! conversions live in the sibling [`super::layout`] module; they are inherent
+//! methods on [`TypeStore`].
+//!
+//! A record's natural alignment is *not* the 4-byte alignment the ABI uses for
+//! stack argument transport. `long` and `double` members are 8-byte aligned in
+//! the object layout even though argument blocks are only 4-byte aligned.
+
+pub use super::layout::{Layout, RecordField, RecordInfo, TypeError};
+
+// ---------------------------------------------------------------------------
+// Identities
+// ---------------------------------------------------------------------------
+
+/// Index of one type in a [`TypeStore`].
+///
+/// IDs belong to the store that created them; never mix IDs from two stores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TypeId(u32);
+
+impl TypeId {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Identity of one struct or union, independent of its completion state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RecordId(u32);
+
+impl RecordId {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Identity of one enum type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EnumId(u32);
+
+impl EnumId {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Qualifiers
+// ---------------------------------------------------------------------------
+
+/// The four C type qualifiers. They belong to a [`QualifiedType`], not to a
+/// [`TypeKind`], so a pointer's target can be qualified independently.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Qualifiers {
+    pub is_const: bool,
+    pub is_volatile: bool,
+    pub is_restrict: bool,
+    pub is_atomic: bool,
+}
+
+impl Qualifiers {
+    pub const NONE: Qualifiers = Qualifiers {
+        is_const: false,
+        is_volatile: false,
+        is_restrict: false,
+        is_atomic: false,
+    };
+
+    pub const CONST: Qualifiers = Qualifiers {
+        is_const: true,
+        is_volatile: false,
+        is_restrict: false,
+        is_atomic: false,
+    };
+
+    pub fn is_empty(self) -> bool {
+        self == Qualifiers::NONE
+    }
+}
+
+/// A type together with its top-level qualifiers.
+///
+/// Nested types use this type too: a pointer stores its target as a
+/// `QualifiedType`, so `const int *` is a pointer whose target carries
+/// `Qualifiers::CONST`. The same type may appear unqualified elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QualifiedType {
+    pub ty: TypeId,
+    pub qualifiers: Qualifiers,
+}
+
+impl QualifiedType {
+    pub fn new(ty: TypeId, qualifiers: Qualifiers) -> Self {
+        Self { ty, qualifiers }
+    }
+
+    pub fn unqualified(ty: TypeId) -> Self {
+        Self {
+            ty,
+            qualifiers: Qualifiers::NONE,
+        }
+    }
+
+    pub fn is_qualified(self) -> bool {
+        !self.qualifiers.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Built-in types
+// ---------------------------------------------------------------------------
+
+/// Integer rank. Widths are fixed by the target; `Long` and `LongLong` share
+/// the width 8 but keep distinct ranks for the usual arithmetic conversions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IntegerRank {
+    Char,
+    Short,
+    Int,
+    Long,
+    LongLong,
+}
+
+impl IntegerRank {
+    pub fn size(self) -> u32 {
+        match self {
+            IntegerRank::Char => 1,
+            IntegerRank::Short => 2,
+            IntegerRank::Int => 4,
+            IntegerRank::Long | IntegerRank::LongLong => 8,
+        }
+    }
+
+    pub fn align(self) -> u32 {
+        self.size()
+    }
+}
+
+/// A built-in type spelling. `SignedChar` is the same type as `Char` because
+/// plain `char` is signed on this target; both names select that one type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Builtin {
+    Void,
+    Bool,
+    Char,
+    SignedChar,
+    UnsignedChar,
+    Short,
+    UnsignedShort,
+    Int,
+    UnsignedInt,
+    Long,
+    UnsignedLong,
+    LongLong,
+    UnsignedLongLong,
+    Float,
+    Double,
+}
+
+/// What a type is. Qualifiers are intentionally absent; they live on
+/// [`QualifiedType`] at each use site.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeKind {
+    Void,
+    Bool,
+    Integer {
+        rank: IntegerRank,
+        unsigned: bool,
+    },
+    Float32,
+    Float64,
+    Pointer {
+        pointee: QualifiedType,
+    },
+    /// `len == None` is an incomplete array (`int[]`). `Some(0)` is a GNU
+    /// zero-length array and is distinct from an incomplete array.
+    Array {
+        element: QualifiedType,
+        len: Option<u32>,
+    },
+    Function {
+        /// Top-level qualifiers on a return value are irrelevant to the
+        /// function type, so only the underlying type is kept.
+        result: TypeId,
+        /// Parameters are stored after array/function adjustment and with
+        /// top-level qualifiers removed, as C requires for function types.
+        params: Vec<TypeId>,
+        variadic: bool,
+        /// `true` for `(int)` or `(void)`; `false` for the old-style `()`.
+        prototype: bool,
+    },
+    Record {
+        id: RecordId,
+        kind: RecordKind,
+    },
+    Enum(EnumId),
+}
+
+/// A type and its layout. `size` is `None` while the type is incomplete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Type {
+    pub kind: TypeKind,
+    pub size: Option<u32>,
+    pub align: Option<u32>,
+}
+
+// ---------------------------------------------------------------------------
+// Records and enums
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordKind {
+    Struct,
+    Union,
+}
+
+/// An enum type. ShyC enums use `int` as their representation, as the current
+/// chibicc fork does. Enum identity is still distinct from `int`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumInfo {
+    pub underlying: TypeId,
+}
+
+// ---------------------------------------------------------------------------
+// Type arena
+// ---------------------------------------------------------------------------
+
+/// Arena of target types with cached built-ins.
+///
+/// All constructors return stable [`TypeId`]s. There is no interning: asking
+/// for `int *` twice creates two structurally equal pointer types, and
+/// [`TypeStore::is_compatible`] is the operation that decides type equality.
+/// Records and enums are the exception: their identity is their ID.
+pub struct TypeStore {
+    pub(super) types: Vec<Type>,
+    pub(super) records: Vec<RecordInfo>,
+    pub(super) enums: Vec<EnumInfo>,
+    builtins: Builtins,
+    /// Pointer width of the target. ShyISA uses 32-bit addresses; other
+    /// backends use the platform's own width, so this is never hard-coded
+    /// into a type.
+    pointer_bytes: u32,
+    pointer_align: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Builtins {
+    void: TypeId,
+    bool_: TypeId,
+    char_: TypeId,
+    unsigned_char: TypeId,
+    short: TypeId,
+    unsigned_short: TypeId,
+    int: TypeId,
+    unsigned_int: TypeId,
+    long: TypeId,
+    unsigned_long: TypeId,
+    long_long: TypeId,
+    unsigned_long_long: TypeId,
+    float: TypeId,
+    double_: TypeId,
+}
+
+impl Default for TypeStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TypeStore {
+    /// Creates a type arena for ShyISA, where pointers are 32-bit.
+    pub fn new() -> Self {
+        Self::with_pointer_width(4)
+    }
+
+    /// Creates a type arena whose pointers are `bytes` wide and aligned.
+    ///
+    /// A backend targeting an LP64 platform passes 8, which changes
+    /// `sizeof(void *)`, pointer arithmetic, and every record that contains a
+    /// pointer.
+    pub fn with_pointer_width(bytes: u32) -> Self {
+        let mut types = Vec::new();
+
+        let void = push_type(&mut types, TypeKind::Void, None, None);
+        let bool_ = push_type(&mut types, TypeKind::Bool, Some(1), Some(1));
+        let char_ = push_integer(&mut types, IntegerRank::Char, false);
+        let unsigned_char = push_integer(&mut types, IntegerRank::Char, true);
+        let short = push_integer(&mut types, IntegerRank::Short, false);
+        let unsigned_short = push_integer(&mut types, IntegerRank::Short, true);
+        let int = push_integer(&mut types, IntegerRank::Int, false);
+        let unsigned_int = push_integer(&mut types, IntegerRank::Int, true);
+        let long = push_integer(&mut types, IntegerRank::Long, false);
+        let unsigned_long = push_integer(&mut types, IntegerRank::Long, true);
+        let long_long = push_integer(&mut types, IntegerRank::LongLong, false);
+        let unsigned_long_long = push_integer(&mut types, IntegerRank::LongLong, true);
+        let float = push_type(&mut types, TypeKind::Float32, Some(4), Some(4));
+        let double_ = push_type(&mut types, TypeKind::Float64, Some(8), Some(8));
+
+        Self {
+            types,
+            records: Vec::new(),
+            enums: Vec::new(),
+            builtins: Builtins {
+                void,
+                bool_,
+                char_,
+                unsigned_char,
+                short,
+                unsigned_short,
+                int,
+                unsigned_int,
+                long,
+                unsigned_long,
+                long_long,
+                unsigned_long_long,
+                float,
+                double_,
+            },
+            pointer_bytes: bytes,
+            pointer_align: bytes,
+        }
+    }
+
+    /// Pointer width of this target, in bytes.
+    pub fn pointer_width(&self) -> u32 {
+        self.pointer_bytes
+    }
+
+    /// Returns the canonical TypeId for a built-in spelling.
+    pub fn builtin(&self, builtin: Builtin) -> TypeId {
+        match builtin {
+            Builtin::Void => self.builtins.void,
+            Builtin::Bool => self.builtins.bool_,
+            Builtin::Char | Builtin::SignedChar => self.builtins.char_,
+            Builtin::UnsignedChar => self.builtins.unsigned_char,
+            Builtin::Short => self.builtins.short,
+            Builtin::UnsignedShort => self.builtins.unsigned_short,
+            Builtin::Int => self.builtins.int,
+            Builtin::UnsignedInt => self.builtins.unsigned_int,
+            Builtin::Long => self.builtins.long,
+            Builtin::UnsignedLong => self.builtins.unsigned_long,
+            Builtin::LongLong => self.builtins.long_long,
+            Builtin::UnsignedLongLong => self.builtins.unsigned_long_long,
+            Builtin::Float => self.builtins.float,
+            Builtin::Double => self.builtins.double_,
+        }
+    }
+
+    /// The canonical integer type for a rank and signedness.
+    pub(super) fn integer_type(&self, rank: IntegerRank, unsigned: bool) -> TypeId {
+        let builtin = match (rank, unsigned) {
+            (IntegerRank::Char, false) => Builtin::Char,
+            (IntegerRank::Char, true) => Builtin::UnsignedChar,
+            (IntegerRank::Short, false) => Builtin::Short,
+            (IntegerRank::Short, true) => Builtin::UnsignedShort,
+            (IntegerRank::Int, false) => Builtin::Int,
+            (IntegerRank::Int, true) => Builtin::UnsignedInt,
+            (IntegerRank::Long, false) => Builtin::Long,
+            (IntegerRank::Long, true) => Builtin::UnsignedLong,
+            (IntegerRank::LongLong, false) => Builtin::LongLong,
+            (IntegerRank::LongLong, true) => Builtin::UnsignedLongLong,
+        };
+        self.builtin(builtin)
+    }
+
+    pub fn get(&self, ty: TypeId) -> &Type {
+        &self.types[ty.index()]
+    }
+
+    pub fn kind(&self, ty: TypeId) -> &TypeKind {
+        &self.get(ty).kind
+    }
+
+    /// Creates a `pointee`-pointing pointer type using this target's width.
+    pub fn pointer_to(&mut self, pointee: QualifiedType) -> TypeId {
+        push_type(
+            &mut self.types,
+            TypeKind::Pointer { pointee },
+            Some(self.pointer_bytes),
+            Some(self.pointer_align),
+        )
+    }
+
+    /// Creates an array type.
+    ///
+    /// `len == None` creates an incomplete array; it still has the element's
+    /// alignment. The element must be a complete object type. A known length
+    /// whose byte size overflows 32 bits is rejected.
+    pub fn array_of(
+        &mut self,
+        element: QualifiedType,
+        len: Option<u32>,
+    ) -> Result<TypeId, TypeError> {
+        let element_size = self.size_of(element.ty)?;
+        let element_align = self.align_of(element.ty)?;
+        let size = match len {
+            Some(len) => Some(
+                element_size
+                    .checked_mul(len)
+                    .ok_or(TypeError::ArrayTooLarge)?,
+            ),
+            None => None,
+        };
+        Ok(push_type(
+            &mut self.types,
+            TypeKind::Array { element, len },
+            size,
+            Some(element_align),
+        ))
+    }
+
+    /// Creates a function type. Parameter adjustment and top-level qualifier
+    /// removal must already have been done by the caller.
+    pub fn function(
+        &mut self,
+        result: TypeId,
+        params: Vec<TypeId>,
+        variadic: bool,
+        prototype: bool,
+    ) -> TypeId {
+        push_type(
+            &mut self.types,
+            TypeKind::Function {
+                result,
+                params,
+                variadic,
+                prototype,
+            },
+            None,
+            None,
+        )
+    }
+
+    /// Creates a new incomplete struct or union with a fresh identity.
+    pub fn record_forward(&mut self, kind: RecordKind) -> TypeId {
+        let id = RecordId(self.records.len() as u32);
+        self.records.push(RecordInfo {
+            fields: Vec::new(),
+            is_flexible: false,
+        });
+        push_type(&mut self.types, TypeKind::Record { id, kind }, None, None)
+    }
+
+    /// Creates a fresh enum type. ShyC represents every enum as `int`.
+    pub fn new_enum(&mut self) -> TypeId {
+        let id = EnumId(self.enums.len() as u32);
+        let underlying = self.builtins.int;
+        self.enums.push(EnumInfo { underlying });
+        push_type(
+            &mut self.types,
+            TypeKind::Enum(id),
+            Some(4),
+            Some(4),
+        )
+    }
+
+    pub fn record_info(&self, ty: TypeId) -> Option<&RecordInfo> {
+        match self.kind(ty) {
+            TypeKind::Record { id, .. } => self.records.get(id.index()),
+            _ => None,
+        }
+    }
+
+    pub fn enum_info(&self, ty: TypeId) -> Option<&EnumInfo> {
+        match self.kind(ty) {
+            TypeKind::Enum(id) => self.enums.get(id.index()),
+            _ => None,
+        }
+    }
+
+    pub fn enum_underlying(&self, ty: TypeId) -> Option<TypeId> {
+        self.enum_info(ty).map(|info| info.underlying)
+    }
+
+    // -----------------------------------------------------------------------
+    // Queries
+    // -----------------------------------------------------------------------
+
+    pub fn is_void(&self, ty: TypeId) -> bool {
+        matches!(self.kind(ty), TypeKind::Void)
+    }
+
+    pub fn is_bool(&self, ty: TypeId) -> bool {
+        matches!(self.kind(ty), TypeKind::Bool)
+    }
+
+    pub fn is_integer(&self, ty: TypeId) -> bool {
+        matches!(
+            self.kind(ty),
+            TypeKind::Bool | TypeKind::Integer { .. } | TypeKind::Enum(_)
+        )
+    }
+
+    pub fn is_floating(&self, ty: TypeId) -> bool {
+        matches!(self.kind(ty), TypeKind::Float32 | TypeKind::Float64)
+    }
+
+    pub fn is_arithmetic(&self, ty: TypeId) -> bool {
+        self.is_integer(ty) || self.is_floating(ty)
+    }
+
+    pub fn is_pointer(&self, ty: TypeId) -> bool {
+        matches!(self.kind(ty), TypeKind::Pointer { .. })
+    }
+
+    pub fn is_array(&self, ty: TypeId) -> bool {
+        matches!(self.kind(ty), TypeKind::Array { .. })
+    }
+
+    pub fn is_function(&self, ty: TypeId) -> bool {
+        matches!(self.kind(ty), TypeKind::Function { .. })
+    }
+
+    pub fn is_record(&self, ty: TypeId) -> bool {
+        matches!(self.kind(ty), TypeKind::Record { .. })
+    }
+
+    pub fn is_scalar(&self, ty: TypeId) -> bool {
+        self.is_arithmetic(ty) || self.is_pointer(ty)
+    }
+
+    pub fn is_aggregate(&self, ty: TypeId) -> bool {
+        self.is_array(ty) || self.is_record(ty)
+    }
+
+    /// A type is complete when its size is known. `void`, function types, and
+    /// incomplete arrays/records are not complete.
+    pub fn is_complete(&self, ty: TypeId) -> bool {
+        self.get(ty).size.is_some()
+    }
+
+
+}
+
+fn push_type(
+    types: &mut Vec<Type>,
+    kind: TypeKind,
+    size: Option<u32>,
+    align: Option<u32>,
+) -> TypeId {
+    let id = TypeId(types.len() as u32);
+    types.push(Type { kind, size, align });
+    id
+}
+
+fn push_integer(types: &mut Vec<Type>, rank: IntegerRank, unsigned: bool) -> TypeId {
+    push_type(
+        types,
+        TypeKind::Integer { rank, unsigned },
+        Some(rank.size()),
+        Some(rank.align()),
+    )
+}
