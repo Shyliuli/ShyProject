@@ -264,10 +264,10 @@ fn read_debug_inputs(paths: &[PathBuf]) -> Result<DebugInfo> {
         }
 
         for ty in &mut merged.types[type_start..] {
-            if let Some(base) = ty.base {
-                if let Some(global) = type_map.get(&base).copied() {
-                    ty.base = Some(global);
-                }
+            if let Some(base) = ty.base
+                && let Some(global) = type_map.get(&base).copied()
+            {
+                ty.base = Some(global);
             }
             for member in &mut ty.members {
                 if let Some(global) = type_map.get(&member.ty).copied() {
@@ -801,29 +801,31 @@ fn ensure_type_die(
     let die = unit.add(root, tag);
     cache.insert(id, die);
 
-    if let Some(name) = dwarf_type_name(ty) {
-        if !name.is_empty() && name != "pointer" && name != "array" && name != "function" {
-            unit.get_mut(die).set(
-                constants::DW_AT_name,
-                AttributeValue::String(name.into_bytes()),
-            );
-        }
+    if let Some(name) = dwarf_type_name(ty)
+        && !name.is_empty()
+        && name != "pointer"
+        && name != "array"
+        && name != "function"
+    {
+        unit.get_mut(die).set(
+            constants::DW_AT_name,
+            AttributeValue::String(name.into_bytes()),
+        );
     }
 
     match ty.kind.as_str() {
-        "base" => {
-            if ty.encoding.as_deref() != Some("void") {
-                let node = unit.get_mut(die);
-                node.set(
-                    constants::DW_AT_byte_size,
-                    AttributeValue::Udata(ty.size as u64),
-                );
-                node.set(
-                    constants::DW_AT_encoding,
-                    AttributeValue::Encoding(base_encoding(ty)),
-                );
-            }
+        "base" if ty.encoding.as_deref() != Some("void") => {
+            let node = unit.get_mut(die);
+            node.set(
+                constants::DW_AT_byte_size,
+                AttributeValue::Udata(ty.size as u64),
+            );
+            node.set(
+                constants::DW_AT_encoding,
+                AttributeValue::Encoding(base_encoding(ty)),
+            );
         }
+        "base" => {}
         "pointer" => {
             let node = unit.get_mut(die);
             node.set(

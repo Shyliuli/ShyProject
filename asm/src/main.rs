@@ -57,7 +57,7 @@ fn main() -> anyhow::Result<()> {
     let Ok(output_file) = File::open(&output_file_name) else {
         bail!("failed to open output file: {output_file_name}");
     };
-    obj.to_file(output_file)?;
+    obj.into_file(output_file)?;
 
     Ok(())
 }

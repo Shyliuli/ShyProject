@@ -40,7 +40,7 @@ impl std::fmt::Display for ParseRegError {
 impl std::error::Error for ParseRegError {}
 
 impl RegType {
-    pub fn from_str(s: &str) -> Result<Self, ParseRegError> {
+    pub fn parse(s: &str) -> Result<Self, ParseRegError> {
         let reg = match s.trim().to_ascii_lowercase().as_str() {
             "0x" => RegType::Regular(0x0),
             "1x" => RegType::Regular(0x1),
@@ -108,7 +108,7 @@ impl std::str::FromStr for RegType {
     type Err = ParseRegError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        RegType::from_str(s)
+        RegType::parse(s)
     }
 }
 
@@ -118,22 +118,22 @@ mod tests {
 
     #[test]
     fn parses_register_names() {
-        assert_eq!(RegType::from_str("1x"), Ok(RegType::Regular(1)));
-        assert_eq!(RegType::from_str("AX"), Ok(RegType::Regular(0xA)));
-        assert_eq!(RegType::from_str("  sp  "), Ok(RegType::SP));
+        assert_eq!(RegType::parse("1x"), Ok(RegType::Regular(1)));
+        assert_eq!(RegType::parse("AX"), Ok(RegType::Regular(0xA)));
+        assert_eq!(RegType::parse("  sp  "), Ok(RegType::SP));
         assert_eq!("ksp".parse::<RegType>(), Ok(RegType::KernelSP));
         assert_eq!("segs".parse::<RegType>(), Ok(RegType::SegmentStart));
         assert_eq!("sege".parse::<RegType>(), Ok(RegType::SegmentEnd));
-        assert_eq!(RegType::from_str("uart_data"), Ok(RegType::UartData));
-        assert!(RegType::from_str("unknown").is_err());
+        assert_eq!(RegType::parse("uart_data"), Ok(RegType::UartData));
+        assert!(RegType::parse("unknown").is_err());
     }
 
     #[test]
     fn register_names_map_to_addresses() {
-        assert_eq!(RegType::from_str("fx").unwrap().to_u32(), 0x0F);
-        assert_eq!(RegType::from_str("segs").unwrap().to_u32(), 0x11);
-        assert_eq!(RegType::from_str("m4").unwrap().to_u32(), 0x19);
-        assert_eq!(RegType::from_str("sege").unwrap().to_u32(), 0x1F);
-        assert_eq!(RegType::from_str("uart_status").unwrap().to_u32(), 0x71);
+        assert_eq!(RegType::parse("fx").unwrap().to_u32(), 0x0F);
+        assert_eq!(RegType::parse("segs").unwrap().to_u32(), 0x11);
+        assert_eq!(RegType::parse("m4").unwrap().to_u32(), 0x19);
+        assert_eq!(RegType::parse("sege").unwrap().to_u32(), 0x1F);
+        assert_eq!(RegType::parse("uart_status").unwrap().to_u32(), 0x71);
     }
 }

@@ -434,7 +434,7 @@ fn encode_binary_packet(bytes: &[u8]) -> String {
 }
 
 fn decode_bytes(hex: &str) -> Result<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         anyhow::bail!("odd-length hex byte string");
     }
     let mut out = Vec::with_capacity(hex.len() / 2);

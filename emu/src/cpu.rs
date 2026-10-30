@@ -351,7 +351,7 @@ impl Emu {
     }
 
     fn check_mem(&self, addr: u32, aligned: bool, size: usize) -> Result<usize, TrapCause> {
-        if aligned && addr % 4 != 0 {
+        if aligned && !addr.is_multiple_of(4) {
             return Err(TrapCause::IllegalAddr);
         }
         self.translate_mem(addr, size)
@@ -374,11 +374,16 @@ impl Emu {
             if watchpoint.len == 0 {
                 return None;
             }
-            let kind_matches = match (access, watchpoint.kind) {
-                (MemAccessKind::Read, WatchpointKind::Read | WatchpointKind::Access) => true,
-                (MemAccessKind::Write, WatchpointKind::Write | WatchpointKind::Access) => true,
-                _ => false,
-            };
+            let kind_matches = matches!(
+                (access, watchpoint.kind),
+                (
+                    MemAccessKind::Read,
+                    WatchpointKind::Read | WatchpointKind::Access
+                ) | (
+                    MemAccessKind::Write,
+                    WatchpointKind::Write | WatchpointKind::Access
+                )
+            );
             if !kind_matches {
                 return None;
             }
@@ -434,7 +439,7 @@ impl Emu {
         }
         let phys = self.check_mem(addr, false, 2)?;
         let s = &self.mem[phys..phys + 2];
-        Ok(u32::from(((s[0] as u32) << 8) | s[1] as u32))
+        Ok(((s[0] as u32) << 8) | s[1] as u32)
     }
 
     fn write_mem16_watched(
@@ -715,21 +720,20 @@ impl Emu {
     // ── 取指 ──────────────────────────────────────────────────────
 
     fn fetch(&mut self) -> Result<(OpType, u32, u32), FetchErr> {
-        if self.pc % 4 != 0 {
+        if !self.pc.is_multiple_of(4) {
             return Err(TrapCause::IllegalAddr);
         }
         let cache_idx = ((self.pc / 4) as usize) & (INSTR_CACHE_ENTRIES - 1);
         let user = self.is_user();
         let cache_segs = if user { self.segs } else { 0 };
         let cache_sege = if user { self.sege } else { self.mem_size };
-        if let Some(entry) = self.instr_cache[cache_idx] {
-            if entry.pc == self.pc
-                && entry.user == user
-                && entry.segs == cache_segs
-                && entry.sege == cache_sege
-            {
-                return Ok((entry.op, entry.arg1, entry.arg2));
-            }
+        if let Some(entry) = self.instr_cache[cache_idx]
+            && entry.pc == self.pc
+            && entry.user == user
+            && entry.segs == cache_segs
+            && entry.sege == cache_sege
+        {
+            return Ok((entry.op, entry.arg1, entry.arg2));
         }
 
         let base = self.translate_mem(self.pc, 12)?;
@@ -833,11 +837,11 @@ impl Emu {
             OpType::Diva => {
                 let d = r![self.r(a2, watchpoints)];
                 let n = r![self.r(a1, watchpoints)];
-                w![self.w(a1, if d == 0 { 0xFFFFFFFF } else { n / d }, watchpoints)];
+                w![self.w(a1, n.checked_div(d).unwrap_or(0xFFFFFFFF), watchpoints)];
             }
             OpType::Divn => {
                 let n = r![self.r(a1, watchpoints)];
-                w![self.w(a1, if a2 == 0 { 0xFFFFFFFF } else { n / a2 }, watchpoints)];
+                w![self.w(a1, n.checked_div(a2).unwrap_or(0xFFFFFFFF), watchpoints)];
             }
             // ── 位运算 ──
             OpType::Lsa => {

@@ -53,11 +53,11 @@ fn main() -> Result<()> {
             "--debug" => debug = true,
             "--gdb" => {
                 gdb_port = Some(1234);
-                if i + 1 < args.len() {
-                    if let Ok(port) = args[i + 1].parse::<u16>() {
-                        gdb_port = Some(port);
-                        i += 1;
-                    }
+                if i + 1 < args.len()
+                    && let Ok(port) = args[i + 1].parse::<u16>()
+                {
+                    gdb_port = Some(port);
+                    i += 1;
                 }
             }
             "--gdb-wait" => gdb_wait = true,

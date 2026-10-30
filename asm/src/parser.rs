@@ -416,11 +416,11 @@ impl Obj {
                 // 分token
                 let tokens: Vec<&str> = source.code[i].split_whitespace().collect();
                 // command
-                let command = op::OpType::from_str(tokens[0])?.to_u32();
+                let command = op::OpType::parse(tokens[0])?.to_u32();
                 // 其他token
                 let mut res: [u32; 2] = [0; 2];
 
-                for arg_i in 0..2 {
+                for (arg_i, slot) in res.iter_mut().enumerate() {
                     let Some(token) = tokens.get(arg_i + 1) else {
                         continue;
                     };
@@ -447,10 +447,10 @@ impl Obj {
                         });
                     } else if is_register_name(token) {
                         // 是寄存器
-                        res[arg_i] = reg::RegType::from_str(token)?.to_u32();
+                        *slot = reg::RegType::parse(token)?.to_u32();
                     } else if let Ok(num) = parse_u32_literal(token) {
                         // 字面值
-                        res[arg_i] = num;
+                        *slot = num;
                     }
                     // label之类的 先统一解析为symbol
                     else if let Some((base, addend)) =
@@ -605,8 +605,9 @@ impl Obj {
                 else if let Some(array) =
                     value.strip_prefix("[").and_then(|s| s.strip_suffix("]"))
                 {
-                    let mut offset = write_offset;
-                    for item in array.split(",").map(str::trim).filter(|s| !s.is_empty()) {
+                    for (offset, item) in (write_offset..)
+                        .zip(array.split(",").map(str::trim).filter(|s| !s.is_empty()))
+                    {
                         let num = parse_u32_literal(item)?;
                         if num > u8::MAX as u32 {
                             bail!("byte array item out of range: {item}");
@@ -615,7 +616,6 @@ impl Obj {
                             section.bytes.resize(offset + 1, 0);
                         }
                         section.bytes[offset] = num as u8;
-                        offset += 1;
                     }
                 }
                 // 写入数字
@@ -673,7 +673,7 @@ impl Obj {
         })
     }
     /*AIGC:codex*/
-    pub fn to_file(self, mut f: shyfile::File) -> Result<()> {
+    pub fn into_file(self, mut f: shyfile::File) -> Result<()> {
         const MAGIC: u32 = 0x66CCFF00;
         const HEADER_SIZE: usize = 24;
 
@@ -891,7 +891,7 @@ mod tests {
         };
 
         let file = shyfile::File::open(&path).unwrap();
-        obj.to_file(file).unwrap();
+        obj.into_file(file).unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
         let _ = std::fs::remove_file(&path);

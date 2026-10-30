@@ -102,7 +102,7 @@ impl std::fmt::Display for ParseOpError {
 impl std::error::Error for ParseOpError {}
 
 impl OpType {
-    pub fn from_str(s: &str) -> Result<Self, ParseOpError> {
+    pub fn parse(s: &str) -> Result<Self, ParseOpError> {
         let op = match s.trim().to_ascii_lowercase().as_str() {
             "adda" => OpType::Adda,
             "addn" => OpType::Addn,
@@ -252,7 +252,7 @@ impl std::str::FromStr for OpType {
     type Err = ParseOpError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        OpType::from_str(s)
+        OpType::parse(s)
     }
 }
 
@@ -277,12 +277,12 @@ mod tests {
 
     #[test]
     fn parses_opcode_names() {
-        assert_eq!(OpType::from_str("addn"), Ok(OpType::Addn));
-        assert_eq!(OpType::from_str("CALLN"), Ok(OpType::Calln));
-        assert_eq!(OpType::from_str("  ret  "), Ok(OpType::Ret));
+        assert_eq!(OpType::parse("addn"), Ok(OpType::Addn));
+        assert_eq!(OpType::parse("CALLN"), Ok(OpType::Calln));
+        assert_eq!(OpType::parse("  ret  "), Ok(OpType::Ret));
         assert_eq!("oututfa".parse::<OpType>(), Ok(OpType::Oututfa));
         assert_eq!("fence.i".parse::<OpType>(), Ok(OpType::Fencei));
         assert_eq!("enteruser".parse::<OpType>(), Ok(OpType::EnterUser));
-        assert!(OpType::from_str("unknown").is_err());
+        assert!(OpType::parse("unknown").is_err());
     }
 }
