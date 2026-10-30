@@ -1243,6 +1243,42 @@ impl FnLower<'_> {
         }
     }
 
+    /// The record an object denotes and its address.
+    ///
+    /// ShyC dereferences automatically, so a member access on a pointer reaches
+    /// the record through any number of pointer levels: `p.b` on `T ***p` is
+    /// `(*(*(*p))).b`.
+    pub(super) fn record_and_address(
+        &mut self,
+        object_value: ExprVal,
+        span: Span,
+    ) -> Result<(TypeId, ir::Address), Diagnostic> {
+        let mut ty = object_value.ty;
+        let mut value = object_value;
+        while !self.l.types.is_record(ty) {
+            let Some(pointee) = self.l.pointee(ty) else {
+                return Err(Diagnostic::new(
+                    span,
+                    "member access needs a struct or union",
+                ));
+            };
+            let (operand, _) = self.rvalue_val(value, span)?;
+            let address = super::address_operand(operand);
+            if self.l.types.is_record(pointee.ty) {
+                return Ok((pointee.ty, address));
+            }
+            // Still a pointer: load it and continue.
+            let loaded = self.load_value(address, pointee.ty, Qualifiers::NONE);
+            ty = pointee.ty;
+            value = ExprVal {
+                ty,
+                qualifiers: Qualifiers::NONE,
+                kind: ExprKind::Value(loaded),
+            };
+        }
+        Ok((ty, self.object_address(value, span)?))
+    }
+
     fn pointer_offset(
         &mut self,
         base: ir::Operand,
@@ -1500,6 +1536,25 @@ impl FnLower<'_> {
         {
             return self.raii_assign(local, left, right, span);
         }
+        if let ast::Expr::Member { object, name, .. } = left
+            && self
+                .type_of(object)
+                .ok()
+                .and_then(|object_ty| {
+                    let record = if self.l.types.is_record(object_ty) {
+                        object_ty
+                    } else {
+                        self.l.pointee(object_ty)?.ty
+                    };
+                    self.l.bit_field(record, &name.text)
+                })
+                .is_some()
+        {
+            return Err(Diagnostic::new(
+                span,
+                "writing a bit-field is not supported yet",
+            ));
+        }
         let left_value = self.lower_expr(left)?;
         let (address, ty, qualifiers) = self.place_of(left_value, span)?;
         if qualifiers.is_const {
@@ -1627,31 +1682,9 @@ impl FnLower<'_> {
                 "`->` needs a pointer to a struct or union",
             ));
         }
-        let (record, address) = if self.l.types.is_record(object_ty) {
-            let address = self.object_address(object_value, span)?;
-            (object_ty, address)
-        } else if let Some(pointee) = self.l.pointee(object_ty) {
-            if !self.l.types.is_record(pointee.ty) {
-                return Err(Diagnostic::new(
-                    span,
-                    "member access needs a struct or union",
-                ));
-            }
-            let (operand, _) = self.rvalue_val(
-                ExprVal {
-                    ty: object_ty,
-                    qualifiers: object_value.qualifiers,
-                    kind: object_value.kind,
-                },
-                span,
-            )?;
-            (pointee.ty, super::address_operand(operand))
-        } else {
-            return Err(Diagnostic::new(
-                span,
-                "member access needs a struct or union",
-            ));
-        };
+        // ShyC dereferences automatically: `p.field` on a pointer means
+        // `(*p).field`, the same as `p->field`.
+        let (record, address) = self.record_and_address(object_value, span)?;
         let (field_ty, offset) = self.l.field_of(record, &name.text, name.span)?;
         let field_qualifiers = self.l.field_qualifiers(record, &name.text);
         let qualifiers = Qualifiers {
