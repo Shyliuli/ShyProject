@@ -23,14 +23,24 @@ enum InputKind {
     Obj,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    /// The local chibicc fork, which is the default.
+    Chibicc,
+    /// The independent `shyc` compiler.
+    Shyc,
+}
+
 struct Options {
     stage: Stage,
+    backend: Backend,
     output: Option<PathBuf>,
     sym: Option<PathBuf>,
     save_temps: bool,
     print_only: bool,
     emit_source_lines: bool,
+    /// `-nostdlib` / `-nodefaultlibs`: do not add libshy or the float runtime.
+    no_default_libs: bool,
     emit_debug_info: bool,
     compile_args: Vec<String>,
     inputs: Vec<String>,
@@ -79,11 +89,17 @@ fn main() -> Result<()> {
 fn parse_args(args: Vec<String>) -> Result<Options> {
     let mut opts = Options {
         stage: Stage::Link,
+        backend: match env::var("SHYCC_BACKEND").as_deref() {
+            Ok("shyc") => Backend::Shyc,
+            Ok("chibicc") | Err(_) => Backend::Chibicc,
+            Ok(other) => bail!("unknown SHYCC_BACKEND: {other}"),
+        },
         output: None,
         sym: None,
         save_temps: false,
         print_only: false,
         emit_source_lines: false,
+        no_default_libs: false,
         emit_debug_info: false,
         compile_args: Vec::new(),
         inputs: Vec::new(),
@@ -98,6 +114,18 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                 print_usage();
                 std::process::exit(0);
             }
+            "--backend" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    bail!("option `--backend` requires an argument");
+                };
+                opts.backend = match value.as_str() {
+                    "chibicc" => Backend::Chibicc,
+                    "shyc" => Backend::Shyc,
+                    other => bail!("unknown backend: {other}"),
+                };
+            }
+            "-nostdlib" | "-nodefaultlibs" | "-nolibc" => opts.no_default_libs = true,
             "-###" => opts.print_only = true,
             "-save-temps" | "--save-temps" => opts.save_temps = true,
             "-E" => opts.stage = Stage::Preprocess,
@@ -227,7 +255,7 @@ fn run(opts: Options) -> Result<()> {
         for input in &opts.inputs {
             ensure_kind(input, InputKind::C)?;
             let output = opts.output.clone();
-            run_chibicc(&repo, &opts, input, output.as_deref(), true, false)?;
+            run_compiler(&repo, &opts, input, output.as_deref(), true, false)?;
         }
         return Ok(());
     }
@@ -246,7 +274,7 @@ fn run(opts: Options) -> Result<()> {
                 } else {
                     temps.temp_path(".shy")
                 };
-                run_chibicc(&repo, &opts, input, Some(&asm), false, false)?;
+                run_compiler(&repo, &opts, input, Some(&asm), false, false)?;
                 collect_debug_input(&opts, &mut temps, &mut debug_inputs, &asm)?;
                 if opts.stage == Stage::Asm {
                     continue;
@@ -301,7 +329,20 @@ fn run(opts: Options) -> Result<()> {
         return Ok(());
     }
 
-    for lib in &opts.libs {
+    // libshy and the soft-float runtime are the target's C library and are
+    // linked by default, the way a hosted compiler links libc. `-nostdlib`
+    // and `-nodefaultlibs` turn that off, and an explicit `-l` is not
+    // duplicated.
+    let mut libraries: Vec<String> = opts.libs.clone();
+    if !opts.no_default_libs {
+        for default in ["libshy", "float"] {
+            if !libraries.iter().any(|lib| lib == default) {
+                libraries.push(default.to_string());
+            }
+        }
+    }
+
+    for lib in &libraries {
         match lib.as_str() {
             "libshy" => objects.push(build_libshy(&repo, &opts, &mut temps)?),
             "float" => objects.push(build_float_lib(&repo, &opts, &mut temps)?),
@@ -327,6 +368,76 @@ fn run(opts: Options) -> Result<()> {
         run_shy_dwarf(&repo, &opts, &debug_inputs, sym, &debug_elf)?;
     }
     Ok(())
+}
+
+fn run_compiler(
+    repo: &Path,
+    opts: &Options,
+    input: &str,
+    output: Option<&Path>,
+    preprocess_only: bool,
+    link_runtime: bool,
+) -> Result<()> {
+    match opts.backend {
+        Backend::Chibicc => run_chibicc(repo, opts, input, output, preprocess_only, link_runtime),
+        Backend::Shyc => run_shyc(repo, opts, input, output, preprocess_only),
+    }
+}
+
+/// Drive the independent compiler. It has no equivalent of chibicc's extra
+/// flags: the runtime is linked as a normal object and source lines are not
+/// emitted yet.
+fn run_shyc(
+    repo: &Path,
+    opts: &Options,
+    input: &str,
+    output: Option<&Path>,
+    preprocess_only: bool,
+) -> Result<()> {
+    let mut cmd = shyc_command(repo, opts.print_only)?;
+    if preprocess_only {
+        cmd.arg("-E");
+    } else {
+        cmd.arg("-S");
+    }
+    cmd.arg(format!("-I{}", repo.join("libshy/include").display()));
+    for arg in &opts.compile_args {
+        // Only the options the new driver understands are forwarded.
+        if arg.starts_with("-I") || arg.starts_with("-D") || arg.starts_with("-U") {
+            cmd.arg(arg);
+        }
+    }
+    if let Some(output) = output {
+        cmd.arg("-o").arg(output);
+    }
+    cmd.arg(input);
+    run_command(opts, &mut cmd)
+}
+
+fn shyc_command(repo: &Path, print_only: bool) -> Result<Command> {
+    if let Ok(path) = env::var("SHYCC_SHYC") {
+        return Ok(Command::new(path));
+    }
+    if let Ok(current) = env::current_exe()
+        && let Some(dir) = current.parent()
+    {
+        let sibling = dir.join("shyc");
+        if sibling.exists() {
+            return Ok(Command::new(sibling));
+        }
+    }
+    let built = repo.join("target/release/shyc");
+    if built.exists() || print_only {
+        return Ok(Command::new(built));
+    }
+    let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    cmd.current_dir(repo)
+        .arg("run")
+        .arg("-q")
+        .arg("-p")
+        .arg("shyc")
+        .arg("--");
+    Ok(cmd)
 }
 
 fn run_chibicc(
@@ -453,7 +564,7 @@ fn build_float_lib(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result
     };
 
     let input = runtime_c.to_string_lossy().into_owned();
-    run_chibicc(repo, opts, &input, Some(&asm), false, true)?;
+    run_compiler(repo, opts, &input, Some(&asm), false, true)?;
     run_asm(repo, opts, &asm, &obj)?;
     Ok(obj)
 }
@@ -489,12 +600,12 @@ fn tool_command(repo: &Path, package: &str, installed_name: &str) -> Command {
         return Command::new(path);
     }
 
-    if let Ok(current) = env::current_exe() {
-        if let Some(dir) = current.parent() {
-            let sibling = dir.join(installed_name);
-            if sibling.exists() {
-                return Command::new(sibling);
-            }
+    if let Ok(current) = env::current_exe()
+        && let Some(dir) = current.parent()
+    {
+        let sibling = dir.join(installed_name);
+        if sibling.exists() {
+            return Command::new(sibling);
         }
     }
 
@@ -513,12 +624,12 @@ fn chibicc_path(repo: &Path, print_only: bool) -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
 
-    if let Ok(current) = env::current_exe() {
-        if let Some(dir) = current.parent() {
-            let sibling = dir.join("chibicc");
-            if sibling.exists() {
-                return Ok(sibling);
-            }
+    if let Ok(current) = env::current_exe()
+        && let Some(dir) = current.parent()
+    {
+        let sibling = dir.join("chibicc");
+        if sibling.exists() {
+            return Ok(sibling);
         }
     }
 
@@ -634,6 +745,9 @@ fn print_usage() {
          outputs: -o <file>, --sym <file>, -save-temps, -###\n\
          debug: --shy-emit-source-lines, --shy-emit-debug-info\n\
          inputs: .shyc/.c, .shy, .sobj\n\
-         libraries: -llibshy, -lfloat"
+         backend: --backend chibicc|shyc (default chibicc)\n\
+         libraries: libshy and the soft-float runtime are linked by default;\n\
+         \x20 -nostdlib/-nodefaultlibs disables that, -llibshy and -lfloat\n\
+         \x20 are accepted and never duplicated"
     );
 }

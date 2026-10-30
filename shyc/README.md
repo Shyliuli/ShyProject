@@ -46,6 +46,19 @@ Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `-O0`..`-O3`,
 `--target <triple>`. `#![no_main]`, `#![mem(...)]`, and `#![stack(...)]` are
 honoured, and the resource hints reach the linked image.
 
+## Linking policy
+
+The two targets have different C libraries, so `shycc` keeps one policy per
+backend:
+
+| Backend | Default | Opt out | Extra library |
+|---|---|---|---|
+| Shy (`--backend shyc`, `-S`) | libshy + soft-float runtime | `-nostdlib`, `-nodefaultlibs` | `-llibshy`, `-lfloat` (never duplicated) |
+| LLVM (`--emit=llvm`) | the host libc, linked by `clang` | `-nostdlib` | `-llibshy` is not supported yet: libshy uses ShyISA inline assembly |
+
+Emitted LLVM IR is one translation unit, so linking stays with the host
+compiler and its default C library.
+
 ## Status
 
 Working: integers, pointers, arrays, structs and unions, enums, control flow,
