@@ -81,11 +81,21 @@ impl Body<'_> {
         let layout = self.options.layout;
         let ret = function.signature.ret;
         let sret = self.abi.by_reference(ret, layout);
-        let mut signature = format!(
-            "define {} {}(",
-            if sret { "void".to_string() } else { ty(ret) },
-            symbol(&function.name)
-        );
+        let ret_chunks = self.abi.chunks(ret, layout);
+        let ret_text = match (&ret_chunks, sret) {
+            (_, true) => "void".to_string(),
+            (Some(chunks), false) if chunks.len() > 1 => format!(
+                "{{ {} }}",
+                chunks
+                    .iter()
+                    .map(|chunk| chunk.llvm_type())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            (Some(chunks), false) => chunks[0].llvm_type(),
+            _ => ty(ret),
+        };
+        let mut signature = format!("define {ret_text} {}(", symbol(&function.name));
         let mut first = true;
         if sret {
             signature.push_str(&format!(
@@ -106,6 +116,20 @@ impl Body<'_> {
                 .get(index)
                 .copied()
                 .unwrap_or_else(|| function.value_type(*value));
+            if let Some(chunks) = self.abi.chunks(param_ty, layout) {
+                for (chunk_index, chunk) in chunks.iter().enumerate() {
+                    if chunk_index > 0 {
+                        signature.push_str(", ");
+                    }
+                    signature.push_str(&format!(
+                        "{} {}.{}",
+                        chunk.llvm_type(),
+                        self.value(*value),
+                        chunk_index
+                    ));
+                }
+                continue;
+            }
             if self.abi.by_reference(param_ty, layout) {
                 if self.abi.copies() {
                     signature.push_str(&format!(
@@ -187,7 +211,7 @@ impl Body<'_> {
             .params
             .iter()
             .enumerate()
-            .filter_map(|(index, value)| {
+            .map(|(index, value)| {
                 let param_ty = self
                     .function
                     .signature
@@ -195,19 +219,41 @@ impl Body<'_> {
                     .get(index)
                     .copied()
                     .unwrap_or_else(|| self.function.value_type(*value));
-                self.abi
-                    .by_reference(param_ty, layout)
-                    .then_some((*value, param_ty))
+                (*value, param_ty)
             })
             .collect();
         for (value, param_ty) in params {
-            let text = format!(
-                "{} = load {}, ptr %arg{}",
-                self.value(value),
-                super::abi::array(param_ty, layout),
-                value.0
-            );
-            self.w.line(text);
+            if let Some(chunks) = self.abi.chunks(param_ty, layout) {
+                // Rebuild the object from one register per eightbyte.
+                let slot = self.temp();
+                self.w.line(format!(
+                    "{slot} = alloca [{} x i8], align {}",
+                    param_ty.size(layout).unwrap_or(0).div_ceil(8) * 8,
+                    param_ty.align(layout).unwrap_or(1).max(1)
+                ));
+                for (index, chunk) in chunks.iter().enumerate() {
+                    let piece = format!("{}.{}", self.value(value), index);
+                    let address = self.chunk_address(&slot, chunk.offset);
+                    self.w.line(format!(
+                        "store {} {piece}, ptr {address}",
+                        chunk.llvm_type()
+                    ));
+                }
+                self.w.line(format!(
+                    "{} = load {}, ptr {slot}",
+                    self.value(value),
+                    super::abi::array(param_ty, layout)
+                ));
+                continue;
+            }
+            if self.abi.by_reference(param_ty, layout) {
+                self.w.line(format!(
+                    "{} = load {}, ptr %arg{}",
+                    self.value(value),
+                    super::abi::array(param_ty, layout),
+                    value.0
+                ));
+            }
         }
     }
 
@@ -561,6 +607,18 @@ impl Body<'_> {
                 self.function.name
             ),
         )
+    }
+
+    /// Address of one eightbyte inside a scratch slot.
+    fn chunk_address(&mut self, slot: &str, offset: u32) -> String {
+        if offset == 0 {
+            return slot.to_string();
+        }
+        let address = self.temp();
+        self.w.line(format!(
+            "{address} = getelementptr i8, ptr {slot}, i64 {offset}"
+        ));
+        address
     }
 
     fn natural_align(&self, ty: Type) -> u32 {

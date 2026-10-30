@@ -28,7 +28,60 @@ pub(super) fn kind(triple: &str) -> Kind {
     }
 }
 
+/// One register-sized piece of a small aggregate.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Chunk {
+    pub offset: u32,
+    pub size: u32,
+    pub float: bool,
+}
+
+impl Chunk {
+    /// The LLVM type that carries this piece in its register.
+    pub(super) fn llvm_type(self) -> String {
+        if self.float {
+            if self.size > 4 {
+                "double".to_string()
+            } else {
+                "float".to_string()
+            }
+        } else {
+            match self.size {
+                1 => "i8".to_string(),
+                2 => "i16".to_string(),
+                3 | 4 => "i32".to_string(),
+                _ => "i64".to_string(),
+            }
+        }
+    }
+}
+
 impl Kind {
+    /// Split a small aggregate into its eightbytes, System V style.
+    ///
+    /// `None` keeps the IR form: the value is a scalar or memory, or the
+    /// target classifies small aggregates by rules this backend does not
+    /// model yet.
+    pub(super) fn chunks(self, ty: Type, layout: Layout) -> Option<Vec<Chunk>> {
+        if self != Kind::SysV || !ty.is_aggregate() {
+            return None;
+        }
+        let size = ty.size(layout)?;
+        if size == 0 || size > 16 {
+            return None;
+        }
+        let floats = ty.aggregate_floats();
+        Some(
+            (0..size.div_ceil(8))
+                .map(|index| Chunk {
+                    offset: index * 8,
+                    size: size.saturating_sub(index * 8).min(8),
+                    float: floats & (1 << index) != 0,
+                })
+                .collect(),
+        )
+    }
+
     /// Aggregates over two eightbytes travel as a pointer instead of a value.
     pub(super) fn by_reference(self, ty: Type, layout: Layout) -> bool {
         ty.is_aggregate() && ty.size(layout).unwrap_or(0) > 16

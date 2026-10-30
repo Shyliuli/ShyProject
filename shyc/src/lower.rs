@@ -228,10 +228,66 @@ impl Lowerer {
             TypeKind::Float32 => ir::Type::F32,
             TypeKind::Float64 => ir::Type::F64,
             TypeKind::Pointer { .. } | TypeKind::Function { .. } => ir::Type::Ptr,
-            TypeKind::Array { .. } | TypeKind::Record { .. } => ir::Type::aggregate(
+            TypeKind::Array { .. } | TypeKind::Record { .. } => ir::Type::aggregate_classified(
                 self.types.size_of(ty).unwrap_or(0),
                 self.types.align_of(ty).unwrap_or(1),
+                self.float_eightbytes(ty),
             ),
+        }
+    }
+
+    /// Which eightbytes of an aggregate hold only floating-point fields.
+    ///
+    /// System V passes those in SSE registers, so the C ABI needs this to split
+    /// a small aggregate. An eightbyte that also contains an integer field is
+    /// an integer eightbyte, and only the first two matter: larger aggregates
+    /// are memory.
+    fn float_eightbytes(&self, ty: TypeId) -> u8 {
+        let mut integer = 0u8;
+        let mut float = 0u8;
+        self.walk_leaves(ty, 0, &mut integer, &mut float);
+        float & !integer
+    }
+
+    fn walk_leaves(&self, ty: TypeId, base: u32, integer: &mut u8, float: &mut u8) {
+        let size = self.types.size_of(ty).unwrap_or(0);
+        if size == 0 || base >= 16 {
+            return;
+        }
+        let first = base / 8;
+        let last = (base + size - 1) / 8;
+        let span = |mask: &mut u8| {
+            for eightbyte in first..=last.min(1) {
+                *mask |= 1 << eightbyte;
+            }
+        };
+        match self.types.kind(ty) {
+            TypeKind::Float32 | TypeKind::Float64 => span(float),
+            TypeKind::Array { element, len } => {
+                let Some(len) = len else { return };
+                let element_ty = element.ty;
+                let element_size = self.types.size_of(element_ty).unwrap_or(0).max(1);
+                for index in 0..*len {
+                    if base + index * element_size >= 16 {
+                        break;
+                    }
+                    self.walk_leaves(element_ty, base + index * element_size, integer, float);
+                }
+            }
+            TypeKind::Record { .. } => {
+                let Some(info) = self.types.record_info(ty) else {
+                    return;
+                };
+                let fields: Vec<(u32, TypeId)> = info
+                    .fields
+                    .iter()
+                    .map(|field| (field.offset, field.ty.ty))
+                    .collect();
+                for (offset, field_ty) in fields {
+                    self.walk_leaves(field_ty, base + offset, integer, float);
+                }
+            }
+            _ => span(integer),
         }
     }
 

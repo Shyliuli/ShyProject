@@ -339,6 +339,29 @@ impl Body<'_> {
                 .get(index)
                 .copied()
                 .unwrap_or_else(|| self.function.operand_type(*argument));
+            if let Some(chunks) = self.abi.chunks(wanted, layout) {
+                // Pass one register per eightbyte, loaded from a scratch copy.
+                let slot = self.temp();
+                let value = self.as_untyped(*argument, wanted)?;
+                self.w.line(format!(
+                    "{slot} = alloca [{} x i8], align {}",
+                    wanted.size(layout).unwrap_or(0).div_ceil(8) * 8,
+                    wanted.align(layout).unwrap_or(1).max(1)
+                ));
+                self.w
+                    .line(format!("store {} {value}, ptr {slot}", ty(wanted)));
+                for (index, chunk) in chunks.iter().enumerate() {
+                    let address = self.chunk_address(&slot, chunk.offset);
+                    let piece = self.temp();
+                    self.w.line(format!(
+                        "{piece} = load {}, ptr {address}",
+                        chunk.llvm_type()
+                    ));
+                    arguments.push(format!("{} {piece}", chunk.llvm_type()));
+                    let _ = index;
+                }
+                continue;
+            }
             if self.abi.by_reference(wanted, layout) {
                 // A memory argument is a pointer; the value lives in a scratch
                 // slot so the callee sees the IR aggregate as one object.
@@ -370,6 +393,49 @@ impl Body<'_> {
             let prefix = self.result_prefix(inst, "call")?;
             self.w
                 .line(format!("{prefix}load {}, ptr {buffer}", ty(ret)));
+            return Ok(());
+        }
+        if let Some(chunks) = self.abi.chunks(ret, layout) {
+            let ret_text = if chunks.len() > 1 {
+                format!(
+                    "{{ {} }}",
+                    chunks
+                        .iter()
+                        .map(|chunk| chunk.llvm_type())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                chunks[0].llvm_type()
+            };
+            let returned = self.temp();
+            self.w.line(format!(
+                "{returned} = call {ret_text} {callee}({arguments})"
+            ));
+            let slot = self.temp();
+            self.w.line(format!(
+                "{slot} = alloca [{} x i8], align {}",
+                ret.size(layout).unwrap_or(0).div_ceil(8) * 8,
+                ret.align(layout).unwrap_or(1).max(1)
+            ));
+            for (index, chunk) in chunks.iter().enumerate() {
+                let piece = if chunks.len() > 1 {
+                    let piece = self.temp();
+                    self.w.line(format!(
+                        "{piece} = extractvalue {ret_text} {returned}, {index}"
+                    ));
+                    piece
+                } else {
+                    returned.clone()
+                };
+                let address = self.chunk_address(&slot, chunk.offset);
+                self.w.line(format!(
+                    "store {} {piece}, ptr {address}",
+                    chunk.llvm_type()
+                ));
+            }
+            let prefix = self.result_prefix(inst, "call")?;
+            self.w.line(format!("{prefix}load {}, ptr {slot}", ty(ret)));
             return Ok(());
         }
         let text = if call.signature.variadic {
@@ -542,7 +608,49 @@ impl Body<'_> {
                         ));
                     };
                     let value = self.as_untyped(*value, ret)?;
-                    if self.abi.by_reference(ret, self.options.layout) {
+                    if let Some(chunks) = self.abi.chunks(ret, self.options.layout) {
+                        let slot = self.temp();
+                        self.w.line(format!(
+                            "{slot} = alloca [{} x i8], align {}",
+                            ret.size(self.options.layout).unwrap_or(0).div_ceil(8) * 8,
+                            ret.align(self.options.layout).unwrap_or(1).max(1)
+                        ));
+                        self.w
+                            .line(format!("store {} {value}, ptr {slot}", ty(ret)));
+                        let pieces: Vec<String> = chunks
+                            .iter()
+                            .map(|chunk| {
+                                let address = self.chunk_address(&slot, chunk.offset);
+                                let piece = self.temp();
+                                self.w.line(format!(
+                                    "{piece} = load {}, ptr {address}",
+                                    chunk.llvm_type()
+                                ));
+                                format!("{} {piece}", chunk.llvm_type())
+                            })
+                            .collect();
+                        let return_ty = chunks
+                            .iter()
+                            .map(|chunk| chunk.llvm_type())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        if pieces.len() == 1 {
+                            self.w.line(format!("ret {}", pieces[0]));
+                        } else {
+                            // LLVM only accepts constant aggregate literals as
+                            // operands, so a computed struct is assembled with
+                            // `insertvalue`.
+                            let mut aggregate = "undef".to_string();
+                            for (index, piece) in pieces.iter().enumerate() {
+                                let next = self.temp();
+                                self.w.line(format!(
+                                    "{next} = insertvalue {{ {return_ty} }} {aggregate}, {piece}, {index}"
+                                ));
+                                aggregate = next;
+                            }
+                            self.w.line(format!("ret {{ {return_ty} }} {aggregate}"));
+                        }
+                    } else if self.abi.by_reference(ret, self.options.layout) {
                         self.w.line(format!("store {} {value}, ptr %sret", ty(ret)));
                         self.w.line("ret void");
                     } else {

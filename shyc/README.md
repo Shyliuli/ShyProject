@@ -70,9 +70,12 @@ and returned through a hidden `sret` pointer. Verified in both directions
 against clang: our code calling a clang-built `sum_big(struct Big)` and
 `make_big(int)`, and clang calling ours.
 
-Smaller aggregates are still passed as opaque `[N x i8]` values, because the IR
-records an aggregate only as `(size, align)` and System V classifies those per
-eightbyte.
+On System V, smaller aggregates are split per eightbyte: each piece goes in an
+integer or an SSE register, and multi-register returns are assembled with
+`insertvalue`. The IR carries the one fact that needs field knowledge, a mask
+of which eightbytes are floating point only; `int`+`float` is an integer
+eightbyte, `float`+`float` is an SSE one. AArch64, RISC-V, and LoongArch still
+pass small aggregates as opaque byte arrays.
 
 ## Status
 

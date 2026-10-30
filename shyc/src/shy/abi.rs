@@ -51,7 +51,7 @@ fn abi_type(ty: Type, layout: Layout) -> AbiType {
         },
         // `abi-plan` recognises Struct/Union as aggregate but keeps Opaque as a
         // scalar shape, so an IR aggregate must become a field-less Struct.
-        Type::Aggregate { size, align } => AbiType::Struct {
+        Type::Aggregate { size, align, .. } => AbiType::Struct {
             fields: Vec::new(),
             size,
             align: align as u16,

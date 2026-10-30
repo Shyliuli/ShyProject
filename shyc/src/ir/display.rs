@@ -36,7 +36,7 @@ impl fmt::Display for Type {
             Type::F32 => f.write_str("f32"),
             Type::F64 => f.write_str("f64"),
             Type::Ptr => f.write_str("ptr"),
-            Type::Aggregate { size, align } => {
+            Type::Aggregate { size, align, .. } => {
                 write!(f, "aggregate({}, align {})", size, align)
             }
         }
