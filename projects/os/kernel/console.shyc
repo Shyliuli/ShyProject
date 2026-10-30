@@ -1,5 +1,76 @@
 #![no_main]
 
+#ifdef SHYOS_RISCV
+/* QEMU virt: NS16550 UART at 0x10000000. */
+#define UART_THR 0x10000000
+#define UART_LSR 0x10000005
+
+void uart_putc(int c) {
+    volatile unsigned char *lsr = (volatile unsigned char *)UART_LSR;
+    volatile unsigned char *thr = (volatile unsigned char *)UART_THR;
+
+    while ((*lsr & 0x20) == 0) {
+    }
+    *thr = (unsigned char)c;
+}
+
+int uart_getc(void) {
+    volatile unsigned char *lsr = (volatile unsigned char *)UART_LSR;
+    volatile unsigned char *rbr = (volatile unsigned char *)UART_THR;
+
+    if ((*lsr & 1) == 0) {
+        return -1;
+    }
+    return (int)*rbr;
+}
+
+void user_exit(void) {
+    char *msg = "ShyOS user exit\n";
+
+    for (int i = 0; msg[i]; i++) {
+        uart_putc(msg[i]);
+    }
+    machine_shutdown();
+}
+
+void trap_unexpected(void) {
+    char *msg = "ShyOS unexpected trap\n";
+
+    for (int i = 0; msg[i]; i++) {
+        uart_putc(msg[i]);
+    }
+    machine_shutdown();
+}
+
+void panic(char *msg) {
+    char *prefix = "panic: ";
+
+    for (int i = 0; prefix[i]; i++) {
+        uart_putc(prefix[i]);
+    }
+    if (msg) {
+        for (int i = 0; msg[i]; i++) {
+            uart_putc(msg[i]);
+        }
+    }
+    uart_putc('\n');
+
+    machine_shutdown();
+    for (;;) {
+    }
+}
+
+/* QEMU virt powers off through the SiFive test device at 0x100000. */
+void machine_shutdown(void) {
+    volatile unsigned int *test = (volatile unsigned int *)0x100000;
+
+    *test = 0x5555;
+    for (;;) {
+    }
+}
+
+#else
+
 void uart_putc(int c) {
     asm!(c) {
         "oututfa {c}"
@@ -42,3 +113,5 @@ void panic(char *msg) {
     for (;;) {
     }
 }
+
+#endif

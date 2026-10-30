@@ -1,5 +1,33 @@
 #![no_main]
 
+#ifdef SHYOS_RISCV
+void uart_putc(int c);
+void user_enter(void *entry, void *user_sp, void *kernel_sp);
+void user_main(void);
+
+extern unsigned char boot_stack_top;
+extern unsigned char user_stack_top;
+
+void kmain(void) {
+    char *banner = "ShyOS boot\n";
+
+    for (int i = 0; banner[i]; i++) {
+        uart_putc(banner[i]);
+    }
+
+    /* Same shape as ShyISA `enteruser`: drop to user mode at a fresh stack. */
+    user_enter((void *)user_main, (void *)&user_stack_top,
+               (void *)&boot_stack_top);
+}
+
+void user_main(void) {
+    for (;;) {
+        asm("li a7, 1\necall");
+    }
+}
+
+#else
+
 #include <stdint.shyh>
 #include "fs.h"
 #include "proc.h"
@@ -73,3 +101,5 @@ void kmain(void) {
     // Never returns.
     scheduler();
 }
+
+#endif

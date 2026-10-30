@@ -27,6 +27,28 @@ layout is backed by a different physical segment for each process.
 
 Current user programs declare their own stack size; `stackbig` declares 16 KiB and is used by the integration test to verify that the kernel does not rely on a fixed stack location.
 
+## RISC-V port
+
+`make -C projects/os riscv` builds the same kernel core for RISC-V and
+`riscv_test` boots it under QEMU:
+
+```sh
+make -C projects/os riscv_test
+```
+
+OpenSBI leaves the kernel in S-mode at `0x80200000`; `arch/riscv/boot.S` sets
+`stvec`, prints the banner through the NS16550 UART, then enters U-mode the way
+`enteruser` does on ShyISA. The user program issues `ecall`, the trap handler
+recognises it and powers the machine off. Output:
+
+```
+ShyOS boot
+ShyOS user exit
+```
+
+Only the boot, console, and user-entry path is ported so far: the process
+table, file system, and scheduler still use ShyISA segments and registers.
+
 ## Build
 
 From the repository root:

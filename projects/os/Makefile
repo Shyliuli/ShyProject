@@ -40,7 +40,7 @@ KERNEL_OBJS = \
 	$(KERNEL_TARGET)/kmain.sobj \
 	$(FS_TARGET)/fsdata.sobj
 
-.PHONY: build run test clean dirs small_mem small_run
+.PHONY: build run test clean dirs small_mem small_run riscv riscv_run riscv_test
 
 build: $(KERNEL_SFS)
 
@@ -112,6 +112,32 @@ test: $(KERNEL_SFS)
 	grep -F 'p7malloc ok' "$$p7_out" >/dev/null; \
 	test "$$(tail -c 2 "$$p7_out")" = '$$ '; \
 	echo "integration tests passed"
+
+# RISC-V port: same console/kernel core, machine-mode boot without a firmware.
+RISCV_TARGET = target/riscv
+RISCV_ELF = $(RISCV_TARGET)/kernel.elf
+RISCV_SRCS = arch/riscv/boot.S kernel/kmain.shyc kernel/console.shyc
+RISCV_LD = arch/riscv/kernel.ld
+
+riscv: $(RISCV_ELF)
+
+$(RISCV_ELF): $(RISCV_SRCS) $(RISCV_LD) | dirs
+	mkdir -p $(RISCV_TARGET)
+	$(SHYCC) --target=riscv64-unknown-none -DSHYOS_RISCV \
+		-Wl,-T,arch/riscv/kernel.ld \
+		-o $@ $(RISCV_SRCS)
+
+riscv_run: riscv
+	qemu-system-riscv64 -M virt -kernel $(RISCV_ELF) -nographic
+
+riscv_test: riscv
+	@set -eu; \
+	out=$(RISCV_TARGET)/boot-output.txt; \
+	timeout 20 qemu-system-riscv64 -M virt -kernel $(RISCV_ELF) -nographic > $$out; \
+	grep -Fx 'ShyOS boot' $$out >/dev/null; \
+	grep -Fx 'ShyOS user exit' $$out >/dev/null; \
+	cat $$out; \
+	echo "riscv boot test passed"
 
 dirs:
 	mkdir -p $(KERNEL_TARGET) $(USER_TARGET) $(FS_TARGET)

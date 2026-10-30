@@ -10,12 +10,13 @@ CHIBICC := third_party/chibicc/chibicc
 .PHONY: bin install-bin clean-bin test cargo-test test-chibicc-shy os-build os-run
 
 bin: $(BIN_DIR)
-	$(CARGO) build --release -p asm -p emu -p linker -p shycc
+	$(CARGO) build --release -p asm -p emu -p linker -p shycc -p shyc
 	$(MAKE) -C third_party/chibicc chibicc
 	$(INSTALL) -m 0755 target/release/asm $(BIN_DIR)/shyasm
 	$(INSTALL) -m 0755 target/release/emu $(BIN_DIR)/shyemu
 	$(INSTALL) -m 0755 target/release/linker $(BIN_DIR)/shyld
 	$(INSTALL) -m 0755 target/release/shycc $(BIN_DIR)/shycc
+	$(INSTALL) -m 0755 target/release/shyc $(BIN_DIR)/shyc
 	$(INSTALL) -m 0755 $(CHIBICC) $(BIN_DIR)/chibicc
 
 install-bin: bin

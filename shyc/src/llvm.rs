@@ -161,9 +161,18 @@ fn emit_global(w: &mut Writer, global: &Global, options: &Options) -> Result<(),
     } else {
         relocation_initializer(global, options)?
     };
+    // Compiler-generated constants (`.L.str.N` and friends) are private: two
+    // translation units both define `.L.str.0`, and only private linkage keeps
+    // them from colliding at link time.
+    let linkage = if global.symbol.starts_with(".L.") {
+        "private "
+    } else {
+        ""
+    };
     let mut text = format!(
-        "{} = {} {llvm_ty} {initializer}",
+        "{} = {}{} {llvm_ty} {initializer}",
         symbol(&global.symbol),
+        linkage,
         keyword
     );
     if global.align != 0 {

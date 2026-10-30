@@ -46,6 +46,8 @@ struct Options {
     target: String,
     emit_debug_info: bool,
     compile_args: Vec<String>,
+    /// `-Wl,` items, forwarded to clang; the Shy linker validates them itself.
+    link_args: Vec<String>,
     inputs: Vec<String>,
     libs: Vec<String>,
 }
@@ -106,6 +108,7 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         target: "shy".to_string(),
         emit_debug_info: false,
         compile_args: Vec::new(),
+        link_args: Vec::new(),
         inputs: Vec::new(),
         libs: Vec::new(),
     };
@@ -192,10 +195,8 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                 for item in arg[4..].split(',') {
                     if let Some(value) = item.strip_prefix("--sym=") {
                         opts.sym = Some(PathBuf::from(value));
-                    } else if item == "--sym" {
-                        bail!("use `--sym <file>` or `-Wl,--sym=<file>`");
                     } else {
-                        bail!("unsupported linker option for Shy linker: {item}");
+                        opts.link_args.push(item.to_string());
                     }
                 }
             }
@@ -265,6 +266,9 @@ fn run(opts: Options) -> Result<()> {
     let repo = repo_root();
     if opts.target != "shy" {
         return run_llvm(&repo, &opts);
+    }
+    if let Some(arg) = opts.link_args.first() {
+        bail!("unsupported linker option for Shy linker: {arg}");
     }
     let mut temps = TempFiles::new(opts.save_temps || opts.print_only);
 
@@ -497,14 +501,20 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
                 run_command(opts, &mut cmd)?;
                 clang_inputs.push(ll);
             }
-            InputKind::Obj => clang_inputs.push(PathBuf::from(input)),
-            _ => bail!("`{input}` cannot be compiled for `{}`", opts.target),
+            // `.S` files are target assembly text: clang assembles and preprocesses
+            // them, so they pass straight through.
+            InputKind::Asm | InputKind::Obj => clang_inputs.push(PathBuf::from(input)),
         }
     }
 
     let clang = env::var("SHYCC_CLANG").unwrap_or_else(|_| "clang".to_string());
     let mut cmd = Command::new(clang);
     cmd.arg(format!("--target={}", opts.target));
+    if opts.target.starts_with("riscv64") {
+        // The kernel links above 0x8000_0000, out of reach of the default
+        // medlow addressing range.
+        cmd.arg("-mcmodel=medany");
+    }
     if bare_target(&opts.target) {
         cmd.args([
             "-ffreestanding",
@@ -512,6 +522,9 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
             "-nostartfiles",
             "-nodefaultlibs",
             "-static",
+            // The host `ld` cannot link a foreign architecture, so bare-metal
+            // links go through LLVM's linker.
+            "-fuse-ld=lld",
         ]);
         if opts.stage == Stage::Link {
             cmd.arg("-Wl,-e,_start");
@@ -547,6 +560,9 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
             }
             for lib in &opts.libs {
                 cmd.arg(format!("-l{lib}"));
+            }
+            for arg in &opts.link_args {
+                cmd.arg(format!("-Wl,{arg}"));
             }
             cmd.args(&clang_inputs);
         }
@@ -785,7 +801,7 @@ fn input_kind(path: &str) -> Result<InputKind> {
     let p = Path::new(path);
     match p.extension().and_then(|s| s.to_str()) {
         Some("shyc") | Some("shyh") | Some("c") | Some("h") => Ok(InputKind::C),
-        Some("shy") => Ok(InputKind::Asm),
+        Some("shy") | Some("S") | Some("s") => Ok(InputKind::Asm),
         Some("sobj") => Ok(InputKind::Obj),
         _ => bail!("unknown input file extension: {path}"),
     }

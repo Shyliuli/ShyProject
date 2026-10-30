@@ -195,17 +195,29 @@ impl Body<'_> {
                     ptr_int_name(self.options.layout)
                 ));
             }
-            InstKind::InlineAsm(asm) => {
-                return Err(error(
-                    inst.span,
-                    format!(
-                        "function `{}`: inline assembly cannot be represented in LLVM IR \
-                         (Shy-specific register bindings): {:?}",
-                        self.function.name, asm.text
-                    ),
-                ));
-            }
+            InstKind::InlineAsm(asm) => self.emit_inline_asm(inst, asm)?,
         }
+        Ok(())
+    }
+
+    fn emit_inline_asm(&mut self, inst: &Inst, asm: &InlineAsm) -> Result<(), Diagnostic> {
+        if !asm.bindings.is_empty() {
+            return Err(error(
+                inst.span,
+                format!(
+                    "function `{}`: LLVM inline assembly bindings are not supported yet; use target-specific asm without bindings",
+                    self.function.name
+                ),
+            ));
+        }
+        let escaped = asm
+            .text
+            .replace('\\', "\\5C")
+            .replace('"', "\\22")
+            .replace('\n', "\\0A");
+        self.w.line(format!(
+            "call void asm sideeffect \"{escaped}\", \"~{{memory}}\"()"
+        ));
         Ok(())
     }
 
