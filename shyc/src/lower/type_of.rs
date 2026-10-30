@@ -147,7 +147,41 @@ impl Lowerer {
             ast::Expr::CompoundLiteral { type_name, .. } => self.resolve_type_name(type_name),
             ast::Expr::StatementExpr { block, .. } => match tail_expr(block) {
                 Some(expr) => {
-                    let ty = self.type_of(expr, local)?;
+                    // A statement expression declares its locals inside its
+                    // own block, and those declarations exist only in the AST
+                    // until the block is lowered. When the surrounding context
+                    // needs the type before lowering (`?:`, `sizeof`), read
+                    // the declarations straight from the block so `({ T x;
+                    // ...; x; })` still types as `T`.
+                    let mut declared: Vec<(String, TypeId)> = Vec::new();
+                    for statement in &block.stmts {
+                        let ast::Stmt::Decl(declaration) = statement else {
+                            continue;
+                        };
+                        if declaration.specs.storage == Some(ast::StorageClass::Typedef) {
+                            continue;
+                        }
+                        let specs = self.resolve_specs(&declaration.specs)?;
+                        for item in &declaration.declarators {
+                            let resolved = self.resolve_declarator(
+                                specs.ty,
+                                specs.qualifiers,
+                                &item.declarator,
+                            )?;
+                            if let Some(name) = &item.declarator.name {
+                                declared.push((name.text.clone(), resolved.ty));
+                            }
+                        }
+                    }
+                    let mut scoped = |name: &str| -> Option<TypeId> {
+                        declared
+                            .iter()
+                            .rev()
+                            .find(|(declared, _)| declared == name)
+                            .map(|(_, ty)| *ty)
+                            .or_else(|| local(name))
+                    };
+                    let ty = self.type_of(expr, &mut scoped)?;
                     Ok(self.decay_type(ty))
                 }
                 None => Ok(self.types.builtin(Builtin::Void)),

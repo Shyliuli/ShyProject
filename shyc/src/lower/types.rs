@@ -387,12 +387,6 @@ impl Lowerer {
             {
                 continue;
             }
-            if self.types.is_void(ty) {
-                return Err(Diagnostic::new(
-                    param.span,
-                    "a parameter cannot have type `void`",
-                ));
-            }
             let ty = match &param.declarator {
                 Some(declarator) => {
                     let resolved = self.resolve_declarator(ty, qualifiers, declarator)?;
@@ -400,6 +394,15 @@ impl Lowerer {
                 }
                 None => ty,
             };
+            // Check the finished parameter type: `void *p` has a `void`
+            // specifier but is a perfectly ordinary pointer parameter, so the
+            // test has to happen after the declarator's operators are applied.
+            if self.types.is_void(ty) {
+                return Err(Diagnostic::new(
+                    param.span,
+                    "a parameter cannot have type `void`",
+                ));
+            }
             let adjusted = self.adjust_parameter(ty);
             params.push(adjusted);
         }
