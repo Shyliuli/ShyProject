@@ -21,6 +21,7 @@ pub(super) fn emit(
         w,
         function,
         options,
+        abi: super::abi::kind(&options.triple),
         next_temp: 0,
         split_entry: false,
     }
@@ -31,6 +32,7 @@ struct Body<'a> {
     w: &'a mut Writer,
     function: &'a Function,
     options: &'a Options,
+    abi: super::abi::Kind,
     next_temp: u32,
     /// The IR entry block has predecessors, so a fresh LLVM entry block is
     /// emitted in front of it to hold the slots.
@@ -76,22 +78,48 @@ impl Body<'_> {
             ));
         }
 
+        let layout = self.options.layout;
+        let ret = function.signature.ret;
+        let sret = self.abi.by_reference(ret, layout);
         let mut signature = format!(
             "define {} {}(",
-            ty(function.signature.ret),
+            if sret { "void".to_string() } else { ty(ret) },
             symbol(&function.name)
         );
+        let mut first = true;
+        if sret {
+            signature.push_str(&format!(
+                "ptr sret({}) {} %sret",
+                super::abi::array(ret, layout),
+                super::abi::alignment(ret, layout)
+            ));
+            first = false;
+        }
         for (index, value) in function.params.iter().enumerate() {
-            if index > 0 {
+            if !first {
                 signature.push_str(", ");
             }
+            first = false;
             let param_ty = function
                 .signature
                 .params
                 .get(index)
                 .copied()
                 .unwrap_or_else(|| function.value_type(*value));
-            signature.push_str(&format!("{} {}", ty(param_ty), self.value(*value)));
+            if self.abi.by_reference(param_ty, layout) {
+                if self.abi.copies() {
+                    signature.push_str(&format!(
+                        "ptr byval({}) {} %arg{}",
+                        super::abi::array(param_ty, layout),
+                        super::abi::alignment(param_ty, layout),
+                        value.0
+                    ));
+                } else {
+                    signature.push_str(&format!("ptr %arg{}", value.0));
+                }
+            } else {
+                signature.push_str(&format!("{} {}", ty(param_ty), self.value(*value)));
+            }
         }
         if function.signature.variadic {
             if !function.params.is_empty() {
@@ -107,6 +135,7 @@ impl Body<'_> {
             self.w.line("shyc.prologue:");
             self.w.indent();
             self.emit_slots()?;
+            self.emit_memory_params();
             self.w
                 .line(format!("br label {}", self.label(function.entry)));
             self.w.dedent();
@@ -140,6 +169,7 @@ impl Body<'_> {
         }
         if id == self.function.entry && !self.split_entry {
             self.emit_slots()?;
+            self.emit_memory_params();
         }
         for inst in &block.insts {
             self.emit_inst(inst)?;
@@ -147,6 +177,38 @@ impl Body<'_> {
         self.emit_terminator(&block.terminator)?;
         self.w.dedent();
         Ok(())
+    }
+
+    /// Load a by-reference parameter into the aggregate value the IR expects.
+    fn emit_memory_params(&mut self) {
+        let layout = self.options.layout;
+        let params: Vec<(ValueId, Type)> = self
+            .function
+            .params
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                let param_ty = self
+                    .function
+                    .signature
+                    .params
+                    .get(index)
+                    .copied()
+                    .unwrap_or_else(|| self.function.value_type(*value));
+                self.abi
+                    .by_reference(param_ty, layout)
+                    .then_some((*value, param_ty))
+            })
+            .collect();
+        for (value, param_ty) in params {
+            let text = format!(
+                "{} = load {}, ptr %arg{}",
+                self.value(value),
+                super::abi::array(param_ty, layout),
+                value.0
+            );
+            self.w.line(text);
+        }
     }
 
     fn emit_slots(&mut self) -> Result<(), Diagnostic> {

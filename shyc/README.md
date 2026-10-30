@@ -62,6 +62,18 @@ The two backends have different C libraries, and each one gets its own default:
 emission stops at LLVM IR — the module is hosted, its `main` is called by the
 C runtime — so the system libc comes from whatever links the IR.
 
+## C ABI for aggregates
+
+Aggregates larger than 16 bytes follow the target C ABI: they are passed by
+reference (System V and Windows add `byval`, so the callee gets its own copy)
+and returned through a hidden `sret` pointer. Verified in both directions
+against clang: our code calling a clang-built `sum_big(struct Big)` and
+`make_big(int)`, and clang calling ours.
+
+Smaller aggregates are still passed as opaque `[N x i8]` values, because the IR
+records an aggregate only as `(size, align)` and System V classifies those per
+eightbyte.
+
 ## Status
 
 Working: integers, pointers, arrays, structs and unions, enums, control flow,

@@ -316,7 +316,22 @@ impl Body<'_> {
             self.result_prefix(inst, "call")?
         };
         let callee = self.callee(call, inst.span)?;
+        let layout = self.options.layout;
+        let ret = call.signature.ret;
+        let sret = self.abi.by_reference(ret, layout);
         let mut arguments = Vec::new();
+        let mut result_buffer = None;
+        if sret {
+            let buffer = self.temp();
+            self.w
+                .line(format!("{buffer} = alloca {}, align 8", ty(ret)));
+            arguments.push(format!(
+                "ptr sret({}) {} {buffer}",
+                super::super::abi::array(ret, layout),
+                super::super::abi::alignment(ret, layout)
+            ));
+            result_buffer = Some(buffer);
+        }
         for (index, argument) in call.args.iter().enumerate() {
             let wanted = call
                 .signature
@@ -324,9 +339,39 @@ impl Body<'_> {
                 .get(index)
                 .copied()
                 .unwrap_or_else(|| self.function.operand_type(*argument));
-            arguments.push(self.as_typed(*argument, wanted)?);
+            if self.abi.by_reference(wanted, layout) {
+                // A memory argument is a pointer; the value lives in a scratch
+                // slot so the callee sees the IR aggregate as one object.
+                let slot = self.temp();
+                let value = self.as_untyped(*argument, wanted)?;
+                self.w.line(format!(
+                    "{slot} = alloca {}, align {}",
+                    super::super::abi::array(wanted, layout),
+                    wanted.align(layout).unwrap_or(1).max(1)
+                ));
+                self.w
+                    .line(format!("store {} {value}, ptr {slot}", ty(wanted)));
+                arguments.push(if self.abi.copies() {
+                    format!(
+                        "ptr byval({}) {} {slot}",
+                        super::super::abi::array(wanted, layout),
+                        super::super::abi::alignment(wanted, layout)
+                    )
+                } else {
+                    format!("ptr {slot}")
+                });
+            } else {
+                arguments.push(self.as_typed(*argument, wanted)?);
+            }
         }
         let arguments = arguments.join(", ");
+        if let Some(buffer) = result_buffer {
+            self.w.line(format!("call void {callee}({arguments})"));
+            let prefix = self.result_prefix(inst, "call")?;
+            self.w
+                .line(format!("{prefix}load {}, ptr {buffer}", ty(ret)));
+            return Ok(());
+        }
         let text = if call.signature.variadic {
             let mut params: Vec<String> = call
                 .signature
@@ -497,7 +542,12 @@ impl Body<'_> {
                         ));
                     };
                     let value = self.as_untyped(*value, ret)?;
-                    self.w.line(format!("ret {} {value}", ty(ret)));
+                    if self.abi.by_reference(ret, self.options.layout) {
+                        self.w.line(format!("store {} {value}, ptr %sret", ty(ret)));
+                        self.w.line("ret void");
+                    } else {
+                        self.w.line(format!("ret {} {value}", ty(ret)));
+                    }
                 }
             }
             Terminator::Unreachable { .. } => self.w.line("unreachable"),

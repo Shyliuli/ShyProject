@@ -17,6 +17,7 @@
 //! assembly (Shy-specific register bindings) and constructs LLVM rejects
 //! outright (for example an entry block with predecessors and phi nodes).
 
+mod abi;
 mod function;
 mod types;
 
