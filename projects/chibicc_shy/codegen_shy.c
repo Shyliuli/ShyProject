@@ -58,6 +58,29 @@ static int count(void) {
   return ++labelseq;
 }
 
+// ShyISA register names are valid C identifiers, and the assembler reads a
+// bare register name as a register. A C symbol spelled like one (`exit`,
+// `sp`, ...) is written as `@name` in instruction operands; the symbol table
+// keeps the plain name.
+static bool is_shy_register_name(char *name) {
+  static char *names[] = {
+    "0x", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "9x",
+    "ax", "bx", "cx", "dx", "ex", "fx", "pc", "segs", "sp", "tm",
+    "status", "trap", "m1", "m2", "m3", "m4", "rs", "exit", "epc",
+    "cause", "ksp", "sege",
+  };
+  for (int i = 0; i < (int)(sizeof(names) / sizeof(*names)); i++)
+    if (!strcmp(name, names[i]))
+      return true;
+  return false;
+}
+
+static char *symbol_operand(char *name) {
+  if (!is_shy_register_name(name))
+    return name;
+  return format("@%s", name);
+}
+
 static char *sanitize(char *s) {
   char *buf = calloc(1, strlen(s) + 1);
   for (int i = 0; s[i]; i++) {
@@ -198,7 +221,7 @@ static void gen_var_addr(Obj *var) {
     println("setn 1x %d", var->offset);
     println("adda 1x fx");
   } else {
-    println("setn 1x %s", var->name);
+    println("setn 1x %s", symbol_operand(var->name));
   }
   println("setn 2x 0");
 }
@@ -1147,7 +1170,7 @@ static void gen_expr(Node *node) {
     for (int i = 0; i < reg_slots; i++)
       pop32(argreg[i]);
 
-    println("calln %s", node->lhs->var->name);
+    println("calln %s", symbol_operand(node->lhs->var->name));
 
     if (stack_bytes)
       println("subn sp %d", stack_bytes);

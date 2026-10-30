@@ -424,7 +424,28 @@ impl Obj {
                     let Some(token) = tokens.get(arg_i + 1) else {
                         continue;
                     };
-                    if is_register_name(token) {
+                    if let Some(symbol) = token.strip_prefix('@') {
+                        // `@name` always refers to the symbol `name`, even
+                        // when it is spelled like a register. Compilers emit
+                        // this for C names such as `exit` or `sp`. The linker
+                        // still sees the plain name.
+                        if symbol.is_empty() {
+                            return Err(anyhow::anyhow!("`@` must be followed by a symbol name"));
+                        }
+                        let (base, addend) = match symbol
+                            .strip_suffix(")")
+                            .and_then(|s| s.split_once("("))
+                        {
+                            Some((base, addend)) => (base, parse_u32_literal(addend)?),
+                            None => (symbol, 0),
+                        };
+                        reloc.push(ObjRelocation {
+                            section: section.name.clone(),
+                            offset: offset + 4 * (arg_i as u32 + 1),
+                            target: RelocTarget::Symbol(base.to_string()),
+                            addend,
+                        });
+                    } else if is_register_name(token) {
                         // 是寄存器
                         res[arg_i] = reg::RegType::from_str(token)?.to_u32();
                     } else if let Ok(num) = parse_u32_literal(token) {

@@ -635,6 +635,29 @@ static char *sanitize(char *s) {
   return buf;
 }
 
+// ShyISA register names are also valid C identifiers, and the assembler reads
+// a bare register name as a register. A C symbol spelled like one (`exit`,
+// `sp`, ...) must therefore be written as `@name` in an instruction operand.
+// The symbol table keeps the plain name, so linking is unaffected.
+static bool is_shy_register_name(char *name) {
+  static char *names[] = {
+    "0x", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "9x",
+    "ax", "bx", "cx", "dx", "ex", "fx", "pc", "segs", "sp", "tm",
+    "status", "trap", "m1", "m2", "m3", "m4", "rs", "exit", "epc",
+    "cause", "ksp", "sege",
+  };
+  for (int i = 0; i < (int)(sizeof(names) / sizeof(*names)); i++)
+    if (!strcmp(name, names[i]))
+      return true;
+  return false;
+}
+
+static char *symbol_operand(char *name) {
+  if (!is_shy_register_name(name))
+    return name;
+  return format("@%s", name);
+}
+
 static void rename_private_symbols(Obj *prog) {
   char *prefix = sanitize(base_file ? base_file : "input");
 
@@ -850,7 +873,7 @@ static void gen_var_addr(Obj *var) {
       println("seta 1x fx");
     }
   } else {
-    println("setn 1x %s", var->name);
+    println("setn 1x %s", symbol_operand(var->name));
   }
   println("setn 2x 0");
 }
@@ -1023,7 +1046,7 @@ static bool try_gen_simple_assign(Node *node) {
       println("seta 3x fx");
     }
   } else {
-    println("setn 3x %s", var->name);
+    println("setn 3x %s", symbol_operand(var->name));
   }
   store_to_addr_reg(node->lhs->ty, "3x");
   return true;
@@ -1955,7 +1978,7 @@ static void gen_expr(Node *node) {
       pop32("ex");
       println("calla ex");
     } else {
-      println("calln %s", node->lhs->var->name);
+      println("calln %s", symbol_operand(node->lhs->var->name));
     }
 
     if (total_stack)

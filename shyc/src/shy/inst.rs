@@ -37,7 +37,7 @@ impl FnWriter<'_> {
             }
             InstKind::SymbolAddr { symbol } => {
                 let result = result(instruction)?;
-                self.line(format!("setn 1x {symbol}"));
+                self.line(format!("setn 1x {}", super::operand_symbol(symbol)));
                 self.store_value_word(result, "1x");
                 Ok(())
             }

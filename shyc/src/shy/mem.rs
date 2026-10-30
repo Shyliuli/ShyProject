@@ -130,7 +130,9 @@ impl FnWriter<'_> {
                 let offset = self.frame.slot(*slot);
                 self.frame_addr(offset, register);
             }
-            AddressBase::Symbol(symbol) => self.line(format!("setn {register} {symbol}")),
+            AddressBase::Symbol(symbol) => {
+                self.line(format!("setn {register} {}", super::operand_symbol(symbol)))
+            }
             AddressBase::Operand(operand) => {
                 self.load_operand(operand, register, None)?;
             }

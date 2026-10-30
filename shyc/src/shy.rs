@@ -266,10 +266,19 @@ fn check_name(kind: &str, name: &str) -> Result<(), Diagnostic> {
     if name.chars().any(char::is_whitespace) {
         return Err(error(format!("{kind} symbol '{name}' contains whitespace")));
     }
-    if REGISTER_NAMES.contains(&name) {
-        return Err(error(format!(
-            "{kind} symbol '{name}' is a Shy register name"
-        )));
-    }
     Ok(())
+}
+
+/// Spell a symbol for an instruction operand.
+///
+/// C names such as `exit` or `sp` are also ShyISA register names, and the
+/// assembler reads a bare register name as a register. `@name` forces the
+/// symbol interpretation; the symbol table keeps the plain name, so linking
+/// and `.sym` output are unaffected.
+pub(crate) fn operand_symbol(name: &str) -> String {
+    if REGISTER_NAMES.contains(&name) {
+        format!("@{name}")
+    } else {
+        name.to_string()
+    }
 }
