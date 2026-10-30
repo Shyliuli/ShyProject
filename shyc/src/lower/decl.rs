@@ -683,6 +683,15 @@ impl Lowerer {
         };
         for (index, field) in info.fields.iter().enumerate() {
             if field.name.as_deref() == Some(name) {
+                // A bit-field shares its storage unit with its neighbours, so
+                // reading it as an ordinary member would return the wrong
+                // bits. Reject the access instead of miscompiling it.
+                if field.bit_width.is_some() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("reading or writing the bit-field '{name}' is not supported yet"),
+                    ));
+                }
                 return Ok((index, field.ty.ty, field.offset));
             }
         }
