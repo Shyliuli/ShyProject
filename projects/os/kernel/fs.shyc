@@ -99,7 +99,6 @@ impl Pipe {
 
     int read(self *p, void *user_buf, unsigned int n) {
         unsigned int addr = (unsigned int)user_buf;
-        unsigned char *dst;
         unsigned int i = 0;
 
         if (!user_range_ok(addr, n)) {
@@ -118,9 +117,8 @@ impl Pipe {
             return FILE_BLOCKED;
         }
 
-        dst = (unsigned char *)arch_user_ptr(current, addr);
         while (i < n && !p.empty()) {
-            dst[i] = p.data[p.nread % PIPESIZE];
+            arch_space_write(current, addr + i, &p.data[p.nread % PIPESIZE], 1);
             p.nread = p.nread + 1;
             i = i + 1;
         }
@@ -130,7 +128,6 @@ impl Pipe {
 
     int write(self *p, const void *user_buf, unsigned int n) {
         unsigned int addr = (unsigned int)user_buf;
-        unsigned char *src;
         unsigned int i = 0;
 
         if (!user_range_ok(addr, n)) {
@@ -143,7 +140,6 @@ impl Pipe {
             return -1;
         }
 
-        src = (unsigned char *)arch_user_ptr(current, addr);
         while (i < n) {
             if (p.full()) {
                 wakeup(p.read_chan());
@@ -157,7 +153,7 @@ impl Pipe {
                 sleep(p.write_chan());
                 return FILE_BLOCKED;
             }
-            p.data[p.nwrite % PIPESIZE] = src[i];
+            arch_space_read(current, &p.data[p.nwrite % PIPESIZE], addr + i, 1);
             p.nwrite = p.nwrite + 1;
             i = i + 1;
         }
@@ -194,36 +190,19 @@ static int user_range_ok(unsigned int addr, unsigned int n) {
     return 1;
 }
 
-static char *user_string(const char *path) {
+/* Copy the user pathname, including page crossings, into caller-owned memory. */
+static char *user_path_name(const char *path, char *buf) {
     unsigned int addr = (unsigned int)path;
-    char *s;
-
-    if (addr >= USER_SEG_SIZE) {
-        return 0;
-    }
-
-    s = (char *)arch_user_ptr(current, addr);
-    for (unsigned int i = addr; i < USER_SEG_SIZE; i++) {
-        if (s[i - addr] == 0) {
-            return s;
+    for (unsigned int i = 0; i < USER_ARG_MAX; i++) {
+        if (addr >= USER_SEG_SIZE || i >= USER_SEG_SIZE - addr) return 0;
+        arch_space_read(current, &buf[i], addr + i, 1);
+        if (buf[i] == 0) {
+            char *name = buf;
+            if (name[0] == '/') name = name + 1;
+            return name[0] ? name : 0;
         }
     }
     return 0;
-}
-
-static char *user_path_name(const char *path) {
-    char *path_name = user_string(path);
-
-    if (path_name == 0) {
-        return 0;
-    }
-    if (path_name[0] == '/') {
-        path_name = path_name + 1;
-    }
-    if (path_name[0] == 0) {
-        return 0;
-    }
-    return path_name;
 }
 
 static int valid_mem_name(const char *name) {
@@ -317,7 +296,7 @@ struct fs_file *fs_lookup(const char *path_name) {
 
 static int copy_to_user_string(char *user_buf, int max, const char *src) {
     unsigned int addr = (unsigned int)user_buf;
-    char *dst;
+    char zero = 0;
     int i = 0;
 
     if (max <= 0) {
@@ -326,12 +305,9 @@ static int copy_to_user_string(char *user_buf, int max, const char *src) {
     if (!user_range_ok(addr, (unsigned int)max)) {
         return -1;
     }
-    dst = (char *)arch_user_ptr(current, addr);
-    while (i < max - 1 && src[i]) {
-        dst[i] = src[i];
-        i = i + 1;
-    }
-    dst[i] = 0;
+    while (i < max - 1 && src[i]) i = i + 1;
+    arch_space_write(current, addr, src, i);
+    arch_space_write(current, addr + i, &zero, 1);
     return 0;
 }
 
@@ -368,7 +344,8 @@ int fs_dirent(int index, char *user_buf, int max) {
 }
 
 int fs_mkdir(const char *path) {
-    char *name = user_path_name(path);
+    char pathbuf[USER_ARG_MAX];
+    char *name = user_path_name(path, pathbuf);
     struct mem_file *mf;
 
     if (name == 0 || !valid_mem_name(name)) {
@@ -394,7 +371,8 @@ int fs_mkdir(const char *path) {
 }
 
 int fs_rm(const char *path) {
-    char *name = user_path_name(path);
+    char pathbuf[USER_ARG_MAX];
+    char *name = user_path_name(path, pathbuf);
     struct mem_file *mf;
 
     if (name == 0 || !valid_mem_name(name)) {
@@ -518,7 +496,6 @@ impl file {
     int read(self *f, void *user_buf, unsigned int n) {
         unsigned int addr = (unsigned int)user_buf;
         unsigned int remaining;
-        unsigned char *dst;
 
         if (!f.can_read()) {
             return -1;
@@ -540,8 +517,7 @@ impl file {
             if (n > remaining) {
                 n = remaining;
             }
-            dst = (unsigned char *)arch_user_ptr(current, addr);
-            memcpy(dst, f.mem->data + f.off, n);
+            arch_space_write(current, addr, f.mem->data + f.off, n);
             f.off = f.off + n;
             return (int)n;
         }
@@ -557,8 +533,7 @@ impl file {
         if (n > remaining) {
             n = remaining;
         }
-        dst = (unsigned char *)arch_user_ptr(current, addr);
-        memcpy(dst, f.file->data + f.off, n);
+        arch_space_write(current, addr, f.file->data + f.off, n);
         f.off = f.off + n;
         return (int)n;
     }
@@ -566,7 +541,6 @@ impl file {
     int write(self *f, const void *user_buf, unsigned int n) {
         unsigned int addr = (unsigned int)user_buf;
         unsigned int space;
-        unsigned char *src;
 
         if (!f.can_write()) {
             return -1;
@@ -585,8 +559,7 @@ impl file {
             if (n > space) {
                 n = space;
             }
-            src = (unsigned char *)arch_user_ptr(current, addr);
-            memcpy(f.mem->data + f.off, src, n);
+            arch_space_read(current, f.mem->data + f.off, addr, n);
             f.off = f.off + n;
             if (f.off > f.mem->size) {
                 f.mem->size = f.off;
@@ -628,7 +601,8 @@ impl file {
 }
 
 int file_open(const char *path) {
-    char *path_name = user_path_name(path);
+    char pathbuf[USER_ARG_MAX];
+    char *path_name = user_path_name(path, pathbuf);
     struct fs_file *fsf;
     struct mem_file *mf;
     int fd;
@@ -666,7 +640,8 @@ int file_open(const char *path) {
 }
 
 int file_create(const char *path) {
-    char *path_name = user_path_name(path);
+    char pathbuf[USER_ARG_MAX];
+    char *path_name = user_path_name(path, pathbuf);
     struct mem_file *mf;
     int fd;
 
@@ -849,7 +824,7 @@ int file_pipe(int *fds) {
     int rfd = -1;
     int wfd = -1;
     struct Pipe *p = 0;
-    int *ufds;
+    int result[2];
 
     if (!user_range_ok(addr, 8)) {
         return -1;
@@ -884,9 +859,9 @@ int file_pipe(int *fds) {
     file_table[rfd].open_pipe(p, 1, 0);
     file_table[wfd].open_pipe(p, 0, 1);
 
-    ufds = (int *)arch_user_ptr(current, addr);
-    ufds[0] = rfd;
-    ufds[1] = wfd;
+    result[0] = rfd;
+    result[1] = wfd;
+    arch_space_write(current, addr, result, sizeof(result));
     current_add_fd(rfd);
     current_add_fd(wfd);
     lock_release(&file_lock);
@@ -895,7 +870,6 @@ int file_pipe(int *fds) {
 
 static int copy_user_arg(const char *arg, unsigned char *buf) {
     unsigned int addr;
-    unsigned char *src;
 
     buf[0] = 0;
     if (arg == 0) {
@@ -907,12 +881,11 @@ static int copy_user_arg(const char *arg, unsigned char *buf) {
         return -1;
     }
 
-    src = (unsigned char *)arch_user_ptr(current, addr);
     for (unsigned int i = 0; i < USER_ARG_MAX - 1; i++) {
         if (addr + i >= USER_SEG_SIZE) {
             return -1;
         }
-        buf[i] = src[i];
+        arch_space_read(current, &buf[i], addr + i, 1);
         if (buf[i] == 0) {
             return 0;
         }
@@ -922,7 +895,8 @@ static int copy_user_arg(const char *arg, unsigned char *buf) {
 }
 
 static int copy_exec_name(const char *path, unsigned char *buf) {
-    char *name = user_path_name(path);
+    char pathbuf[USER_ARG_MAX];
+    char *name = user_path_name(path, pathbuf);
     int i = 0;
 
     buf[0] = 0;
@@ -984,7 +958,7 @@ int user_image_layout_ok(struct fs_file *fsf) {
     if (fsf->size >= USER_SEG_SIZE) {
         return 0;
     }
-    if (fsf->size > USER_ARG_ADDR) {
+    if (fsf->size > USER_ARG0_ADDR) {
         return 0;
     }
     if (fsf->size >= 8) {
@@ -1029,7 +1003,7 @@ int sys_exec(const char *path, const char *arg) {
     }
     stack_base = user_image_stack_base(fsf);
 
-    arch_space_write(current, 0, fsf->data, fsf->size);
+    arch_space_load(current, fsf->data, fsf->size);
     arch_space_write(current, USER_ARG0_ADDR, namebuf, USER_ARG_MAX);
     arch_space_write(current, USER_ARG_ADDR, argbuf, USER_ARG_MAX);
     arch_fence_i();

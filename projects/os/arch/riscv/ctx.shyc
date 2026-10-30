@@ -1,29 +1,25 @@
 #![no_main]
 
-/* RISC-V trap glue: turn the saved user register file into the generic
-   `struct context`, dispatch the syscall, and hand control to the scheduler. */
 #include "../../kernel/arch.h"
+#include "../../kernel/fs.h"
 #include "../../kernel/memlayout.h"
 #include "../../kernel/trap.h"
 #include "../../kernel/proc.h"
 
-extern struct proc *current;
-
 #define SCAUSE_ECALL_U 8
 #define SCAUSE_TIMER 0x8000000000000005UL
+#define SSTATUS_SPP 0x100
 
 void arch_scheduler(void);
 
-void ctx_set_current_ret(uint32_t value) {
-    current->ctx.regs[10] = value;
+void ctx_set_current_ret(int value) {
+    current->ctx.regs[10] = (unsigned long)value;
 }
 
-void ctx_reset_current(unsigned int sp) {
-    for (int i = 0; i < NREG; i++) {
-        current->ctx.regs[i] = 0;
-    }
+void ctx_reset_current(unsigned int stack_base) {
+    for (int i = 0; i < NREG; i++) current->ctx.regs[i] = 0;
     current->ctx.epc = USER_ENTRY;
-    current->ctx.sp = sp;
+    current->ctx.sp = arch_user_sp(stack_base);
     current->ctx.valid = 0;
 }
 
@@ -31,59 +27,45 @@ void ctx_retry_current_syscall(void) {
     current->ctx.epc = current->ctx.epc - 4;
 }
 
-void riscv_trap(struct trapframe *tf) {
-    unsigned long cause = tf->cause;
-
-    for (int i = 0; i < 32; i++) {
-        current->ctx.regs[i] = tf->regs[i];
+static void put_hex(unsigned long value) {
+    for (int shift = 60; shift >= 0; shift = shift - 4) {
+        int digit = (int)((value >> shift) & 0xf);
+        arch_uart_putc(digit < 10 ? '0' + digit : 'a' + digit - 10);
     }
-    current->ctx.sp = tf->regs[2];
-    current->ctx.epc = tf->epc;
+}
 
-    if (cause == SCAUSE_ECALL_U) {
-        current->ctx.epc = current->ctx.epc + 4;
-        int ret = syscall_dispatch((int)tf->regs[17], (unsigned int)tf->regs[10],
-                                   (unsigned int)tf->regs[11], (unsigned int)tf->regs[12]);
-        current->ctx.regs[10] = (unsigned long)ret;
-    } else if (cause == SCAUSE_TIMER) {
-        proc_set_current_state(RUNNABLE);
-        arch_set_timer(100);
-    } else {
-        char *msg = "ShyOS trap cause ";
-        for (int i = 0; msg[i]; i++) {
-            arch_uart_putc(msg[i]);
-        }
-        for (int shift = 60; shift >= 0; shift = shift - 4) {
-            int nibble = (int)((cause >> shift) & 0xf);
-            arch_uart_putc(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
-        }
-        char *bad = " bad ";
-        for (int i = 0; bad[i]; i++) {
-            arch_uart_putc(bad[i]);
-        }
-        for (int shift = 60; shift >= 0; shift = shift - 4) {
-            int nibble = (int)((tf->badaddr >> shift) & 0xf);
-            arch_uart_putc(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
-        }
-        char *at = " at ";
-        for (int i = 0; at[i]; i++) {
-            arch_uart_putc(at[i]);
-        }
-        for (int shift = 60; shift >= 0; shift = shift - 4) {
-            int nibble = (int)((tf->epc >> shift) & 0xf);
-            arch_uart_putc(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
-        }
-        char *ra = " ra ";
-        for (int i = 0; ra[i]; i++) {
-            arch_uart_putc(ra[i]);
-        }
-        for (int shift = 60; shift >= 0; shift = shift - 4) {
-            int nibble = (int)((tf->regs[1] >> shift) & 0xf);
-            arch_uart_putc(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
-        }
-        arch_uart_putc('\n');
+static void report_trap(struct trapframe *tf, const char *mode) {
+    for (int i = 0; mode[i]; i++) arch_uart_putc(mode[i]);
+    put_hex(tf->cause);
+    arch_uart_putc(' ');
+    put_hex(tf->badaddr);
+    arch_uart_putc(' ');
+    put_hex(tf->epc);
+    arch_uart_putc('\n');
+}
+
+void riscv_trap(struct trapframe *tf) {
+    if (tf->status & SSTATUS_SPP) {
+        report_trap(tf, "ShyOS kernel trap: ");
         arch_shutdown(1);
     }
 
+    for (int i = 0; i < NREG; i++) current->ctx.regs[i] = tf->regs[i];
+    current->ctx.sp = tf->regs[2];
+    current->ctx.epc = tf->epc;
+
+    if (tf->cause == SCAUSE_ECALL_U) {
+        current->ctx.epc = current->ctx.epc + 4;
+        int ret = syscall_dispatch((int)tf->regs[17], (unsigned int)tf->regs[10],
+                                  (unsigned int)tf->regs[11], (unsigned int)tf->regs[12]);
+        /* Retrying a blocked ecall needs its original a0 (fd), not FILE_BLOCKED. */
+        if (!file_result_blocked(ret)) ctx_set_current_ret(ret);
+    } else if (tf->cause == SCAUSE_TIMER) {
+        proc_set_current_state(RUNNABLE);
+        arch_set_timer(100);
+    } else {
+        report_trap(tf, "ShyOS user trap: ");
+        proc_exit((int)tf->cause);
+    }
     arch_scheduler();
 }

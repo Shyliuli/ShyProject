@@ -142,7 +142,6 @@ void *arch_user_ptr(struct proc *p, unsigned int user_addr) {
 
 void arch_space_alloc(struct proc *p) {
     unsigned long root = (unsigned long)new_page();
-    unsigned long frames = 0;
 
     p->segbase = 0;
     if (root == 0) return;
@@ -152,7 +151,6 @@ void arch_space_alloc(struct proc *p) {
         if (frame == 0) return;
         zero_page((unsigned long *)frame);
         if (map_page(root, i * 4096, frame) != 0) return;
-        frames = frames + 1;
     }
     share_kernel(root);
     p->segbase = (unsigned int)root;
@@ -184,30 +182,31 @@ void arch_space_free(struct proc *p) {
 }
 
 int arch_space_copy(struct proc *parent, struct proc *child) {
-    unsigned long dst_root = (unsigned long)new_page();
     unsigned long src_root = root_for(parent);
+    unsigned long dst_root = root_for(child);
 
-    if (dst_root == 0) return -1;
-    child->segbase = (unsigned int)dst_root;
-
+    /* alloc_proc already allocated the child's pages. Copy into them instead
+       of replacing its root and leaking the first allocation on every fork. */
     for (int i = 0; i < SEG_PAGES; i++) {
         unsigned int va = i * 4096;
         unsigned long src = translate(src_root, va);
-        unsigned long dst = (unsigned long)kalloc_page();
-
-        if (dst == 0) return -1;
-        zero_page((unsigned long *)dst);
-        if (src != 0) {
-            memcpy((void *)dst, (void *)src, 4096);
-        }
-        if (map_page(dst_root, va, dst) != 0) return -1;
+        unsigned long dst = translate(dst_root, va);
+        if (src == 0 || dst == 0) return -1;
+        memcpy((void *)dst, (void *)src, 4096);
     }
-    share_kernel(dst_root);
     return 0;
 }
 
 void arch_space_load(struct proc *p, const void *src, unsigned int n) {
+    for (unsigned int va = 0; va < USER_SEG_SIZE; va = va + 4096) {
+        zero_page((unsigned long *)translate(root_for(p), va));
+    }
     arch_space_write(p, 0, src, n);
+}
+
+unsigned int arch_user_sp(unsigned int stack_base) {
+    (void)stack_base;
+    return USER_STACK_LIMIT & ~15U; /* RV64 frames grow downward. */
 }
 
 void arch_space_write(struct proc *p, unsigned int user_addr, const void *src, unsigned int n) {
@@ -226,6 +225,19 @@ void arch_space_write(struct proc *p, unsigned int user_addr, const void *src, u
     }
 }
 
+void arch_space_read(struct proc *p, void *dst, unsigned int user_addr, unsigned int n) {
+    unsigned int done = 0;
+    while (done < n) {
+        unsigned int va = user_addr + done;
+        unsigned int chunk = 4096 - (va & 0xfff);
+        unsigned long pa = translate(root_for(p), va);
+        if (pa == 0) return;
+        if (chunk > n - done) chunk = n - done;
+        memcpy((unsigned char *)dst + done, (void *)pa, chunk);
+        done = done + chunk;
+    }
+}
+
 void ctx_set_ret(struct context *ctx, int value) {
-    ctx->regs[10] = (unsigned int)value;
+    ctx->regs[10] = (unsigned long)value;
 }

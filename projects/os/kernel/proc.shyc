@@ -74,19 +74,6 @@ static const char *proc_state_name(enum procstate state) {
     return "?";
 }
 
-static char *map_user_buf(char *user_buf, int max) {
-    unsigned int addr = (unsigned int)user_buf;
-
-    if (max <= 0) {
-        return (char *)0;
-    }
-    if (addr > USER_SEG_SIZE || (unsigned int)max > USER_SEG_SIZE ||
-        addr + (unsigned int)max < addr || addr + (unsigned int)max > USER_SEG_SIZE) {
-        return (char *)0;
-    }
-    return (char *)arch_user_ptr(current, addr);
-}
-
 static void clear_context(struct context *ctx) {
     for (int i = 0; i < NREG; i++) {
         ctx->regs[i] = 0;
@@ -102,7 +89,7 @@ static void clear_context(struct context *ctx) {
 }
 
 static void load_idle_code(struct proc *p) {
-    unsigned char *mem = (unsigned char *)arch_user_ptr(p, 0x100);
+    unsigned char *mem = (unsigned char *)arch_user_ptr(p, 0);
 
 #ifdef SHYOS_RISCV
     // addi a7, x0, 2; ecall; jal x0, -4 (SYS_yield loop)
@@ -219,7 +206,7 @@ impl proc {
 #else
         p.ctx.ksp = p.kstack;
 #endif
-        p.ctx.sp = USER_STACK_DEFAULT_BASE;
+        p.ctx.sp = arch_user_sp(USER_STACK_DEFAULT_BASE);
 #ifndef SHYOS_RISCV
         p.ctx.segs = p.segbase;
         p.ctx.sege = p.segbase + USER_SEG_SIZE;
@@ -271,8 +258,7 @@ static int has_live_non_idle_locked(void) {
 static void copy_wait_status(struct proc *parent, unsigned int addr, int value) {
     if (addr != 0) {
         if (addr <= USER_SEG_SIZE - 4) {
-            int *user_status = (int *)arch_user_ptr(parent, addr);
-            *user_status = value;
+            arch_space_write(parent, addr, &value, sizeof(value));
         }
     }
 }
@@ -285,7 +271,13 @@ static void wake_waiting_parent_locked(struct proc *parent, struct proc *child) 
     int pid = child->pid;
 
     copy_wait_status(parent, parent->wait_status, child->xstatus);
-    free_proc_locked(child);
+    if (child == current) {
+        /* Reap after switching away from this kernel stack and address space.
+           The parent has already collected the status, so detach the zombie. */
+        child->parent = -1;
+    } else {
+        free_proc_locked(child);
+    }
     parent.clear_wait();
     ctx_set_ret(&parent->ctx, pid);
     parent.set_state(RUNNABLE);
@@ -353,9 +345,6 @@ void free_proc(struct proc *p) {
 
 int fork(void) {
     struct proc *child = alloc_proc();
-    unsigned int *src;
-    unsigned int *dst;
-    unsigned int n;
     int child_pid;
     int stdin_fd = current->stdin_fd;
     int stdout_fd = current->stdout_fd;
@@ -368,10 +357,10 @@ int fork(void) {
         return -1;
     }
 
-    arch_space_copy(current, child);
-    src = 0;
-    dst = 0;
-    n = 0;
+    if (arch_space_copy(current, child) < 0) {
+        free_proc(child);
+        return -1;
+    }
     arch_fence_i();
 
     lock_acquire(&proc_lock);
@@ -618,6 +607,11 @@ struct proc *proc_next(void) {
     struct proc *next;
 
     lock_acquire(&proc_lock);
+    for (int i = 0; i < NPROC; i++) {
+        if (&procs[i] != current && procs[i].state == ZOMBIE && procs[i].parent == -1) {
+            free_proc_locked(&procs[i]);
+        }
+    }
     if (current != 0) {
         for (int i = 0; i < NPROC; i++) {
             if (&procs[i] == current) {
@@ -717,17 +711,18 @@ void proc_set_current_name(const char *name) {
 }
 
 int proc_psline(int index, char *user_buf, int max) {
-    char *dst;
+    char dst[64];
+    unsigned int addr = (unsigned int)user_buf;
     int seen = 0;
     int pos = 0;
 
     if (index < 0) {
         return 0;
     }
-    dst = map_user_buf(user_buf, max);
-    if (dst == 0) {
+    if (max <= 0 || addr >= USER_SEG_SIZE || (unsigned int)max > USER_SEG_SIZE - addr) {
         return -1;
     }
+    if (max > sizeof(dst)) max = sizeof(dst);
 
     lock_acquire(&proc_lock);
     for (int i = 0; i < NPROC; i++) {
@@ -794,6 +789,7 @@ int proc_psline(int index, char *user_buf, int max) {
                     pos = pos + 1;
                 }
                 dst[pos] = 0;
+                arch_space_write(current, addr, dst, pos + 1);
                 lock_release(&proc_lock);
                 return 1;
             }

@@ -32,10 +32,10 @@ static void load_init(struct proc *p) {
     arch_space_load(p, file->data, file->size);
 
     p->ctx.epc = USER_ENTRY;
-    p->ctx.sp = user_image_stack_base(file);
+    p->stack_base = user_image_stack_base(file);
+    p->ctx.sp = arch_user_sp(p->stack_base);
     p->sz = file->size;
     p->heap_base = file->size;
-    p->stack_base = p->ctx.sp;
     p->name[0] = 'i';
     p->name[1] = 'n';
     p->name[2] = 'i';

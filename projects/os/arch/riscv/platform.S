@@ -32,7 +32,7 @@ arch_enter_user:
     csrc sstatus, t0
     sret
 
-/* void arch_shutdown(int status): SBI system reset, which needs no mapping. */
+/* void arch_shutdown(int status): report success/failure to QEMU virt. */
     .globl arch_shutdown
 arch_shutdown:
     /* Use the kernel table so the QEMU test device is mapped, then power off. */
@@ -45,6 +45,11 @@ arch_shutdown:
     sfence.vma
     li      t0, 0x100000
     li      t1, 0x5555
+    beqz    a0, 2f
+    slli    t1, a0, 16
+    li      t2, 0x3333
+    or      t1, t1, t2
+2:
     sw      t1, 0(t0)
 1:
     j       1b

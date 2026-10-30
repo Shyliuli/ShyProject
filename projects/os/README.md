@@ -36,18 +36,23 @@ Current user programs declare their own stack size; `stackbig` declares 16 KiB a
 make -C projects/os riscv_test
 ```
 
-OpenSBI leaves the kernel in S-mode at `0x80200000`; `arch/riscv/boot.S` sets
-`stvec`, prints the banner through the NS16550 UART, then enters U-mode the way
-`enteruser` does on ShyISA. The user program issues `ecall`, the trap handler
-recognises it and powers the machine off. Output:
+OpenSBI leaves the kernel in S-mode at `0x80200000`. The RISC-V backend uses
+Sv39 per-process page tables, an RV64 trap frame, `sscratch` kernel stacks,
+`sret` user entry, SBI timer interrupts, and the same shared syscall/process
+code as the ShyISA backend. User images are built by `shycc` for RV64 with the
+same fixed image header and a `0x100` entry trampoline.
+
+`riscv_test` boots the shell and checks `echo` and `cat`. Additional workloads
+exercise the same image with `p3lock`, `p7malloc`, `p2wait`, and `p4pipe`:
 
 ```
-ShyOS boot
-ShyOS user exit
+p3lock count 200
+p3lock ok
+p7malloc ok
+p2wait child exit
+p2wait parent woke
+p4pipe ok
 ```
-
-Only the boot, console, and user-entry path is ported so far: the process
-table, file system, and scheduler still use ShyISA segments and registers.
 
 ## Build
 

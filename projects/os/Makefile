@@ -130,20 +130,17 @@ RISCV_USER_SRCS = arch/riscv/user/header.S arch/riscv/user/entry.S arch/riscv/us
 	arch/riscv/user/usys.shyc
 RISCV_USER_PROGS := $(basename $(notdir $(USER_PROG_SRCS))) $(BUSYBOX_APPLETS)
 RISCV_USER_SFS := $(addprefix $(RISCV_USER)/,$(addsuffix .sfs,$(RISCV_USER_PROGS)))
+# Missing user images must be rebuilt even when an older fsdata.c exists.
+.NOTINTERMEDIATE: $(RISCV_USER_SFS)
+.PHONY: riscv_user
 
 riscv: $(RISCV_ELF)
 
 riscv_user: $(RISCV_USER_SFS)
 
-$(RISCV_TARGET)/init.sfs: $(RISCV_USER_SRCS) user/init.shyc user/ulib.shyc | dirs
+$(RISCV_USER)/%.sfs: $(RISCV_USER_SRCS) user/%.shyc user/ulib.shyc user/usys.h user/ulib.h kernel/memlayout.h arch/riscv/user/user.ld Makefile $(SHYCC) ../../target/bin/shyc | dirs
 	mkdir -p $(RISCV_USER)
-	$(SHYCC) --target=riscv64-unknown-none -Iuser \
-		-Wl,--oformat=binary -Wl,-T,arch/riscv/user/user.ld \
-		-o $@ user/init.shyc user/ulib.shyc $(RISCV_USER_SRCS)
-
-$(RISCV_USER)/%.sfs: $(RISCV_USER_SRCS) user/%.shyc user/ulib.shyc | dirs
-	mkdir -p $(RISCV_USER)
-	$(SHYCC) --target=riscv64-unknown-none -Iuser \
+	$(SHYCC) --target=riscv64-unknown-none -DSHYOS_RISCV -Iuser \
 		-Wl,--oformat=binary -Wl,-T,arch/riscv/user/user.ld \
 		-o $@ user/$*.shyc user/ulib.shyc $(RISCV_USER_SRCS)
 
@@ -155,7 +152,7 @@ $(RISCV_FS)/fsdata.c: tools/bin2shy.py $(RISCV_USER_SFS) test.txt | dirs
 	mkdir -p $(RISCV_FS)
 	$(PYTHON) tools/bin2shy.py -o $@ $(RISCV_USER_SFS) test.txt
 
-$(RISCV_ELF): $(RISCV_KERNEL_SRCS) $(RISCV_FS)/fsdata.c arch/riscv/kernel.ld | dirs
+$(RISCV_ELF): $(RISCV_KERNEL_SRCS) $(wildcard kernel/*.h) $(RISCV_FS)/fsdata.c arch/riscv/kernel.ld Makefile $(SHYCC) ../../target/bin/shyc | dirs
 	mkdir -p $(RISCV_TARGET)
 	$(SHYCC) --target=riscv64-unknown-none -DSHYOS_RISCV \
 		-Wl,-T,arch/riscv/kernel.ld \
@@ -167,7 +164,7 @@ riscv_run: riscv
 riscv_test: riscv
 	@set -eu; \
 	out=$(RISCV_TARGET)/boot-output.txt; \
-	printf "echo hello\nexit\n" | timeout 60 qemu-system-riscv64 -M virt -kernel $(RISCV_ELF) -nographic > $$out; \
+	{ sleep 3; printf "echo hello\ncat test.txt\nexit\n"; } | timeout 30 qemu-system-riscv64 -M virt -kernel $(RISCV_ELF) -nographic > $$out || test $$? -eq 124; \
 	grep -Fx 'ShyOS boot' $$out >/dev/null; \
 	grep -F 'hello' $$out >/dev/null; \
 	cat $$out; \

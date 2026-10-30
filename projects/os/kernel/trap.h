@@ -10,6 +10,7 @@ struct trapframe {
     unsigned long epc;
     unsigned long cause;
     unsigned long badaddr;
+    unsigned long status;
 };
 
 #define NREG 32
@@ -63,7 +64,7 @@ struct context {
 
 
 void trap_save_context(struct trapframe *tf);
-void ctx_set_current_ret(uint32_t value);
+void ctx_set_current_ret(int value);
 void ctx_reset_current(uint32_t sp);
 void ctx_retry_current_syscall(void);
 void trap_handler(uint32_t cause, uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3);

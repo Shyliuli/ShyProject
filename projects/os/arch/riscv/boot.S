@@ -3,6 +3,9 @@
     .globl _start
 _start:
     la      sp, boot_stack_top
+    csrw    sscratch, zero
+    la      t0, trap_entry
+    csrw    stvec, t0
     call    kmain
 1:
     j       1b

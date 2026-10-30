@@ -17,13 +17,14 @@ int arch_atomic_exchange(volatile int *address, int value);
 void arch_enter_user(void *entry, void *user_sp, void *kernel_sp);
 
 /* Process address spaces. `arch_user_ptr` maps a user address of `p` to a
-   kernel-usable pointer, so syscalls can copy through it. */
+   kernel-usable pointer within ONE page. Use read/write for buffers. */
 void *arch_user_ptr(struct proc *p, unsigned int user_addr);
 void arch_space_alloc(struct proc *p);
 void arch_space_free(struct proc *p);
 int arch_space_copy(struct proc *parent, struct proc *child);
 void arch_space_load(struct proc *p, const void *src, unsigned int n);
 void arch_space_write(struct proc *p, unsigned int user_addr, const void *src, unsigned int n);
+void arch_space_read(struct proc *p, void *dst, unsigned int user_addr, unsigned int n);
 
 /* Enable the periodic timer interrupt. */
 void arch_enable_timer(void);
@@ -33,6 +34,9 @@ void arch_vm_init(void);
 unsigned long arch_vm_kernel_root(void);
 void arch_vm_enable(unsigned long root);
 unsigned long arch_user_space(struct proc *p);
+
+/* Initial machine stack pointer for a user stack reservation. */
+unsigned int arch_user_sp(unsigned int stack_base);
 
 /* Return-value register of a saved user context. */
 void ctx_set_ret(struct context *ctx, int value);

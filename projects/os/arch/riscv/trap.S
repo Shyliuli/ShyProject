@@ -34,8 +34,12 @@ arch_vm_flush:
     .globl trap_entry
     .align 4
 trap_entry:
-    csrrw   sp, sscratch, sp    /* sp = kernel stack top, sscratch = user sp */
+    csrrw   sp, sscratch, sp    /* sscratch=0 in the kernel, kernel top in user mode */
+    bnez    sp, 1f
+    csrrw   sp, sscratch, sp    /* supervisor fault: retain the kernel stack */
+1:
     addi    sp, sp, -288
+    sd      zero, 0(sp)
     sd      x1,   8(sp)
     sd      x3,  24(sp)
     sd      x4,  32(sp)
@@ -66,8 +70,17 @@ trap_entry:
     sd      x29,232(sp)
     sd      x30,240(sp)
     sd      x31,248(sp)
-    csrr    t0, sscratch
-    sd      t0,  16(sp)         /* x2 = user stack pointer */
+    csrr    t0, sstatus
+    sd      t0, 280(sp)
+    andi    t1, t0, 0x100
+    bnez    t1, 2f
+    csrr    t0, sscratch        /* original user sp */
+    j       3f
+2:
+    addi    t0, sp, 288         /* original supervisor sp */
+3:
+    sd      t0, 16(sp)
+    csrw    sscratch, zero      /* nested supervisor faults retain this stack */
     csrr    t0, sepc
     sd      t0, 256(sp)
     csrr    t0, scause
@@ -75,8 +88,7 @@ trap_entry:
     csrr    t0, stval
     sd      t0, 272(sp)
     mv      a0, sp
-    call    riscv_trap
-    call    arch_scheduler      /* never returns */
+    tail    riscv_trap          /* handler schedules; it never returns */
 
 /* The scheduler picks the next process and resumes it in user mode. */
     .globl arch_scheduler
@@ -99,12 +111,10 @@ arch_scheduler:
     ld      t1, 272(a0)         /* ctx.epc */
     csrw    sepc, t1
 
-    /* sret returns to U-mode with interrupts enabled; SUM lets the kernel
-       touch user pages when it is running on a process page table. */
-    li      t0, 0x100
+    /* Return to U-mode with interrupts enabled. Kernel copies use physical
+       aliases, so SUM stays off and accidental user-VA accesses fault. */
+    li      t0, 0x40100
     csrc    sstatus, t0
-    li      t0, 0x40000
-    csrs    sstatus, t0
     li      t0, 0x20
     csrs    sstatus, t0
 
