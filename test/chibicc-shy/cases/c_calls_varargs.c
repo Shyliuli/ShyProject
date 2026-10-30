@@ -1,8 +1,4 @@
-typedef char *va_list;
-
-#define va_start(ap, last) ((ap) = (char *)__va_area__)
-#define va_arg(ap, ty) (*(ty *)((ap += ((sizeof(ty) + 3) & ~3)) - ((sizeof(ty) + 3) & ~3)))
-#define va_end(ap)
+#include <stdarg.shyh>
 
 static int add4(int a, int b, int c, int d) {
   return a + b + c + d;

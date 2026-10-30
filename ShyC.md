@@ -179,24 +179,108 @@ Rust-style aliases:
 | `f32` | `float` |
 | `f64` | `double` |
 
-## Calling Convention
+## Calling Convention (ABI v1)
+
+This is the host chibicc backend's ABI and the contract for the independent
+Rust backend under development.
+The stack grows upward; stack pointers and argument blocks are 4-byte aligned.
+Object layout and padding inside a struct or union are unchanged by argument
+passing. Memory representation is big-endian.
+
+### Registers and results
 
 Scalar return values use:
 
 - `1x` for 32-bit and smaller values;
 - `1x` low 32 bits and `2x` high 32 bits for 64-bit values.
 
-Function arguments are passed in 32-bit slots:
+`fx` is the frame pointer and is callee-saved. All other general-purpose
+registers (`0x` through `ex`) and the comparison state `rs` are caller-saved.
+The callee restores `sp` to its entry value before `ret`; after `ret`, the
+caller releases its own stack arguments. Inline assembly in an ordinary
+function must preserve `fx` and restore `sp` before leaving the assembly block.
+The bare `_start` entry is exempt from this frame convention.
+
+Struct and union results use caller-allocated storage. A hidden pointer to this
+storage occupies the first argument register (`4x`); explicit scalar arguments
+then start at `5x`. The callee copies the result into that storage. Scalar
+result registers do not carry a struct result.
+
+### Argument placement
+
+Visit arguments in source order, with the hidden result pointer first:
+
+1. Scalar arguments use the next available slots in `4x, 5x, 6x, 7x, 8x, 9x,
+   ax, bx`. A value of 32 bits or less uses one slot; a 64-bit value uses two
+   slots, low word first. Narrow integer arguments are sign- or zero-extended
+   according to their type.
+2. A scalar that does not fit entirely in the remaining registers goes on the
+   stack. It is never split between registers and memory. Unused register slots
+   remain available to later scalar arguments.
+3. Structs and unions are always copied by value onto the stack, including
+   small aggregates. They do not consume argument registers. The callee receives
+   an independent value: changing its parameter must not change the caller's
+   object. Arrays and functions undergo the usual parameter-to-pointer adjustment.
+
+Every stack argument occupies `round_up(sizeof(argument), 4)` bytes. Its object
+bytes begin at the start of its block in native big-endian memory order; unused
+padding at the end of the block has no specified value. The argument block is
+an ABI transport area, not a promise of stronger object alignment. The callee
+copies the value into its own parameter object.
+
+Let `B` be `sp` immediately before the call instruction, after allocating stack
+arguments. The first stack argument occupies the block immediately below `B`;
+subsequent stack arguments occupy progressively lower addresses. For stack
+argument `i`, let `S_i` be the cumulative padded sizes of stack arguments through
+`i`. Its address is `B - S_i`. Register arguments do not contribute to `S_i`.
+This order makes each named argument address independent of how many variadic
+arguments follow it. Placement order does not prescribe C expression evaluation
+order; nested calls must not overwrite already evaluated arguments.
+
+After the normal callee prologue (`pusha fx; seta fx sp`), the layout is:
 
 ```text
-4x, 5x, 6x, 7x, 8x, 9x, ax, bx
+higher addresses
+  callee locals and spill slots       [fx, ...)
+  saved caller frame pointer          fx - 4
+  return address                      fx - 8       (= B)
+  first stack argument                B - S_1
+  second stack argument               B - S_2
+  ...
+  caller locals and temporaries
+lower addresses
 ```
 
-Values that are 64-bit wide consume two slots, low word first, then high word.
-Calls that need more slots than this are not part of the current ABI.
+The caller reserves the entire stack-argument area **above its current `sp`**
+before the call, then releases exactly that area after return. This preserves
+active VLA/`alloca` storage below `sp`. While evaluating arguments, nested calls
+use space above the reserved area and return with `sp` restored. There is no
+stack-argument count limit in the ABI apart from available address space and
+stack memory.
 
-`fx` is the frame pointer. The Shy stack grows upward. Function prologues save
-and restore the caller frame pointer.
+### Variadic functions
+
+Variadic arguments use the same placement rules as named arguments, after the
+usual default argument promotions. `va_list` is an array containing one cursor
+structure: the next argument-register slot, a pointer to a saved eight-slot
+register area, and a descending stack cursor. The callee initializes this state
+after classifying its named parameters (including a hidden result pointer).
+
+`va_start` copies that initial state. `va_arg` takes a scalar from the register
+save area if the entire value fits; otherwise it subtracts the padded object
+size from the stack cursor and reads that block. Aggregates always take the
+stack path. Register-save slots preserve the low-word-first register convention;
+64-bit values read there must be reconstructed into big-endian object order.
+Stack values are already in native object order. `va_copy` copies the cursor
+state independently.
+
+### Compatibility
+
+ABI v1 preserves existing scalar-only calls that fit in the eight argument
+registers, including the hidden struct-result pointer convention. Aggregate
+parameters and the `va_list` representation are not compatible with the old
+experimental backend. Rebuild affected objects, libshy, and generated programs;
+do not mix old and new aggregate/variadic implementations in one linked image.
 
 ## Symbols and Sections
 
@@ -220,7 +304,8 @@ Currently supported or partially supported:
 - globals and local variables;
 - `if`, `while`, `for`, `do`, `switch`, `case`, and `default`;
 - labels and `goto`;
-- function calls within the current argument-slot ABI;
+- function calls using register arguments, stack overflow arguments, and by-value
+  struct/union parameters;
 - 32-bit arithmetic and comparisons;
 - 64-bit integer values using register pairs;
 - global pointer relocations;
@@ -234,7 +319,6 @@ Unsupported or intentionally incomplete:
 - TLS;
 - complete IEEE 754 behavior;
 - full C11/C17 atomics semantics;
-- arbitrary ABI spill arguments;
 - strict compatibility with another platform ABI.
 
 ## ShyC Source Extensions

@@ -6,13 +6,21 @@
 // replaces the final code generation stage. It emits Shy assembly text, then
 // ShyProject's own asm/linker can produce .sobj/.sfs.
 //
-// ABI v0:
+// ABI v1:
 // - Shy uses ILP32-style pointers: int and pointer are 32-bit, long remains
 //   64-bit.
 // - Scalar return: 1x=low32, 2x=high32 when the value is 64-bit.
-// - Integer/pointer args consume one 32-bit slot for <=32-bit values and two
-//   slots for 64-bit values. Slots are registers 4x..bx.
-// - fx is the frame pointer. Shy stack grows upward.
+// - Scalar args consume one 32-bit slot for <=32-bit values and two slots for
+//   64-bit values. A scalar that does not fit entirely in the remaining slots
+//   goes on the stack; register slots it could not use stay available to later
+//   scalars. Slots are registers 4x..bx.
+// - Structs and unions are always copied by value onto the stack and never
+//   consume argument registers. Stack blocks are padded to 4 bytes and keep
+//   native big-endian object order.
+// - Stack arguments live below B (the sp used by the call instruction), first
+//   argument highest. The callee's incoming stack base is fx-8.
+// - fx is the frame pointer and the only callee-saved register. Shy stack grows
+//   upward.
 // - By default, _start initializes sp, calls main, and writes main's low return
 //   word to exit. `#![no_main]` disables this startup and makes user `_start`
 //   a bare entry with no prologue.
@@ -684,6 +692,53 @@ static int stack_size_of(Type *ty) {
   return align_to(MAX(ty->size, 4), 4);
 }
 
+// ABI v1 argument classification, shared by call sites and callee prologues.
+typedef struct {
+  int slot;       // first register slot, -1 when passed on the stack
+  int slots;      // number of 4-byte register slots
+  int stack_off;  // bytes below B to the low address of this stack block
+  int stack_size; // padded stack block size
+} ShyArgClass;
+
+static bool is_aggregate_type(Type *ty) {
+  return ty->kind == TY_STRUCT || ty->kind == TY_UNION;
+}
+
+static int arg_type_size(Type *ty) {
+  if (ty->kind == TY_ARRAY || ty->kind == TY_FUNC)
+    return 4;
+  return ty->size;
+}
+
+static bool pass_by_memory(Type *ty) {
+  return is_aggregate_type(ty) || arg_type_size(ty) > 8;
+}
+
+static ShyArgClass classify_arg(Type *ty, int *slot_cursor, int *stack_cursor) {
+  ShyArgClass c = {-1, 0, 0, 0};
+  int size = arg_type_size(ty);
+
+  if (pass_by_memory(ty)) {
+    c.stack_size = align_to(MAX(size, 0), 4);
+    c.stack_off = *stack_cursor + c.stack_size;
+    *stack_cursor = c.stack_off;
+    return c;
+  }
+
+  int need = size > 4 ? 2 : 1;
+  if (*slot_cursor + need <= argreg_len) {
+    c.slot = *slot_cursor;
+    c.slots = need;
+    *slot_cursor += need;
+    return c;
+  }
+
+  c.stack_size = align_to(MAX(size, 4), 4);
+  c.stack_off = *stack_cursor + c.stack_size;
+  *stack_cursor = c.stack_off;
+  return c;
+}
+
 static void assign_lvar_offsets(Obj *prog) {
   for (Obj *fn = prog; fn; fn = fn->next) {
     if (!fn->is_function)
@@ -693,8 +748,7 @@ static void assign_lvar_offsets(Obj *prog) {
     for (Obj *var = fn->locals; var; var = var->next) {
       if (var->is_sret_alias || var->is_elided)
         continue;
-      if ((var == fn->va_area || var == fn->alloca_bottom) &&
-          !node_refs_var(fn->body, var))
+      if (var == fn->alloca_bottom && !node_refs_var(fn->body, var))
         continue;
       off = align_to(off, MAX(4, var->align));
       var->offset = off;
@@ -770,6 +824,7 @@ static void gen_signed_cmp32_imm(uint32_t imm, bool le) {
 
 static void gen_expr(Node *node);
 static void gen_stmt(Node *node);
+static void cmp_zero(VInfo vi);
 
 static bool asm_uses_addr(Node *node, AsmBinding *binding) {
   char *needle = format("{&%s}", binding->name);
@@ -821,6 +876,18 @@ static void gen_addr(Node *node) {
     if (node->member->offset)
       println("addn 1x %d", node->member->offset);
     return;
+  case ND_COND: {
+    int c = count();
+    gen_expr(node->cond);
+    cmp_zero(vinfo(node->cond->ty));
+    println("jmpn .L.addr.else.%d", c);
+    gen_addr(node->then);
+    println("ujmpn .L.addr.end.%d", c);
+    println(".L.addr.else.%d:", c);
+    gen_addr(node->els);
+    println(".L.addr.end.%d:", c);
+    return;
+  }
   case ND_FUNCALL:
     if (node->ret_buffer) {
       gen_expr(node);
@@ -835,6 +902,11 @@ static void gen_addr(Node *node) {
       return;
     }
     break;
+  case ND_STMT_EXPR:
+    // A statement expression used in an aggregate context leaves the last
+    // expression's aggregate address in 1x.
+    gen_expr(node);
+    return;
   default:
     unsupported(node, "address expression");
   }
@@ -842,6 +914,9 @@ static void gen_addr(Node *node) {
 
 static void load(Type *ty) {
   if (ty->kind == TY_ARRAY || ty->kind == TY_FUNC)
+    return;
+  // Aggregate rvalues are represented by their address in 1x.
+  if (ty->kind == TY_STRUCT || ty->kind == TY_UNION)
     return;
 
   switch (ty->size) {
@@ -954,38 +1029,24 @@ static bool try_gen_simple_assign(Node *node) {
   return true;
 }
 
+// Byte copy: aggregate sources may be packed or subobjects with align 1/2,
+// so word-sized accesses would trap on unaligned addresses.
 static void copy_bytes(Type *ty) {
+  if (ty->size == 0)
+    return;
+
   int c = count();
-  int words = ty->size / 4;
-  int tail = ty->size % 4;
-
-  if (words) {
-    println("setn cx %d", words);
-    println(".L.copy.words.%d:", c);
-    println("equn cx 0");
-    println("jmpn .L.copy.words.done.%d", c);
-    println("geta dx 1x");
-    println("puta 3x dx");
-    println("addn 1x 4");
-    println("addn 3x 4");
-    println("subn cx 1");
-    println("ujmpn .L.copy.words.%d", c);
-    println(".L.copy.words.done.%d:", c);
-  }
-
-  if (tail & 2) {
-    println("get16a dx 1x");
-    println("put16a 3x dx");
-    if (tail & 1) {
-      println("addn 1x 2");
-      println("addn 3x 2");
-    }
-  }
-
-  if (tail & 1) {
-    println("get8a dx 1x");
-    println("put8a 3x dx");
-  }
+  println("setn cx %d", ty->size);
+  println(".L.copy.bytes.%d:", c);
+  println("equn cx 0");
+  println("jmpn .L.copy.done.%d", c);
+  println("get8a dx 1x");
+  println("put8a 3x dx");
+  println("addn 1x 1");
+  println("addn 3x 1");
+  println("subn cx 1");
+  println("ujmpn .L.copy.bytes.%d", c);
+  println(".L.copy.done.%d:", c);
 }
 
 static void copy_struct_return_to_hidden_buffer(Node *expr) {
@@ -1559,29 +1620,6 @@ static void gen_binary(Node *node) {
   }
 }
 
-static int count_arg_slots(Node *args) {
-  int n = 0;
-  for (Node *arg = args; arg; arg = arg->next)
-    n += vinfo(arg->ty).is64 ? 2 : 1;
-  return n;
-}
-
-static int count_funcall_slots(Node *node) {
-  int n = count_arg_slots(node->args);
-  if (node->ret_buffer && returns_by_sret(node->ty))
-    n += vinfo(pointer_to(node->ty)).is64 ? 2 : 1;
-  return n;
-}
-
-static void push_args_reverse(Node *arg) {
-  if (!arg)
-    return;
-  push_args_reverse(arg->next);
-  VInfo vi = vinfo(arg->ty);
-  gen_expr(arg);
-  push_value(vi);
-}
-
 static void gen_expr(Node *node) {
   switch (node->kind) {
   case ND_NULL_EXPR:
@@ -1805,23 +1843,130 @@ static void gen_expr(Node *node) {
     return;
   }
   case ND_FUNCALL: {
-    int slots = count_funcall_slots(node);
-    if (slots > argreg_len)
-      unsupported(node, "function calls with too many register arguments");
+    if (returns_by_sret(node->ty) && !node->ret_buffer)
+      unsupported(node, "missing hidden result buffer");
+    bool sret = node->ret_buffer && returns_by_sret(node->ty);
+    bool indirect =
+        !(node->lhs->kind == ND_VAR && node->lhs->var->is_function);
 
-    push_args_reverse(node->args);
-    if (node->ret_buffer && returns_by_sret(node->ty)) {
-      VInfo vi = vinfo(pointer_to(node->ty));
-      gen_var_addr(node->ret_buffer);
-      push_value(vi);
+    int nargs = 0;
+    for (Node *arg = node->args; arg; arg = arg->next) {
+      if (!is_aggregate_type(arg->ty) && arg_type_size(arg->ty) > 8)
+        unsupported(arg, "arguments wider than 8 bytes");
+      nargs++;
     }
 
-    for (int i = 0; i < slots; i++)
-      pop32(argreg[i]);
+    int total = nargs + (sret ? 1 : 0);
+    Node **argv = calloc(total ? total : 1, sizeof(Node *));
+    ShyArgClass *argv_cls = calloc(total ? total : 1, sizeof(ShyArgClass));
+    int *suffix = calloc(total + 1, sizeof(int));
+    int slot = 0, stack = 0, idx = 0;
 
-    if (node->lhs->kind != ND_VAR)
-      unsupported(node, "indirect function call");
-    println("calln %s", node->lhs->var->name);
+    // The hidden result pointer is always the first argument register.
+    if (sret) {
+      argv_cls[idx].slot = slot++;
+      argv_cls[idx].slots = 1;
+      idx++;
+    }
+
+    for (Node *arg = node->args; arg; arg = arg->next) {
+      argv[idx] = arg;
+      argv_cls[idx] = classify_arg(arg->ty, &slot, &stack);
+      idx++;
+    }
+
+    int total_stack = stack;
+    int extra = indirect ? 4 : 0;
+    for (int i = total - 1; i >= 0; i--)
+      suffix[i] = suffix[i + 1] + argv_cls[i].slots * 4;
+
+    if (total_stack)
+      println("addn sp %d", total_stack);
+
+    // Resolve an indirect callee before arguments are staged; keep it on the
+    // stack so nested calls in the arguments cannot clobber it.
+    if (indirect) {
+      gen_expr(node->lhs);
+      push32("1x");
+    }
+
+    for (int i = total - 1; i >= 0; i--) {
+      if (i == 0 && sret) {
+        gen_var_addr(node->ret_buffer);
+        push32("1x");
+        continue;
+      }
+
+      ShyArgClass c = argv_cls[i];
+      if (c.slot >= 0) {
+        gen_expr(argv[i]);
+        push_value(vinfo(argv[i]->ty));
+        continue;
+      }
+
+      // Stack block address is B - S_i. B = sp - extra - pushed register
+      // temporaries, so the destination does not depend on the frame base.
+      if (pass_by_memory(argv[i]->ty)) {
+        gen_expr(argv[i]);
+        println("seta 4x 1x");
+        println("seta 3x sp");
+        if (extra + suffix[i + 1])
+          println("subn 3x %d", extra + suffix[i + 1]);
+        println("subn 3x %d", c.stack_off);
+        println("seta 1x 4x");
+        copy_bytes(argv[i]->ty);
+        continue;
+      }
+
+      gen_expr(argv[i]);
+      println("seta 3x sp");
+      if (extra + suffix[i + 1])
+        println("subn 3x %d", extra + suffix[i + 1]);
+      println("subn 3x %d", c.stack_off);
+
+      switch (arg_type_size(argv[i]->ty)) {
+      case 1:
+        println("put8a 3x 1x");
+        break;
+      case 2:
+        println("put16a 3x 1x");
+        break;
+      case 4:
+        println("puta 3x 1x");
+        break;
+      case 8:
+        // Stack objects use native big-endian order: high word first.
+        println("puta 3x 2x");
+        println("addn 3x 4");
+        println("puta 3x 1x");
+        break;
+      default:
+        unsupported(argv[i], "stack argument size");
+      }
+    }
+
+    for (int i = 0; i < total; i++) {
+      ShyArgClass c = argv_cls[i];
+      for (int s = 0; s < c.slots; s++)
+        pop32(argreg[c.slot + s]);
+    }
+
+    if (indirect) {
+      pop32("ex");
+      println("calla ex");
+    } else {
+      println("calln %s", node->lhs->var->name);
+    }
+
+    if (total_stack)
+      println("subn sp %d", total_stack);
+
+    if (sret)
+      gen_var_addr(node->ret_buffer);
+
+    free(argv);
+    free(argv_cls);
+    free(suffix);
     return;
   }
   case ND_EXCH:
@@ -2158,33 +2303,118 @@ static void emit_text(Obj *prog) {
         println("addn sp %d", fn->stack_size);
     }
 
-    int slot = 0;
-    for (Obj *var = fn->params; var; var = var->next) {
-      if (bare_start)
+    if (bare_start) {
+      for (Obj *var = fn->params; var; var = var->next)
         error_tok(var->tok, "Shy bare _start cannot have parameters");
-      VInfo vi = vinfo(var->ty);
-      if (slot + (vi.is64 ? 2 : 1) > argreg_len)
-        error_tok(var->tok ? var->tok : fn->tok,
-                  "Shy backend supports at most eight argument slots");
-      println("setn 3x %d", var->offset);
-      println("adda 3x fx");
-      if (vi.is64) {
-        println("puta 3x %s", argreg[slot + 1]);
-        println("addn 3x 4");
-        println("puta 3x %s", argreg[slot]);
-        slot += 2;
-      } else {
-        println("puta 3x %s", argreg[slot++]);
-      }
-    }
+      if (fn->va_area)
+        error_tok(fn->tok, "Shy bare _start cannot be variadic");
+    } else {
+      int named_slot = 0, named_stack = 0;
+      for (Obj *var = fn->params; var; var = var->next)
+        classify_arg(var->ty, &named_slot, &named_stack);
 
-    if (fn->va_area && !bare_start && node_refs_var(fn->body, fn->va_area)) {
-      int vararg_slot = 0;
-      for (int i = slot; i < argreg_len; i++) {
-        println("setn 3x %d", fn->va_area->offset + vararg_slot * 4);
+      // The register save area must be captured before parameters are copied
+      // into the frame, because the parameter copies may reuse scratch regs.
+      if (fn->va_area) {
+        int base = fn->va_area->offset;
+
+        for (int i = 0; i < argreg_len; i++) {
+          println("setn 3x %d", base + 12 + i * 4);
+          println("adda 3x fx");
+          println("puta 3x %s", argreg[i]);
+        }
+
+        // va_list descriptor: next register slot, saved register area,
+        // descending stack cursor at the first variadic stack block.
+        println("setn 3x %d", base);
         println("adda 3x fx");
-        println("puta 3x %s", argreg[i]);
-        vararg_slot++;
+        println("putn 3x %d", named_slot);
+
+        println("setn 3x %d", base + 4);
+        println("adda 3x fx");
+        println("setn 1x %d", base + 12);
+        println("adda 1x fx");
+        println("puta 3x 1x");
+
+        println("setn 3x %d", base + 8);
+        println("adda 3x fx");
+        println("seta 1x fx");
+        println("subn 1x 8");
+        if (named_stack)
+          println("subn 1x %d", named_stack);
+        println("puta 3x 1x");
+      }
+
+      int pslot = 0, pstack = 0;
+      for (Obj *var = fn->params; var; var = var->next) {
+        ShyArgClass c = classify_arg(var->ty, &pslot, &pstack);
+        int size = arg_type_size(var->ty);
+
+        if (pass_by_memory(var->ty)) {
+          println("setn 3x %d", var->offset);
+          println("adda 3x fx");
+          println("seta 1x fx");
+          println("subn 1x 8");
+          println("subn 1x %d", c.stack_off);
+          copy_bytes(var->ty);
+          continue;
+        }
+
+        if (c.slot >= 0) {
+          println("setn 3x %d", var->offset);
+          println("adda 3x fx");
+          switch (size) {
+          case 1:
+            println("put8a 3x %s", argreg[c.slot]);
+            break;
+          case 2:
+            println("put16a 3x %s", argreg[c.slot]);
+            break;
+          case 4:
+            println("puta 3x %s", argreg[c.slot]);
+            break;
+          case 8:
+            // Register slots are low-word-first; memory is high-word-first.
+            println("puta 3x %s", argreg[c.slot + 1]);
+            println("addn 3x 4");
+            println("puta 3x %s", argreg[c.slot]);
+            break;
+          default:
+            error_tok(var->tok, "unsupported parameter size");
+          }
+          continue;
+        }
+
+        // Scalar stack parameter: the block already uses native object order.
+        println("setn 3x %d", var->offset);
+        println("adda 3x fx");
+        println("seta 1x fx");
+        println("subn 1x 8");
+        println("subn 1x %d", c.stack_off);
+        switch (size) {
+        case 1:
+          println("get8a 1x 1x");
+          println("put8a 3x 1x");
+          break;
+        case 2:
+          println("get16a 1x 1x");
+          println("put16a 3x 1x");
+          break;
+        case 4:
+          println("geta 1x 1x");
+          println("puta 3x 1x");
+          break;
+        case 8:
+          println("geta 2x 1x");
+          println("addn 1x 4");
+          println("geta 1x 1x");
+          println("puta 3x 2x");
+          println("addn 3x 4");
+          println("puta 3x 1x");
+          break;
+        default:
+          error_tok(var->tok, "unsupported parameter size");
+        }
       }
     }
 

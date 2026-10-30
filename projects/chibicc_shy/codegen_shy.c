@@ -6,13 +6,18 @@
 // replaces the final code generation stage. It emits Shy assembly text, then
 // ShyProject's own asm/linker can produce .sobj/.sfs.
 //
-// ABI v0:
+// ABI v1:
 // - Shy uses ILP32-style pointers: int and pointer are 32-bit, long remains
-//   64-bit.
+//   64-bit. Memory is big-endian, so a 64-bit object stores its high word first.
 // - Scalar return: 1x=low32, 2x=high32 when the value is 64-bit.
-// - Integer/pointer args consume one 32-bit slot for <=32-bit values and two
-//   slots for 64-bit values. Slots are registers 4x..bx.
-// - fx is the frame pointer. Shy stack grows upward.
+// - Scalars take one 32-bit register slot (two for 64-bit, low word first) when
+//   the whole value fits in 4x..bx; otherwise they go on the stack. A scalar is
+//   never split between registers and memory, and a scalar that misses the
+//   registers does not consume a slot for later scalars.
+// - Structs and unions are always passed by value on the stack and returned
+//   through a hidden pointer in 4x.
+// - fx is the frame pointer. Shy stack grows upward and the return address sits
+//   at fx-8, so stack arguments live below that.
 // - By default, _start initializes sp, calls main, and writes main's low return
 //   word to exit. `#![no_main]` disables this startup and makes user `_start`
 //   a bare entry with no prologue.
@@ -99,6 +104,10 @@ static bool is_64bit(Type *ty) {
   return ty->size == 8;
 }
 
+static bool is_aggregate(Type *ty) {
+  return ty->kind == TY_STRUCT || ty->kind == TY_UNION;
+}
+
 static VInfo vinfo(Type *ty) {
   if (ty->kind == TY_ARRAY || ty->kind == TY_FUNC)
     return 1;
@@ -167,6 +176,7 @@ static void set_bool_from_rs(void) {
 
 static void gen_expr(Node *node);
 static void gen_stmt(Node *node);
+static void cmp_zero(VInfo vi);
 
 static bool asm_uses_addr(Node *node, AsmBinding *binding) {
   char *needle = format("{&%s}", binding->name);
@@ -214,6 +224,22 @@ static void gen_addr(Node *node) {
     if (node->member->offset)
       println("addn 1x %d", node->member->offset);
     return;
+  case ND_COND: {
+    int c = count();
+    gen_expr(node->cond);
+    cmp_zero(vinfo(node->cond->ty));
+    println("jmpn .L.addr.else.%d", c);
+    gen_addr(node->then);
+    println("ujmpn .L.addr.end.%d", c);
+    println(".L.addr.else.%d:", c);
+    gen_addr(node->els);
+    println(".L.addr.end.%d:", c);
+    return;
+  }
+  case ND_STMT_EXPR:
+    // The trailing expression leaves the aggregate address in 1x.
+    gen_expr(node);
+    return;
   case ND_FUNCALL:
     if (node->ret_buffer) {
       gen_expr(node);
@@ -235,6 +261,9 @@ static void gen_addr(Node *node) {
 
 static void load(Type *ty) {
   if (ty->kind == TY_ARRAY || ty->kind == TY_FUNC)
+    return;
+  // Aggregate rvalues are represented by their address in 1x.
+  if (ty->kind == TY_STRUCT || ty->kind == TY_UNION)
     return;
 
   switch (ty->size) {
@@ -302,38 +331,48 @@ static void store(Type *ty) {
   }
 }
 
+// Same as `store`, but the destination address is already in `addr` instead of
+// being popped from the stack. `size` is the ABI size, so arrays and functions
+// are stored as the pointers they decay to.
+static void store_to_addr_reg(int size, char *addr) {
+  switch (size) {
+  case 1:
+    println("put8a %s 1x", addr);
+    return;
+  case 2:
+    println("put16a %s 1x", addr);
+    return;
+  case 4:
+    println("puta %s 1x", addr);
+    return;
+  case 8:
+    println("puta %s 2x", addr);
+    println("addn %s 4", addr);
+    println("puta %s 1x", addr);
+    return;
+  default:
+    error("Shy backend cannot store scalar of size %d", size);
+  }
+}
+
+// Byte copy: aggregate sources may be packed or subobjects with align 1/2, so
+// word-sized accesses would trap on unaligned addresses.
 static void copy_bytes(Type *ty) {
+  if (ty->size == 0)
+    return;
+
   int c = count();
-  int words = ty->size / 4;
-  int tail = ty->size % 4;
-
-  if (words) {
-    println("setn cx %d", words);
-    println(".L.copy.words.%d:", c);
-    println("equn cx 0");
-    println("jmpn .L.copy.words.done.%d", c);
-    println("geta dx 1x");
-    println("puta 3x dx");
-    println("addn 1x 4");
-    println("addn 3x 4");
-    println("subn cx 1");
-    println("ujmpn .L.copy.words.%d", c);
-    println(".L.copy.words.done.%d:", c);
-  }
-
-  if (tail & 2) {
-    println("get16a dx 1x");
-    println("put16a 3x dx");
-    if (tail & 1) {
-      println("addn 1x 2");
-      println("addn 3x 2");
-    }
-  }
-
-  if (tail & 1) {
-    println("get8a dx 1x");
-    println("put8a 3x dx");
-  }
+  println("setn cx %d", ty->size);
+  println(".L.copy.bytes.%d:", c);
+  println("equn cx 0");
+  println("jmpn .L.copy.done.%d", c);
+  println("get8a dx 1x");
+  println("put8a 3x dx");
+  println("addn 1x 1");
+  println("addn 3x 1");
+  println("subn cx 1");
+  println("ujmpn .L.copy.bytes.%d", c);
+  println(".L.copy.done.%d:", c);
 }
 
 static void copy_struct_return_to_hidden_buffer(Node *expr) {
@@ -784,27 +823,126 @@ static void gen_binary(Node *node) {
   }
 }
 
-static int count_arg_slots(Node *args) {
-  int n = 0;
-  for (Node *arg = args; arg; arg = arg->next)
-    n += vinfo_is64(vinfo(arg->ty)) ? 2 : 1;
-  return n;
+// ABI v1 argument placement: scalars use the next free register slot when the
+// whole value fits, everything else goes on the stack. Aggregates never use
+// argument registers and never split between registers and memory.
+static int arg_type_size(Type *ty) {
+  // Arrays and functions are passed as pointers.
+  if (ty->kind == TY_ARRAY || ty->kind == TY_FUNC)
+    return 4;
+  return ty->size;
 }
 
-static int count_funcall_slots(Node *node) {
-  int n = count_arg_slots(node->args);
-  if (node->ret_buffer && node->ty->size > 16)
-    n += vinfo_is64(vinfo(pointer_to(node->ty))) ? 2 : 1;
-  return n;
+static bool pass_by_memory(Type *ty) {
+  return is_aggregate(ty) || arg_type_size(ty) > 8;
 }
 
-static void push_args_reverse(Node *arg) {
+static int stack_block_size(Type *ty) {
+  return align_to(arg_type_size(ty), 4);
+}
+
+static int arg_slots(Type *ty) {
+  return arg_type_size(ty) > 4 ? 2 : 1;
+}
+
+static bool arg_fits_register(Type *ty, int slot) {
+  return !pass_by_memory(ty) && slot + arg_slots(ty) <= argreg_len;
+}
+
+// Stack bytes the caller must reserve, plus the number of argument registers
+// that end up used (including the hidden aggregate-result pointer).
+static int classify_call_args(Node *node, int *reg_slots) {
+  int slot = node->ret_buffer ? 1 : 0;
+  int bytes = 0;
+  for (Node *arg = node->args; arg; arg = arg->next) {
+    if (!is_aggregate(arg->ty) && arg_type_size(arg->ty) > 8)
+      unsupported(arg, "arguments wider than 8 bytes");
+    if (arg_fits_register(arg->ty, slot))
+      slot += arg_slots(arg->ty);
+    else
+      bytes += stack_block_size(arg->ty);
+  }
+  *reg_slots = slot;
+  return bytes;
+}
+
+// Register slot assigned to `target`, or -1 when it is passed on the stack.
+static int arg_register_slot(Node *node, Node *target) {
+  int slot = node->ret_buffer ? 1 : 0;
+  for (Node *arg = node->args; arg; arg = arg->next) {
+    if (arg_fits_register(arg->ty, slot)) {
+      if (arg == target)
+        return slot;
+      slot += arg_slots(arg->ty);
+    } else if (arg == target) {
+      return -1;
+    }
+  }
+  return -1;
+}
+
+// Cumulative padded size of the stack arguments through `target`.
+static int stack_bytes_through(Node *node, Node *target) {
+  int slot = node->ret_buffer ? 1 : 0;
+  int bytes = 0;
+  for (Node *arg = node->args; arg; arg = arg->next) {
+    if (arg_fits_register(arg->ty, slot))
+      slot += arg_slots(arg->ty);
+    else
+      bytes += stack_block_size(arg->ty);
+    if (arg == target)
+      break;
+  }
+  return bytes;
+}
+
+// Bytes already pushed by the arguments that are evaluated before `target`,
+// which are the ones later in source order because calls evaluate backwards.
+static int pushed_bytes_after(Node *node, Node *target) {
+  int slot = node->ret_buffer ? 1 : 0;
+  int bytes = 0;
+  bool after = false;
+  for (Node *arg = node->args; arg; arg = arg->next) {
+    bool in_reg = arg_fits_register(arg->ty, slot);
+    if (in_reg)
+      slot += arg_slots(arg->ty);
+    if (after && in_reg)
+      bytes += 4 * arg_slots(arg->ty);
+    if (arg == target)
+      after = true;
+  }
+  return bytes;
+}
+
+// Evaluates the arguments right to left. Register arguments are pushed;
+// stack arguments are copied straight into the call area, which sits below
+// `sp` once the caller has reserved it. Because the later arguments are
+// already pushed when a stack argument is written, its block is
+// `pushed + own stack offset` bytes below the current `sp`.
+static void gen_call_args(Node *node, Node *arg) {
   if (!arg)
     return;
-  push_args_reverse(arg->next);
-  VInfo vi = vinfo(arg->ty);
-  gen_expr(arg);
-  push_value(vi);
+  gen_call_args(node, arg->next);
+
+  if (arg_register_slot(node, arg) >= 0) {
+    gen_expr(arg);
+    push_value(vinfo(arg->ty));
+    return;
+  }
+
+  int below = pushed_bytes_after(node, arg) + stack_bytes_through(node, arg);
+  // An aggregate expression denotes storage, so take its address; everything
+  // else is evaluated for its value.
+  if (is_aggregate(arg->ty))
+    gen_addr(arg);
+  else
+    gen_expr(arg);
+  println("seta 3x sp");
+  println("subn 3x %d", below);
+  if (is_aggregate(arg->ty))
+    copy_bytes(arg->ty);
+  else
+    store_to_addr_reg(arg_type_size(arg->ty), "3x");
 }
 
 static void gen_expr(Node *node) {
@@ -986,23 +1124,39 @@ static void gen_expr(Node *node) {
     return;
   }
   case ND_FUNCALL: {
-    int slots = count_funcall_slots(node);
-    if (slots > argreg_len)
-      unsupported(node, "function calls with too many register arguments");
-
-    push_args_reverse(node->args);
-    if (node->ret_buffer && node->ty->size > 16) {
-      VInfo vi = vinfo(pointer_to(node->ty));
-      gen_var_addr(node->ret_buffer);
-      push_value(vi);
-    }
-
-    for (int i = 0; i < slots; i++)
-      pop32(argreg[i]);
-
     if (node->lhs->kind != ND_VAR)
       unsupported(node, "indirect function call");
+
+    int reg_slots;
+    int stack_bytes = classify_call_args(node, &reg_slots);
+
+    // The stack argument area sits above the caller's locals and below the
+    // call's sp, so reserve it before evaluating anything. Nested calls in
+    // the arguments allocate above this area and cannot overwrite it.
+    if (stack_bytes)
+      println("addn sp %d", stack_bytes);
+
+    gen_call_args(node, node->args);
+
+    // The hidden aggregate-result pointer occupies 4x, so push it last.
+    if (node->ret_buffer) {
+      gen_var_addr(node->ret_buffer);
+      push_value(vinfo(pointer_to(node->ty)));
+    }
+
+    for (int i = 0; i < reg_slots; i++)
+      pop32(argreg[i]);
+
     println("calln %s", node->lhs->var->name);
+
+    if (stack_bytes)
+      println("subn sp %d", stack_bytes);
+
+    // Like every other aggregate expression, an aggregate call denotes its
+    // result storage. The hidden buffer is a stable local of this function, so
+    // its address can be rebuilt after the call.
+    if (node->ret_buffer)
+      gen_var_addr(node->ret_buffer);
     return;
   }
   case ND_EXCH:
@@ -1034,6 +1188,8 @@ static void gen_expr(Node *node) {
     gen_binary(node);
     return;
   case ND_STMT_EXPR:
+    // Run the statements in order. The last one is an expression statement,
+    // so its value (or aggregate address) is what the block yields.
     for (Node *n = node->body; n; n = n->next)
       gen_stmt(n);
     return;
@@ -1127,11 +1283,9 @@ static void gen_stmt(Node *node) {
     return;
   case ND_RETURN:
     if (node->lhs) {
-      Type *ty = node->lhs->ty;
-      if ((ty->kind == TY_STRUCT || ty->kind == TY_UNION) && ty->size > 16)
+      // ABI v1: every struct/union result goes through the hidden pointer.
+      if (is_aggregate(node->lhs->ty))
         copy_struct_return_to_hidden_buffer(node->lhs);
-      else if (ty->kind == TY_STRUCT || ty->kind == TY_UNION)
-        unsupported(node, "returning small struct/union values");
       else
         gen_expr(node->lhs);
     }
@@ -1319,34 +1473,80 @@ static void emit_text(Obj *prog) {
         println("addn sp %d", fn->stack_size);
     }
 
-    int slot = 0;
-    for (Obj *var = fn->params; var; var = var->next) {
-      if (bare_start)
-        error_tok(var->tok, "Shy bare _start cannot have parameters");
-      VInfo vi = vinfo(var->ty);
-      if (slot + (vinfo_is64(vi) ? 2 : 1) > argreg_len)
-        error_tok(var->tok ? var->tok : fn->tok,
-                  "Shy backend supports at most eight argument slots");
-      println("setn 3x %d", var->offset);
-      println("adda 3x fx");
-      if (vinfo_is64(vi)) {
-        println("puta 3x %s", argreg[slot + 1]);
-        println("addn 3x 4");
-        println("puta 3x %s", argreg[slot]);
-        slot += 2;
-      } else {
-        println("puta 3x %s", argreg[slot++]);
+    // Variadic state, ABI v1. __va_area__ holds the next free register slot at
+    // +0, a pointer to the saved slots at +4, a descending stack cursor at +8,
+    // and the eight argument registers at +12. The registers are saved before
+    // the parameter copies so nothing can clobber them first.
+    if (fn->va_area && !bare_start) {
+      for (int i = 0; i < argreg_len; i++) {
+        println("setn 3x %d", fn->va_area->offset + 12 + i * 4);
+        println("adda 3x fx");
+        println("puta 3x %s", argreg[i]);
       }
     }
 
-    if (fn->va_area && !bare_start) {
-      int vararg_slot = 0;
-      for (int i = slot; i < argreg_len; i++) {
-        println("setn 3x %d", fn->va_area->offset + vararg_slot * 4);
+    int slot = 0;
+    int stack_used = 0;
+    for (Obj *var = fn->params; var; var = var->next) {
+      if (bare_start)
+        error_tok(var->tok, "Shy bare _start cannot have parameters");
+
+      if (!pass_by_memory(var->ty) && slot + arg_slots(var->ty) <= argreg_len) {
+        println("setn 3x %d", var->offset);
         println("adda 3x fx");
-        println("puta 3x %s", argreg[i]);
-        vararg_slot++;
+        switch (arg_type_size(var->ty)) {
+        case 1:
+          println("put8a 3x %s", argreg[slot]);
+          break;
+        case 2:
+          println("put16a 3x %s", argreg[slot]);
+          break;
+        case 4:
+          println("puta 3x %s", argreg[slot]);
+          break;
+        case 8:
+          // Register slots are low-word-first; memory is high-word-first.
+          println("puta 3x %s", argreg[slot + 1]);
+          println("addn 3x 4");
+          println("puta 3x %s", argreg[slot]);
+          break;
+        default:
+          error_tok(var->tok, "unsupported parameter size");
+        }
+        slot += arg_slots(var->ty);
+        continue;
       }
+
+      // Stack parameters are copied out of their block below the return
+      // address at fx-8, in the same order the caller laid them down.
+      stack_used += stack_block_size(var->ty);
+      println("seta 1x fx");
+      println("subn 1x %d", 8 + stack_used);
+      println("setn 3x %d", var->offset);
+      println("adda 3x fx");
+      copy_bytes(var->ty);
+    }
+
+    if (fn->va_area && !bare_start) {
+      // +0: first register slot a variadic argument may use.
+      println("setn 3x %d", fn->va_area->offset);
+      println("adda 3x fx");
+      println("setn 4x %d", slot);
+      println("puta 3x 4x");
+
+      // +4: address of the saved register area.
+      println("setn 3x %d", fn->va_area->offset + 4);
+      println("adda 3x fx");
+      println("setn 4x %d", fn->va_area->offset + 12);
+      println("adda 4x fx");
+      println("puta 3x 4x");
+
+      // +8: cursor just below the named stack arguments.
+      println("setn 3x %d", fn->va_area->offset + 8);
+      println("adda 3x fx");
+      println("seta 4x fx");
+      println("subn 4x %d", 8 + stack_used);
+      println("puta 3x 4x");
     }
 
     gen_stmt(fn->body);

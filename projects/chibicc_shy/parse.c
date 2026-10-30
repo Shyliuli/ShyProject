@@ -262,6 +262,12 @@ static bool same_struct_type(Type *a, Type *b) {
          is_compatible(a, b);
 }
 
+// ABI v1: every struct/union result is returned through caller storage, no
+// matter how small it is.
+static bool returns_by_sret(Type *ty) {
+  return ty->kind == TY_STRUCT || ty->kind == TY_UNION;
+}
+
 static Method *find_method(Type *ty, Token *name) {
   for (Method *m = methods; m; m = m->next)
     if (same_struct_type(m->self_ty, ty) &&
@@ -545,8 +551,7 @@ static void collect_sret_return_var(Node *node, Type *rty, SretReturnVar *retvar
 
 static void mark_sret_alias_candidate(Obj *fn) {
   Type *rty = fn->ty->return_ty;
-  if ((rty->kind != TY_STRUCT && rty->kind != TY_UNION) || rty->size <= 16 ||
-      !has_drop(rty))
+  if (!returns_by_sret(rty) || !has_drop(rty))
     return;
 
   SretReturnVar retvar = {};
@@ -1765,8 +1770,7 @@ static Node *lvar_initializer(Token **rest, Token *tok, Obj *var) {
     move_raii_value(init->expr);
 
   if (init->expr && init->expr->kind == ND_FUNCALL &&
-      (var->ty->kind == TY_STRUCT || var->ty->kind == TY_UNION) &&
-      var->ty->size > 16 && is_compatible(var->ty, init->expr->ty)) {
+      returns_by_sret(var->ty) && is_compatible(var->ty, init->expr->ty)) {
     if (init->expr->ret_buffer && init->expr->ret_buffer != var)
       init->expr->ret_buffer->is_elided = true;
     init->expr->ret_buffer = var;
@@ -3986,7 +3990,7 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
   // A buffer for a struct/union return value is passed
   // as the hidden first parameter.
   Type *rty = ty->return_ty;
-  if ((rty->kind == TY_STRUCT || rty->kind == TY_UNION) && rty->size > 16)
+  if (returns_by_sret(rty))
     new_lvar("", pointer_to(rty));
 
   fn->params = locals;
