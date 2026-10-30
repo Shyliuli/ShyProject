@@ -41,7 +41,15 @@ impl FnLower<'_> {
             && let Some((field_ty, offset, width, bit_offset)) =
                 self.l.bit_field(record, &name.text)
         {
-            let base = self.object_address(object_value, span)?;
+            // `p->a` dereferences the pointer; `s.a` takes the object's
+            // address. Without this split the arrow form would read the
+            // pointer variable itself.
+            let base = if self.l.types.is_record(object_ty) {
+                self.object_address(object_value, span)?
+            } else {
+                let (operand, _) = self.rvalue_val(object_value, span)?;
+                super::address_operand(operand)
+            };
             let address = base.with_offset(i64::from(offset));
             let value = self.bit_field_value(address, field_ty, width, bit_offset, span);
             return Ok(ExprVal {
