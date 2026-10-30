@@ -108,11 +108,26 @@ struct Writer<'a> {
 impl Writer<'_> {
     fn run(&mut self) -> Result<(), Diagnostic> {
         self.check_symbols()?;
+        self.emit_resources();
         self.out.push_str("___DEFINE___\n\n___DATA___\n\n");
         self.emit_data()?;
         self.out.push_str("\n___CODE___\n\n");
         self.emit_code()?;
         Ok(())
+    }
+
+    /// Emit the linked-image hints the assembler stores in the object file.
+    ///
+    /// These come from `#![mem(...)]` and `#![stack(...)]` in the main input
+    /// file and must reach the object, because the linker reads them to size
+    /// the final image.
+    fn emit_resources(&mut self) {
+        if let Some(bytes) = self.module.resources.memory_bytes {
+            self.line(format!("#![mem({bytes})]"));
+        }
+        if let Some(bytes) = self.module.resources.stack_bytes {
+            self.line(format!("#![stack({bytes})]"));
+        }
     }
 
     fn line(&mut self, text: impl AsRef<str>) {
