@@ -1,0 +1,21 @@
+#![no_main]
+#include "../../kernel/arch.h"
+
+#define UART_THR 0x10000000
+#define UART_LSR 0x10000005
+
+void arch_uart_putc(int c) {
+    volatile unsigned char *lsr = (volatile unsigned char *)UART_LSR;
+    volatile unsigned char *thr = (volatile unsigned char *)UART_THR;
+    while ((*lsr & 0x20) == 0) { }
+    *thr = (unsigned char)c;
+}
+
+int arch_uart_getc(void) {
+    volatile unsigned char *lsr = (volatile unsigned char *)UART_LSR;
+    volatile unsigned char *rbr = (volatile unsigned char *)UART_THR;
+    if ((*lsr & 1) == 0) return -1;
+    return (int)*rbr;
+}
+
+/* arch_shutdown lives in trap.S: it uses SBI, which needs no page mapping. */

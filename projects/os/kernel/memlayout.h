@@ -1,6 +1,20 @@
 #ifndef SHYOS_MEMLAYOUT_H
 #define SHYOS_MEMLAYOUT_H
 
+#ifdef SHYOS_RISCV
+/* QEMU virt: RAM starts at 0x8000_0000 and the kernel is loaded at 0x8020_0000. */
+#define PHYS_BASE 0x80000000
+#define KERNBASE 0x80200000
+#define KERN_HEAP_START 0x80800000
+#define KERN_HEAP_END 0x87800000
+#define SCHED_STACK_TOP 0x87fff000
+#define USER_SEG_START 0
+#define USER_SEG_SIZE 0x00100000
+#define USER_SEG_COUNT 16
+#define USER_ARG0_ADDR 0x000ef000
+#define USER_ARG_ADDR 0x000ef040
+#define PHYSTOP 0x88000000
+#else
 #define KERNBASE 0x00000100
 
 #ifdef SHYOS_SMALL
@@ -24,6 +38,7 @@
 #define USER_ARG0_ADDR 0x000eef80
 #define USER_ARG_ADDR 0x000ef000
 #define PHYSTOP 0x08000000
+#endif
 #endif
 
 #define USER_ENTRY 0x00000100

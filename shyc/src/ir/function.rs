@@ -100,6 +100,9 @@ pub struct Function {
     /// Target facts this function was built for. Every size, alignment, and
     /// derived result type in the function is computed from it.
     pub layout: Layout,
+    /// `static` functions have internal linkage: their symbol is private to the
+    /// translation unit and may repeat in other units.
+    pub internal: bool,
     /// SSA values for the function parameters, in signature order.
     pub params: Vec<ValueId>,
     pub entry: BlockId,
@@ -128,6 +131,7 @@ impl Function {
             signature,
             abi,
             layout,
+            internal: false,
             params: Vec::new(),
             entry: BlockId(0),
             values: Vec::new(),

@@ -1,0 +1,55 @@
+#![no_main]
+
+/* The ShyISA kernel gets these from hand-written assembly; the portable build
+   uses plain C. */
+void *memcpy(void *dst, const void *src, unsigned int n) {
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+
+    for (unsigned int i = 0; i < n; i++) {
+        d[i] = s[i];
+    }
+    return dst;
+}
+
+void *memset(void *dst, int c, unsigned int n) {
+    unsigned char *d = (unsigned char *)dst;
+
+    for (unsigned int i = 0; i < n; i++) {
+        d[i] = (unsigned char)c;
+    }
+    return dst;
+}
+
+int memcmp(const void *a, const void *b, unsigned int n) {
+    const unsigned char *x = (const unsigned char *)a;
+    const unsigned char *y = (const unsigned char *)b;
+
+    for (unsigned int i = 0; i < n; i++) {
+        if (x[i] != y[i]) {
+            return (int)x[i] - (int)y[i];
+        }
+    }
+    return 0;
+}
+
+unsigned int strlen(const char *s) {
+    unsigned int n = 0;
+
+    while (s[n]) {
+        n = n + 1;
+    }
+    return n;
+}
+
+int strcmp(const char *a, const char *b) {
+    int i = 0;
+
+    while (a[i] && b[i]) {
+        if (a[i] != b[i]) {
+            return (int)a[i] - (int)b[i];
+        }
+        i = i + 1;
+    }
+    return (int)a[i] - (int)b[i];
+}

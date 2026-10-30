@@ -36,6 +36,17 @@ void *kalloc(unsigned int n) {
     return (void *)old;
 }
 
+/* Frames must be 4 KiB aligned: the bump allocator is not. */
+static void *kalloc_page_aligned(void) {
+    void *page;
+
+    lock_acquire(&mem_lock);
+    kheap = (kheap + 4095) & ~4095;
+    lock_release(&mem_lock);
+    page = kalloc(4096);
+    return page;
+}
+
 void *kalloc_page(void) {
     lock_acquire(&mem_lock);
     if (kpage_free_count > 0) {
@@ -46,7 +57,7 @@ void *kalloc_page(void) {
     }
     lock_release(&mem_lock);
 
-    return kalloc(4096);
+    return kalloc_page_aligned();
 }
 
 void kfree_page(void *p) {

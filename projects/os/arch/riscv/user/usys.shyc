@@ -1,0 +1,94 @@
+#![no_main]
+
+#include "usys.h"
+
+long sys_call(long number, long a, long b, long c);
+
+int write(int fd, const char *buf, int n) {
+    return (int)sys_call(SYS_write, fd, (long)buf, n);
+}
+
+int read(int fd, char *buf, int n) {
+    return (int)sys_call(SYS_read, fd, (long)buf, n);
+}
+
+int open(const char *path) {
+    return (int)sys_call(SYS_open, (long)path, 0, 0);
+}
+
+int close(int fd) {
+    return (int)sys_call(SYS_close, fd, 0, 0);
+}
+
+int fork(void) {
+    return (int)sys_call(SYS_fork, 0, 0, 0);
+}
+
+int getpid(void) {
+    return (int)sys_call(SYS_getpid, 0, 0, 0);
+}
+
+void user_exit(int status) {
+    sys_call(SYS_exit, status, 0, 0);
+    for (;;) { }
+}
+
+void yield(void) {
+    sys_call(SYS_yield, 0, 0, 0);
+}
+
+int exec(const char *path, const char *arg) {
+    return (int)sys_call(SYS_exec, (long)path, (long)arg, 0);
+}
+
+int wait(int *status) {
+    return (int)sys_call(SYS_wait, (long)status, 0, 0);
+}
+
+int kill(int pid) {
+    return (int)sys_call(SYS_kill, pid, 0, 0);
+}
+
+int sleep(int chan) {
+    return (int)sys_call(SYS_sleep, chan, 0, 0);
+}
+
+int wakeup(int chan) {
+    return (int)sys_call(SYS_wakeup, chan, 0, 0);
+}
+
+int p3counter(int op) {
+    return (int)sys_call(SYS_p3counter, op, 0, 0);
+}
+
+int pipe(int fds[2]) {
+    return (int)sys_call(SYS_pipe, (long)fds, 0, 0);
+}
+
+int dup2(int oldfd, int newfd) {
+    return (int)sys_call(SYS_dup2, oldfd, newfd, 0);
+}
+
+int create(const char *path) {
+    return (int)sys_call(SYS_create, (long)path, 0, 0);
+}
+
+int dirent(int index, char *buf, int max) {
+    return (int)sys_call(SYS_dirent, index, (long)buf, max);
+}
+
+int mkdir(const char *path) {
+    return (int)sys_call(SYS_mkdir, (long)path, 0, 0);
+}
+
+int rm(const char *path) {
+    return (int)sys_call(SYS_rm, (long)path, 0, 0);
+}
+
+int psline(int index, char *buf, int max) {
+    return (int)sys_call(SYS_psline, index, (long)buf, max);
+}
+
+void *sbrk(int n) {
+    return (void *)sys_call(SYS_sbrk, n, 0, 0);
+}

@@ -1,59 +1,34 @@
 #![no_main]
 
-#ifdef SHYOS_RISCV
-void uart_putc(int c);
-void user_enter(void *entry, void *user_sp, void *kernel_sp);
-void user_main(void);
-
-extern unsigned char boot_stack_top;
-extern unsigned char user_stack_top;
-
-void kmain(void) {
-    char *banner = "ShyOS boot\n";
-
-    for (int i = 0; banner[i]; i++) {
-        uart_putc(banner[i]);
-    }
-
-    /* Same shape as ShyISA `enteruser`: drop to user mode at a fresh stack. */
-    user_enter((void *)user_main, (void *)&user_stack_top,
-               (void *)&boot_stack_top);
-}
-
-void user_main(void) {
-    for (;;) {
-        asm("li a7, 1\necall");
-    }
-}
-
-#else
-
 #include <stdint.shyh>
+#include "arch.h"
 #include "fs.h"
 #include "proc.h"
 #include "memlayout.h"
 
 #include <string.shyh>
 
-void uart_putc(int c);
 void mem_init(void);
 void scheduler(void);
+void trap_entry(void);
 
 extern struct proc *current;
 
-// 引导栈和调度栈都从低地址向上生长，入口汇编按符号取它们的栈底。
+#ifndef SHYOS_RISCV
+// ShyISA 引导栈：入口汇编按符号取它的栈底。
 unsigned char boot_stack[4096];
+#endif
 unsigned int sched_stack_top = SCHED_STACK_TOP;
 unsigned int user_seg_size = USER_SEG_SIZE;
 
 static void load_init(struct proc *p) {
     struct fs_file *file = fs_lookup("init");
-    unsigned char *dst = (unsigned char *)p->segbase;
+    unsigned char *dst = (unsigned char *)arch_user_ptr(p, 0);
 
     if (!user_image_layout_ok(file)) {
-        uart_putc('!');
-        uart_putc('\n');
-        asm("setn exit 0");
+        arch_uart_putc('!');
+        arch_uart_putc('\n');
+        arch_shutdown(0);
     }
 
     memcpy(dst, file->data, file->size);
@@ -72,25 +47,26 @@ static void load_init(struct proc *p) {
 
 void kmain(void) {
     struct proc *p;
+    char *banner = "ShyOS boot\n";
 
     mem_init();
+
+#ifdef SHYOS_RISCV
+    arch_vm_init();
+    arch_vm_enable(arch_vm_kernel_root());
+#endif
+
     proc_init();
 
-    uart_putc('S');
-    uart_putc('h');
-    uart_putc('y');
-    uart_putc('O');
-    uart_putc('S');
-    uart_putc(' ');
-    uart_putc('b');
-    uart_putc('o');
-    uart_putc('o');
-    uart_putc('t');
-    uart_putc('\n');
+    for (int i = 0; banner[i]; i++) {
+        arch_uart_putc(banner[i]);
+    }
 
-    // Install the trap handler.
-    asm("setn trap trap_entry");
-    asm("setn tm 100");
+    arch_set_trap((void *)trap_entry);
+    arch_set_timer(100);
+#ifdef SHYOS_RISCV
+    arch_enable_timer();
+#endif
 
     p = alloc_proc();
     load_init(p);
@@ -101,5 +77,3 @@ void kmain(void) {
     // Never returns.
     scheduler();
 }
-
-#endif

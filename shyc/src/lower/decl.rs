@@ -497,13 +497,17 @@ impl Lowerer {
             };
             match symbol {
                 Some(symbol) => {
-                    if size != 4 {
+                    if size != self.layout.pointer_bytes {
                         return Err(Diagnostic::new(
                             span,
-                            "the IR relocation format is 32-bit, so a pointer initializer needs a 32-bit pointer target",
+                            format!(
+                                "a pointer initializer needs {} bytes on this target, but the \
+                                 pointer is {size} bytes",
+                                self.layout.pointer_bytes
+                            ),
                         ));
                     }
-                    if offset + 4 > global.bytes.len() as u32 {
+                    if offset + size > global.bytes.len() as u32 {
                         return Err(Diagnostic::new(
                             span,
                             "relocation is out of bounds for this object",

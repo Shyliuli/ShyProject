@@ -1,0 +1,39 @@
+#![no_main]
+
+/* ShyISA address spaces are hardware segments: a process owns one segment and
+   the `segs`/`sege` registers add its base to every user address. */
+#include "../../kernel/arch.h"
+#include "../../kernel/memlayout.h"
+#include "../../kernel/trap.h"
+#include "../../kernel/proc.h"
+
+unsigned int seg_alloc(void);
+void seg_free(unsigned int base);
+void *memcpy(void *dst, const void *src, unsigned int n);
+
+void *arch_user_ptr(struct proc *p, unsigned int user_addr) {
+    return (void *)(p->segbase + user_addr);
+}
+
+void arch_space_alloc(struct proc *p) {
+    p->segbase = seg_alloc();
+}
+
+void arch_space_free(struct proc *p) {
+    if (p->segbase != 0) {
+        seg_free(p->segbase);
+    }
+}
+
+int arch_space_copy(struct proc *parent, struct proc *child) {
+    memcpy((void *)child->segbase, (void *)parent->segbase, USER_SEG_SIZE);
+    return 0;
+}
+
+void arch_space_load(struct proc *p, const void *src, unsigned int n) {
+    memcpy((void *)p->segbase, src, n);
+}
+
+void ctx_set_ret(struct context *ctx, int value) {
+    ctx->regs[1] = (unsigned int)value;
+}

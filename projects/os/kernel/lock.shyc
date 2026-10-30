@@ -1,6 +1,9 @@
 #![no_main]
 
+#include "arch.h"
+
 #include "lock.h"
+#include "arch.h"
 
 static Lock p3_counter_lock;
 static int p3_counter;
@@ -11,17 +14,7 @@ impl Lock {
     }
 
     void acquire(self *lock) {
-        int old;
-        int *addr = &lock.locked;
-
-        while (1) {
-            old = 1;
-            asm!(addr, old) {
-                "atoma {addr} {old}"
-            };
-            if (old == 0) {
-                return;
-            }
+        while (arch_atomic_exchange(&lock.locked, 1) != 0) {
         }
     }
 

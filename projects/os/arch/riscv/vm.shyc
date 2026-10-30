@@ -1,0 +1,227 @@
+#![no_main]
+
+/* Sv39 address spaces. Every process owns a root page table whose low entry
+   maps its 1 MiB user segment; the kernel identity-maps all RAM, so any user
+   address can be translated to a physical alias by walking that process's
+   table even when it is not the running one. */
+#include "../../kernel/arch.h"
+#include "../../kernel/memlayout.h"
+#include "../../kernel/trap.h"
+#include "../../kernel/proc.h"
+
+#define PTE_V 0x01
+#define PTE_R 0x02
+#define PTE_W 0x04
+#define PTE_X 0x08
+#define PTE_U 0x10
+#define PTE_A 0x40
+#define PTE_D 0x80
+#define PTE_LEAF (PTE_R | PTE_W | PTE_X)
+
+#define SEG_PAGES (USER_SEG_SIZE / 4096)
+/* The physical page number sits at bit 10, so a physical address is encoded by
+   dropping its low 12 bits and shifting left by 10. */
+#define PTE_ADDR(pa) (((pa) >> 12) << 10)
+#define PTE_PA(pte) (((pte) >> 10) << 12)
+
+void *kalloc_page(void);
+void kfree_page(void *p);
+void *memcpy(void *dst, const void *src, unsigned int n);
+
+static unsigned long kernel_root;
+
+static void zero_page(unsigned long *page) {
+    for (int i = 0; i < 512; i++) {
+        page[i] = 0;
+    }
+}
+
+static unsigned long *new_page(void) {
+    unsigned long *page = (unsigned long *)kalloc_page();
+    if (page != 0) {
+        zero_page(page);
+    }
+    return page;
+}
+
+/* Level-0 table for `va` in `root`, creating it when `create` is set. */
+static unsigned long *leaf_table(unsigned long root, unsigned int va, int create) {
+    unsigned long *root_table = (unsigned long *)root;
+    unsigned long *t0;
+    unsigned long pte;
+
+    pte = root_table[(va >> 30) & 0x1ff];
+    if ((pte & PTE_V) == 0) {
+        if (!create) return 0;
+        t0 = new_page();
+        if (t0 == 0) return 0;
+        root_table[(va >> 30) & 0x1ff] = PTE_ADDR((unsigned long)t0) | PTE_V;
+    } else {
+        t0 = (unsigned long *)PTE_PA(pte);
+    }
+
+    pte = t0[(va >> 21) & 0x1ff];
+    if ((pte & PTE_V) == 0) {
+        if (!create) return 0;
+        unsigned long *l0 = new_page();
+        if (l0 == 0) return 0;
+        t0[(va >> 21) & 0x1ff] = PTE_ADDR((unsigned long)l0) | PTE_V;
+        return l0;
+    }
+    if (pte & PTE_LEAF) {
+        return 0; /* a 2 MiB page cannot hold a 4 KiB user mapping */
+    }
+    return (unsigned long *)PTE_PA(pte);
+}
+
+static unsigned long translate(unsigned long root, unsigned int va) {
+    unsigned long *table = leaf_table(root, va, 0);
+    unsigned long pte;
+
+    if (table == 0) return 0;
+    pte = table[(va >> 12) & 0x1ff];
+    if ((pte & (PTE_V | PTE_U)) == 0) return 0;
+    return PTE_PA(pte) | (va & 0xfff);
+}
+
+static int map_page(unsigned long root, unsigned int va, unsigned long pa) {
+    unsigned long *table = leaf_table(root, va, 1);
+
+    if (table == 0) return -1;
+    table[(va >> 12) & 0x1ff] =
+        PTE_ADDR(pa) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
+    return 0;
+}
+
+/* Every process table must still map the kernel and its devices, because trap
+   handling runs with the process's satp. */
+static void share_kernel(unsigned long root) {
+    unsigned long *table = (unsigned long *)root;
+    unsigned long *t0 = (unsigned long *)PTE_PA(table[0]);
+
+    if (kernel_root != 0) {
+        table[2] = ((unsigned long *)kernel_root)[2];
+    }
+    if (t0 != 0) {
+        t0[128] = PTE_ADDR(0x10000000UL) | PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+    }
+}
+
+unsigned long arch_vm_kernel_root(void) {
+    return kernel_root;
+}
+
+extern unsigned long boot_root[512];
+extern unsigned long boot_t0[512];
+
+void arch_vm_init(void) {
+    unsigned long *root = boot_root;
+    unsigned long *t0 = boot_t0;
+    zero_page(root);
+    zero_page(t0);
+
+    kernel_root = (unsigned long)root;
+    /* Device window (the NS16550 UART) and the RAM identity map. */
+    root[0] = PTE_ADDR((unsigned long)t0) | PTE_V;
+    /* Identity-map the low 2 MiB so the test device at 0x10_0000 is reachable
+       from the kernel table. Process tables use that slot for user pages. */
+    t0[0] = PTE_ADDR(0) | PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+    t0[128] = PTE_ADDR(0x10000000UL) | PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+    root[2] = PTE_ADDR(0x80000000UL) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+}
+
+/* A process's own root, or the kernel root for the idle process. */
+static unsigned long root_for(struct proc *p) {
+    return p->segbase == 0 ? kernel_root : (unsigned long)p->segbase;
+}
+
+void *arch_user_ptr(struct proc *p, unsigned int user_addr) {
+    unsigned long pa = translate(root_for(p), user_addr);
+    return pa == 0 ? (void *)0 : (void *)pa;
+}
+
+void arch_space_alloc(struct proc *p) {
+    unsigned long root = (unsigned long)new_page();
+    unsigned long frames = 0;
+
+    p->segbase = 0;
+    if (root == 0) return;
+
+    for (int i = 0; i < SEG_PAGES; i++) {
+        unsigned long frame = (unsigned long)kalloc_page();
+        if (frame == 0) return;
+        zero_page((unsigned long *)frame);
+        if (map_page(root, i * 4096, frame) != 0) return;
+        frames = frames + 1;
+    }
+    share_kernel(root);
+    p->segbase = (unsigned int)root;
+}
+
+void arch_space_free(struct proc *p) {
+    unsigned long *table;
+    unsigned long root = root_for(p);
+    if (root == kernel_root) return;
+    table = leaf_table(root, 0, 0);
+    if (table != 0) {
+        for (int i = 0; i < SEG_PAGES; i++) {
+            if (table[i] & PTE_V) {
+                kfree_page((void *)PTE_PA(table[i]));
+            }
+        }
+        kfree_page(table);
+    }
+    {
+        unsigned long *root_table = (unsigned long *)root;
+        for (int i = 0; i < 512; i++) {
+            if ((root_table[i] & PTE_V) && (root_table[i] & PTE_LEAF) == 0) {
+                kfree_page((void *)PTE_PA(root_table[i]));
+            }
+        }
+    }
+    kfree_page((void *)root);
+    p->segbase = 0;
+}
+
+int arch_space_copy(struct proc *parent, struct proc *child) {
+    unsigned long dst_root = (unsigned long)new_page();
+    unsigned long src_root = root_for(parent);
+
+    if (dst_root == 0) return -1;
+    child->segbase = (unsigned int)dst_root;
+
+    for (int i = 0; i < SEG_PAGES; i++) {
+        unsigned int va = i * 4096;
+        unsigned long src = translate(src_root, va);
+        unsigned long dst = (unsigned long)kalloc_page();
+
+        if (dst == 0) return -1;
+        zero_page((unsigned long *)dst);
+        if (src != 0) {
+            memcpy((void *)dst, (void *)PTE_PA(src), 4096);
+        }
+        if (map_page(dst_root, va, dst) != 0) return -1;
+    }
+    share_kernel(dst_root);
+    return 0;
+}
+
+void arch_space_load(struct proc *p, const void *src, unsigned int n) {
+    unsigned int done = 0;
+
+    while (done < n) {
+        unsigned int va = USER_ENTRY + done;
+        unsigned int off = va & 0xfff;
+        unsigned int chunk = 4096 - off;
+        unsigned long page = translate(root_for(p), va & ~0xfffU);
+
+        if (page == 0) return;
+        if (chunk > n - done) chunk = n - done;
+        memcpy((void *)page, (const unsigned char *)src + done, chunk);
+        done = done + chunk;
+    }
+}
+
+void ctx_set_ret(struct context *ctx, int value) {
+    ctx->regs[10] = (unsigned int)value;
+}

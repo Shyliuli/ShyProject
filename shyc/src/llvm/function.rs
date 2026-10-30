@@ -92,7 +92,8 @@ impl Body<'_> {
             ),
             super::abi::Shape::Registers(chunks) => chunks[0].llvm_type(),
         };
-        let mut signature = format!("define {ret_text} {}(", symbol(&function.name));
+        let linkage = if function.internal { "internal " } else { "" };
+        let mut signature = format!("define {linkage}{ret_text} {}(", symbol(&function.name));
         let mut first = true;
         if sret {
             signature.push_str(&format!(

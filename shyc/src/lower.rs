@@ -658,7 +658,8 @@ impl<'a> FnLower<'a> {
                 )
             })?;
         let symbol = pending.symbol;
-        let f = ir::Function::new(&symbol, signature, l.layout, abi);
+        let mut f = ir::Function::new(&symbol, signature, l.layout, abi);
+        f.internal = matches!(pending.decl.specs.storage, Some(ast::StorageClass::Static));
         let function_declarator = match pending.decl.declarator.derived.first() {
             Some(ast::DerivedDeclarator::Function(function)) => Some(function),
             _ => None,

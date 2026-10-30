@@ -1,5 +1,7 @@
 #![no_main]
 
+#include "arch.h"
+
 #include <stdint.shyh>
 #include "fs.h"
 #include "lock.h"
@@ -23,6 +25,14 @@ static void write_u32(unsigned char *p, unsigned int off, unsigned int v) {
     p[off + 1] = (unsigned char)((v >> 16) & 0xff);
     p[off + 2] = (unsigned char)((v >> 8) & 0xff);
     p[off + 3] = (unsigned char)(v & 0xff);
+}
+
+// RISC-V is little-endian: program words are stored least significant byte first.
+static void write_word_le(unsigned char *p, unsigned int off, unsigned int v) {
+    p[off + 0] = (unsigned char)(v & 0xff);
+    p[off + 1] = (unsigned char)((v >> 8) & 0xff);
+    p[off + 2] = (unsigned char)((v >> 16) & 0xff);
+    p[off + 3] = (unsigned char)((v >> 24) & 0xff);
 }
 
 static void write_inst(unsigned char *p, unsigned int off,
@@ -74,29 +84,37 @@ static char *map_user_buf(char *user_buf, int max) {
         addr + (unsigned int)max < addr || addr + (unsigned int)max > USER_SEG_SIZE) {
         return (char *)0;
     }
-    return (char *)(current->segbase + addr);
+    return (char *)arch_user_ptr(current, addr);
 }
 
 static void clear_context(struct context *ctx) {
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < NREG; i++) {
         ctx->regs[i] = 0;
     }
     ctx->sp = 0;
     ctx->ksp = 0;
     ctx->epc = 0;
+#ifndef SHYOS_RISCV
     ctx->segs = 0;
     ctx->sege = 0;
+#endif
     ctx->valid = 0;
 }
 
 static void load_idle_code(struct proc *p) {
-    unsigned char *mem = (unsigned char *)p->segbase;
-    unsigned int off = 0x100;
+    unsigned char *mem = (unsigned char *)arch_user_ptr(p, 0x100);
 
+#ifdef SHYOS_RISCV
+    // addi a7, x0, 2; ecall; jal x0, -4 (SYS_yield loop)
+    write_word_le(mem, 0x100 + 0, 0x00200893);
+    write_word_le(mem, 0x100 + 4, 0x00000073);
+    write_word_le(mem, 0x100 + 8, 0xFFDFF06F);
+#else
     // setn 0x, SYS_yield; syscall; ujmpn syscall
-    write_inst(mem, off + 0, 0x3E, 0x00, 2);
-    write_inst(mem, off + 12, 0x54, 0, 0);
-    write_inst(mem, off + 24, 0x4A, 0x10C, 0);
+    write_inst(mem, 0x100 + 0, 0x3E, 0x00, 2);
+    write_inst(mem, 0x100 + 12, 0x54, 0, 0);
+    write_inst(mem, 0x100 + 24, 0x4A, 0x10C, 0);
+#endif
 }
 
 impl proc {
@@ -193,13 +211,21 @@ impl proc {
     }
 
     void init_user_context(self *p) {
-        for (int r = 0; r < 16; r++) {
+        for (int r = 0; r < NREG; r++) {
             p.ctx.regs[r] = 0;
         }
+#ifdef SHYOS_RISCV
+        p.ctx.ksp = p.kstack + 4096; /* stacks grow down on RISC-V */
+#else
         p.ctx.ksp = p.kstack;
+#endif
         p.ctx.sp = USER_STACK_DEFAULT_BASE;
+#ifndef SHYOS_RISCV
         p.ctx.segs = p.segbase;
         p.ctx.sege = p.segbase + USER_SEG_SIZE;
+#else
+        p.ctx.space = p.segbase;
+#endif
         p.ctx.epc = USER_ENTRY;
         p.ctx.valid = 0;
         p.sz = 0;
@@ -220,9 +246,7 @@ impl proc {
         if (p.kstack != 0) {
             kfree_page((void *)p.kstack);
         }
-        if (p.segbase != 0) {
-            seg_free(p.segbase);
-        }
+        arch_space_free(p);
     }
 }
 
@@ -247,7 +271,7 @@ static int has_live_non_idle_locked(void) {
 static void copy_wait_status(struct proc *parent, unsigned int addr, int value) {
     if (addr != 0) {
         if (addr <= USER_SEG_SIZE - 4) {
-            int *user_status = (int *)(parent->segbase + addr);
+            int *user_status = (int *)arch_user_ptr(parent, addr);
             *user_status = value;
         }
     }
@@ -263,7 +287,7 @@ static void wake_waiting_parent_locked(struct proc *parent, struct proc *child) 
     copy_wait_status(parent, parent->wait_status, child->xstatus);
     free_proc_locked(child);
     parent.clear_wait();
-    parent->ctx.regs[1] = pid;
+    ctx_set_ret(&parent->ctx, pid);
     parent.set_state(RUNNABLE);
 }
 
@@ -303,7 +327,7 @@ struct proc *alloc_proc(void) {
     }
 
     p->kstack = (unsigned int)kalloc_page();
-    p->segbase = seg_alloc();
+    arch_space_alloc(p);
 
     lock_acquire(&proc_lock);
     p.init_user_context();
@@ -339,28 +363,31 @@ int fork(void) {
 
     if (child == 0) {
         lock_acquire(&proc_lock);
-        current->ctx.regs[1] = (uint32_t)-1;
+        ctx_set_ret(&current->ctx, -1);
         lock_release(&proc_lock);
         return -1;
     }
 
-    src = (unsigned int *)current->segbase;
-    dst = (unsigned int *)child->segbase;
-    n = current->sz / 4;
-    if (current->sz % 4) {
-        n = n + 1;
-    }
-    if (n < USER_SEG_SIZE / 4) {
-        n = USER_SEG_SIZE / 4;
-    }
-    memcpy(dst, src, USER_SEG_SIZE);
-    asm("fencei");
+    arch_space_copy(current, child);
+    src = 0;
+    dst = 0;
+    n = 0;
+    arch_fence_i();
 
     lock_acquire(&proc_lock);
     child->ctx = current->ctx;
+#ifdef SHYOS_RISCV
+    child->ctx.ksp = child->kstack + 4096; /* its own kernel stack, not the parent's */
+#else
+    child->ctx.ksp = child->kstack;
+#endif
+#ifndef SHYOS_RISCV
     child->ctx.segs = child->segbase;
     child->ctx.sege = child->segbase + USER_SEG_SIZE;
-    child->ctx.regs[1] = 0;
+#else
+    child->ctx.space = child->segbase;
+#endif
+    ctx_set_ret(&child->ctx, 0);
     child->parent = current->pid;
     child.set_state(RUNNABLE);
     child->sz = current->sz;
@@ -381,7 +408,7 @@ int fork(void) {
         file_dup(stdout_fd);
     }
 
-    current->ctx.regs[1] = child->pid;
+    ctx_set_ret(&current->ctx, child->pid);
     child_pid = child->pid;
     lock_release(&proc_lock);
     return child_pid;
@@ -395,7 +422,7 @@ static void proc_exit_locked(int status) {
     current.clear_wait();
     current.set_state(ZOMBIE);
     if (status == 2 && current->parent == 1) {
-        asm("setn exit 0");
+        arch_shutdown(0);
     }
     parent = find_proc_locked(current->parent);
     if (parent != 0 &&
@@ -417,10 +444,10 @@ static void proc_exit_locked(int status) {
     }
 
     if (pid != 0 && !has_live_non_idle_locked()) {
-        asm("setn exit 0");
+        arch_shutdown(0);
     }
     if (pid == 1) {
-        asm("setn exit 0");
+        arch_shutdown(0);
     }
 }
 

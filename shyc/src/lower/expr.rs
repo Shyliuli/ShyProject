@@ -244,7 +244,8 @@ impl FnLower<'_> {
                     "integer to pointer conversion requires a cast",
                 ));
             }
-            let integer = self.integer_to_ir_width(operand, from, 32, span)?;
+            let bits = self.l.layout.pointer_bytes * 8;
+            let integer = self.integer_to_ir_width(operand, from, bits, span)?;
             let value = self.emit_value(ir::InstKind::Cast {
                 op: ir::CastOp::IntToPtr,
                 value: integer,
@@ -259,10 +260,12 @@ impl FnLower<'_> {
                     "pointer to integer conversion requires a cast",
                 ));
             }
+            let bits = self.l.layout.pointer_bytes * 8;
+            let ir_ty = if bits == 64 { ir::Type::I64 } else { ir::Type::I32 };
             let integer = self.emit_value(ir::InstKind::Cast {
                 op: ir::CastOp::PtrToInt,
                 value: operand,
-                to: ir::Type::I32,
+                to: ir_ty,
             });
             return self.convert(ir::Operand::Value(integer), self.int_type(), to, span, true);
         }

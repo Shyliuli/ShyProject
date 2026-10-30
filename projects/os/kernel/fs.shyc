@@ -1,5 +1,7 @@
 #![no_main]
 
+#include "arch.h"
+
 #include <stdint.shyh>
 #include "fs.h"
 #include "lock.h"
@@ -116,7 +118,7 @@ impl Pipe {
             return FILE_BLOCKED;
         }
 
-        dst = (unsigned char *)(current->segbase + addr);
+        dst = (unsigned char *)arch_user_ptr(current, addr);
         while (i < n && !p.empty()) {
             dst[i] = p.data[p.nread % PIPESIZE];
             p.nread = p.nread + 1;
@@ -141,7 +143,7 @@ impl Pipe {
             return -1;
         }
 
-        src = (unsigned char *)(current->segbase + addr);
+        src = (unsigned char *)arch_user_ptr(current, addr);
         while (i < n) {
             if (p.full()) {
                 wakeup(p.read_chan());
@@ -200,7 +202,7 @@ static char *user_string(const char *path) {
         return 0;
     }
 
-    s = (char *)(current->segbase + addr);
+    s = (char *)arch_user_ptr(current, addr);
     for (unsigned int i = addr; i < USER_SEG_SIZE; i++) {
         if (s[i - addr] == 0) {
             return s;
@@ -324,7 +326,7 @@ static int copy_to_user_string(char *user_buf, int max, const char *src) {
     if (!user_range_ok(addr, (unsigned int)max)) {
         return -1;
     }
-    dst = (char *)(current->segbase + addr);
+    dst = (char *)arch_user_ptr(current, addr);
     while (i < max - 1 && src[i]) {
         dst[i] = src[i];
         i = i + 1;
@@ -538,7 +540,7 @@ impl file {
             if (n > remaining) {
                 n = remaining;
             }
-            dst = (unsigned char *)(current->segbase + addr);
+            dst = (unsigned char *)arch_user_ptr(current, addr);
             memcpy(dst, f.mem->data + f.off, n);
             f.off = f.off + n;
             return (int)n;
@@ -555,7 +557,7 @@ impl file {
         if (n > remaining) {
             n = remaining;
         }
-        dst = (unsigned char *)(current->segbase + addr);
+        dst = (unsigned char *)arch_user_ptr(current, addr);
         memcpy(dst, f.file->data + f.off, n);
         f.off = f.off + n;
         return (int)n;
@@ -583,7 +585,7 @@ impl file {
             if (n > space) {
                 n = space;
             }
-            src = (unsigned char *)(current->segbase + addr);
+            src = (unsigned char *)arch_user_ptr(current, addr);
             memcpy(f.mem->data + f.off, src, n);
             f.off = f.off + n;
             if (f.off > f.mem->size) {
@@ -882,7 +884,7 @@ int file_pipe(int *fds) {
     file_table[rfd].open_pipe(p, 1, 0);
     file_table[wfd].open_pipe(p, 0, 1);
 
-    ufds = (int *)(current->segbase + addr);
+    ufds = (int *)arch_user_ptr(current, addr);
     ufds[0] = rfd;
     ufds[1] = wfd;
     current_add_fd(rfd);
@@ -905,7 +907,7 @@ static int copy_user_arg(const char *arg, unsigned char *buf) {
         return -1;
     }
 
-    src = (unsigned char *)(current->segbase + addr);
+    src = (unsigned char *)arch_user_ptr(current, addr);
     for (unsigned int i = 0; i < USER_ARG_MAX - 1; i++) {
         if (addr + i >= USER_SEG_SIZE) {
             return -1;
@@ -1028,11 +1030,11 @@ int sys_exec(const char *path, const char *arg) {
     }
     stack_base = user_image_stack_base(fsf);
 
-    dst = (unsigned char *)current->segbase;
+    dst = (unsigned char *)arch_user_ptr(current, 0);
     memcpy(dst, fsf->data, fsf->size);
     memcpy(dst + USER_ARG0_ADDR, namebuf, USER_ARG_MAX);
     memcpy(dst + USER_ARG_ADDR, argbuf, USER_ARG_MAX);
-    asm("fencei");
+    arch_fence_i();
     file_close_fd(fd);
 
     proc_set_current_name((const char *)namebuf);
