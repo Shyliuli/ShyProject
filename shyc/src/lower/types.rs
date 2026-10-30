@@ -670,14 +670,17 @@ impl Lowerer {
     }
 
     /// Strip one pointer level for dot auto-dereference or array decay.
-    pub(super) fn record_of(&self, ty: TypeId) -> Option<TypeId> {
-        if self.types.is_record(ty) {
-            return Some(ty);
+    /// The record an object denotes, looking through any pointer depth.
+    ///
+    /// ShyC dereferences automatically, so `P **r` denotes a `P`.
+    pub(super) fn record_of(&self, mut ty: TypeId) -> Option<TypeId> {
+        while !self.types.is_record(ty) {
+            let TypeKind::Pointer { pointee } = self.types.kind(ty) else {
+                return None;
+            };
+            ty = pointee.ty;
         }
-        match self.types.kind(ty) {
-            TypeKind::Pointer { pointee } if self.types.is_record(pointee.ty) => Some(pointee.ty),
-            _ => None,
-        }
+        Some(ty)
     }
 
     // -----------------------------------------------------------------------

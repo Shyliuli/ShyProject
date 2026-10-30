@@ -704,6 +704,14 @@ impl<'a> FnLower<'a> {
             let param = lowering.f.params[index];
             lowering.bind_parameter(&names[index], *ty, param)?;
         }
+        // Inside an `impl`, the receiver is also reachable as `self`, the way
+        // `int get(self) { return self.x; }` reads.
+        if lowering.l.impl_context.is_some()
+            && let Some((&ty, &param)) = params.first().zip(lowering.f.params.first())
+            && names.first().is_some_and(|name| name != "self")
+        {
+            lowering.bind_parameter("self", ty, param)?;
+        }
         if lowering.f.signature.variadic {
             lowering.declare_va_area()?;
         }

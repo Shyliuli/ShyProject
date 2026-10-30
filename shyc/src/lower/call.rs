@@ -251,14 +251,31 @@ impl FnLower<'_> {
                 ));
             }
         } else if self.l.types.is_pointer(object_ty) || self.l.types.is_array(object_ty) {
-            let (operand, ty) = self.rvalue_val(object_value, span)?;
+            let (mut operand, mut ty) = self.rvalue_val(object_value, span)?;
+            // ShyC dereferences automatically: walk the pointer chain until it
+            // reaches the record, so `r.get()` on a `P **r` passes `*r`.
+            while let Some(pointee) = self.l.pointee(ty) {
+                if self.l.types.is_record(pointee.ty) {
+                    break;
+                }
+                let address = super::address_operand(operand);
+                operand = self.load_value(address, pointee.ty, Qualifiers::NONE);
+                ty = pointee.ty;
+            }
             if self.l.types.is_pointer(first_param) {
                 self.convert(operand, ty, first_param, span, false)?
+            } else if self.l.types.is_record(ty) {
+                // The receiver arrived as a value already.
+                operand
             } else {
-                return Err(Diagnostic::new(
-                    span,
-                    "method receiver is a pointer but the self parameter is not",
-                ));
+                let Some(pointee) = self.l.pointee(ty) else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "method receiver type does not match its self parameter",
+                    ));
+                };
+                let address = super::address_operand(operand);
+                self.load_value(address, pointee.ty, Qualifiers::NONE)
             }
         } else {
             return Err(Diagnostic::new(
