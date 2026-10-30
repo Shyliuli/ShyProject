@@ -4,7 +4,7 @@ use super::fallback_span;
 use super::frame::is_64;
 use super::function::FnWriter;
 use super::inst::result;
-use crate::ir::{BinaryOp, CastOp, Inst, Operand, Type, UnaryOp};
+use crate::ir::{BinaryOp, CastOp, Inst, InstKind, Operand, Type, UnaryOp};
 use crate::source::Diagnostic;
 
 impl FnWriter<'_> {
@@ -48,6 +48,85 @@ impl FnWriter<'_> {
     ///
     /// `f32` operands are single words in `4x`/`5x`; `f64` operands are
     /// 64-bit pairs, so the second operand starts at `6x`.
+    /// Inline assembly: bind operands to argument registers, splice the text,
+    /// then write the results back.
+    ///
+    /// The assembly body is opaque, so this is the one place where the backend
+    /// trusts the source. Bindings use the Shy argument registers in order,
+    /// matching what `codegen_shy.c` does, and every value also lives in its
+    /// frame slot, so clobbering temporaries inside the body is harmless.
+    pub(crate) fn inline_asm(&mut self, instruction: &Inst) -> Result<(), Diagnostic> {
+        let InstKind::InlineAsm(asm) = &instruction.kind else {
+            return Err(Diagnostic::new(
+                instruction.span.unwrap_or_else(fallback_span),
+                "internal error: not inline assembly",
+            ));
+        };
+        if asm.bindings.len() > super::abi::ARGUMENT_REGISTERS.len() {
+            return Err(Diagnostic::new(
+                instruction.span.unwrap_or_else(fallback_span),
+                "inline assembly binds more values than there are argument registers",
+            ));
+        }
+        for (index, binding) in asm.bindings.iter().enumerate() {
+            let register = super::abi::ARGUMENT_REGISTERS[index];
+            if binding.access == crate::ir::AsmAccess::AddressOnly {
+                self.emit_address(&binding.address, register)?;
+                continue;
+            }
+            if matches!(
+                binding.access,
+                crate::ir::AsmAccess::Read | crate::ir::AsmAccess::ReadWrite
+            ) {
+                self.emit_address(&binding.address, "3x")?;
+                match binding.bytes {
+                    1 => self.line(format!("get8a {register} 3x")),
+                    2 => self.line(format!("get16a {register} 3x")),
+                    4 => self.line(format!("geta {register} 3x")),
+                    other => {
+                        return Err(Diagnostic::new(
+                            instruction.span.unwrap_or_else(fallback_span),
+                            format!("inline assembly binding of {other} bytes"),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let mut text = asm.text.clone();
+        for (index, binding) in asm.bindings.iter().enumerate() {
+            let register = super::abi::ARGUMENT_REGISTERS[index];
+            text = text.replace(&format!("{{&{}}}", binding.name), register);
+            text = text.replace(&format!("{{{}}}", binding.name), register);
+        }
+        self.out.push_str(&text);
+        if !text.ends_with('\n') {
+            self.out.push('\n');
+        }
+
+        for (index, binding) in asm.bindings.iter().enumerate() {
+            if binding.access == crate::ir::AsmAccess::AddressOnly
+                || binding.access == crate::ir::AsmAccess::Read
+            {
+                continue;
+            }
+            let register = super::abi::ARGUMENT_REGISTERS[index];
+            self.emit_address(&binding.address, "3x")?;
+            match binding.bytes {
+                1 => self.line(format!("put8a 3x {register}")),
+                2 => self.line(format!("put16a 3x {register}")),
+                4 => self.line(format!("puta 3x {register}")),
+                other => {
+                    return Err(Diagnostic::new(
+                        instruction.span.unwrap_or_else(fallback_span),
+                        format!("inline assembly binding of {other} bytes"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn float_binary(
         &mut self,
         instruction: &Inst,

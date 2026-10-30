@@ -60,10 +60,7 @@ impl FnWriter<'_> {
                 self.copy_bytes("3x", "1x", *bytes)
             }
             InstKind::MemSet { dst, byte, bytes } => self.memset(dst, *byte, *bytes),
-            InstKind::InlineAsm(_) => Err(Diagnostic::new(
-                instruction.span.unwrap_or_else(fallback_span),
-                "inline assembly is not implemented by the Shy backend; the instruction is rejected, not dropped",
-            )),
+            InstKind::InlineAsm(_) => self.inline_asm(instruction),
         }
     }
 }

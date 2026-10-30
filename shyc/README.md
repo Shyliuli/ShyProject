@@ -65,8 +65,13 @@ Variadic functions follow the same ABI: fixed parameters take their slots, the
 callee saves the argument registers into `__va_area__`, and `stdarg.shyh`
 walks the register area and the descending stack cursor.
 
-Diagnosed rather than miscompiled: inline assembly, atomics, bit-fields,
-variable-length arrays, and thread-local storage. The LLVM backend additionally treats aggregate parameters and returns
+Inline assembly is emitted verbatim: `asm(...)` bodies go straight into the
+output, and `asm!(a, b) { ... }` binds values to the argument registers,
+splices `{a}`/`{&a}`, and writes the registers back afterwards. The LLVM
+backend rejects it, because the text is ShyISA assembly.
+
+Diagnosed rather than miscompiled: atomics, bit-fields, variable-length
+arrays, and thread-local storage. The LLVM backend additionally treats aggregate parameters and returns
 as this compiler's own byte-blob convention until target C ABI lowering is
 enabled for them.
 
