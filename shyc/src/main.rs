@@ -229,6 +229,10 @@ fn arguments() -> Result<Option<Options>, String> {
     // Hosted targets use the system C library, so the preprocessor searches the
     // same directories gcc and clang do. The target's own directory comes
     // first, as with gcc.
+    preprocess.include_dirs.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("include"),
+    );
     for directory in [
         "/usr/lib/clang/23/include",
         "/usr/local/include",
