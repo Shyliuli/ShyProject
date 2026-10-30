@@ -361,7 +361,16 @@ impl FnLower<'_> {
         )
         .map_err(|error| Diagnostic::new(span, format!("cannot plan the target ABI: {error}")))?;
         let call = match target {
-            ir::CallTarget::Direct(symbol) => ir::Call::direct(symbol, arguments, signature, abi),
+            ir::CallTarget::Direct(symbol) => {
+                // `va_start` is an LLVM intrinsic: the backend expands it into
+                // the target's register save sequence.
+                let symbol = if symbol == "__builtin_va_start" {
+                    "llvm.va_start".to_string()
+                } else {
+                    symbol
+                };
+                ir::Call::direct(symbol, arguments, signature, abi)
+            }
             ir::CallTarget::Indirect(callee) => {
                 ir::Call::indirect(callee, arguments, signature, abi)
             }

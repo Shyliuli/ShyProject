@@ -1256,7 +1256,13 @@ impl FnLower<'_> {
             .l
             .pointee(pointer_ty)
             .ok_or_else(|| Diagnostic::new(span, "pointer arithmetic needs a pointee type"))?;
-        let size = self.l.size_of(pointee.ty, span)?;
+        // GNU C treats arithmetic on `void *` as arithmetic on `char *`, and
+        // every C library header relies on it (`(void *)(p + n)`).
+        let size = if self.l.types.is_void(pointee.ty) {
+            1
+        } else {
+            self.l.size_of(pointee.ty, span)?
+        };
         if size == 0 {
             return Err(Diagnostic::new(
                 span,
