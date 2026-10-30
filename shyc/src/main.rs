@@ -226,6 +226,20 @@ fn arguments() -> Result<Option<Options>, String> {
     let mut target = None;
     let mut opt_level = 0;
     let mut preprocess = preprocess::Options::default();
+    // Hosted targets use the system C library, so the preprocessor searches the
+    // same directories gcc and clang do. The target's own directory comes
+    // first, as with gcc.
+    for directory in [
+        "/usr/lib/clang/23/include",
+        "/usr/local/include",
+        "/usr/include/x86_64-linux-gnu",
+        "/usr/include",
+    ] {
+        let path = Path::new(directory);
+        if path.is_dir() {
+            preprocess.include_dirs.push(path.to_path_buf());
+        }
+    }
     while let Some(arg) = args.next() {
         let selected = match arg.as_str() {
             "--help" | "-h" => {
@@ -305,6 +319,29 @@ fn arguments() -> Result<Option<Options>, String> {
                  or --emit=<backend>"
                     .into(),
             );
+        }
+    }
+    // Target facts that a hosted C library needs before it includes anything.
+    if target.as_deref().is_some_and(|target| target != "shy") {
+        for (name, value) in [
+            ("__STDC__", "1"),
+            ("__STDC_HOSTED__", "1"),
+            ("__STDC_VERSION__", "201710L"),
+            ("__SIZE_TYPE__", "long unsigned int"),
+            ("__PTRDIFF_TYPE__", "long int"),
+            ("__WCHAR_TYPE__", "int"),
+            ("__CHAR_BIT__", "8"),
+            ("__INT_MAX__", "2147483647"),
+            ("__LONG_MAX__", "9223372036854775807L"),
+            ("__x86_64__", "1"),
+            ("__linux__", "1"),
+            ("__unix__", "1"),
+            ("__LP64__", "1"),
+            ("__ELF__", "1"),
+        ] {
+            preprocess
+                .defines
+                .push((name.to_string(), value.to_string()));
         }
     }
     Ok(Some(Options {

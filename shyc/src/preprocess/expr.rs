@@ -30,18 +30,48 @@ impl Preprocessor<'_> {
         }
         let replaced = self.replace_defined(arguments)?;
         let expanded = self.expand_all(replaced.into_iter().map(ExpToken::plain).collect())?;
-        let tokens: Vec<Token> = expanded
-            .into_iter()
-            .map(|expanded| {
-                let span = expanded.span();
-                let mut token = expanded.token;
-                token.span = span;
-                if matches!(token.kind, TokenKind::Ident(_)) {
-                    token.kind = TokenKind::Number("0".to_string());
+        // `__has_include(<x>)` and `__has_include_next(<x>)` answer 0: every
+        // header that asks then takes its portable branch. The whole construct
+        // has to be replaced, not just the identifier, because the operand is a
+        // file name rather than an expression.
+        let mut tokens: Vec<Token> = Vec::with_capacity(expanded.len());
+        let mut index = 0;
+        while index < expanded.len() {
+            let expanded_token = expanded[index].clone();
+            index += 1;
+            let span = expanded_token.span();
+            let mut token = expanded_token.token;
+            token.span = span;
+            // Compiler builtins such as `__has_include`, `__has_feature`, and
+            // `__building_module` take a non-expression operand. Every one of
+            // them answers 0 here, so headers choose their portable path.
+            let has_include = matches!(
+                &token.kind,
+                TokenKind::Ident(name) if name.starts_with("__")
+            ) && expanded.get(index).is_some_and(
+                |next| matches!(&next.token.kind, TokenKind::Punct(text) if text == "("),
+            );
+            if has_include {
+                let mut depth = 0usize;
+                while let Some(next) = expanded.get(index) {
+                    index += 1;
+                    match &next.token.kind {
+                        TokenKind::Punct(text) if text == "(" => depth += 1,
+                        TokenKind::Punct(text) if text == ")" => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                token
-            })
-            .collect();
+                token.kind = TokenKind::Number("0".to_string());
+            } else if matches!(token.kind, TokenKind::Ident(_)) {
+                token.kind = TokenKind::Number("0".to_string());
+            }
+            tokens.push(token);
+        }
         ExprParser {
             tokens: &tokens,
             pos: 0,
