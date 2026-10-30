@@ -2,6 +2,10 @@
 members = [
     "shy_isa_lib",
     "asm",
-    "emu"
-, "linker", "shycc", "shy-dwarf"]
+    "emu",
+    "linker",
+    "shycc",
+    "shy-dwarf",
+    "shyc",
+]
 resolver = "2"
