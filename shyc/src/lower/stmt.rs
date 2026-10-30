@@ -5,9 +5,7 @@
 //! after the whole body is available, because a label may be defined after it
 //! is used.
 
-use super::{
-    BreakContext, ExprKind, FnLower, LabelInfo, LoopContext, PendingGoto, SwitchContext,
-};
+use super::{BreakContext, ExprKind, FnLower, LabelInfo, LoopContext, PendingGoto, SwitchContext};
 use crate::ast;
 use crate::ir;
 use crate::sema::types::TypeId;
@@ -95,10 +93,7 @@ impl FnLower<'_> {
         if self.l.types.is_void(self.return_ty) {
             self.terminate(ir::Terminator::ret(None));
         } else if self.is_main && self.l.types.is_integer(self.return_ty) {
-            let zero = ir::Operand::Constant(ir::Constant::int(
-                self.l.ir_type(self.return_ty),
-                0,
-            ));
+            let zero = ir::Operand::Constant(ir::Constant::int(self.l.ir_type(self.return_ty), 0));
             self.terminate(ir::Terminator::ret(Some(zero)));
         } else {
             self.terminate(ir::Terminator::unreachable());
@@ -168,11 +163,7 @@ impl FnLower<'_> {
         let then_block = self.f.alloc_block();
         let else_block = self.f.alloc_block();
         let end_block = self.f.alloc_block();
-        self.terminate(ir::Terminator::branch(
-            condition,
-            then_block,
-            else_block,
-        ));
+        self.terminate(ir::Terminator::branch(condition, then_block, else_block));
         self.set_current(then_block);
         self.lower_stmt(then_branch)?;
         if !self.terminated {
@@ -202,11 +193,7 @@ impl FnLower<'_> {
         self.set_current(condition_block);
         let (operand, ty) = self.rvalue(condition)?;
         let condition = self.boolean_operand(operand, ty, span)?;
-        self.terminate(ir::Terminator::branch(
-            condition,
-            body_block,
-            end_block,
-        ));
+        self.terminate(ir::Terminator::branch(condition, body_block, end_block));
         let depth = self.scopes.len();
         self.set_current(body_block);
         self.loops.push(LoopContext {
@@ -256,11 +243,7 @@ impl FnLower<'_> {
         self.set_current(condition_block);
         let (operand, ty) = self.rvalue(condition)?;
         let condition = self.boolean_operand(operand, ty, span)?;
-        self.terminate(ir::Terminator::branch(
-            condition,
-            body_block,
-            end_block,
-        ));
+        self.terminate(ir::Terminator::branch(condition, body_block, end_block));
         self.set_current(end_block);
         Ok(())
     }
@@ -293,11 +276,7 @@ impl FnLower<'_> {
             }
             None => ir::Operand::Constant(ir::Constant::int(ir::Type::I1, 1)),
         };
-        self.terminate(ir::Terminator::branch(
-            condition,
-            body_block,
-            end_block,
-        ));
+        self.terminate(ir::Terminator::branch(condition, body_block, end_block));
         let break_depth = self.scopes.len() - 1;
         let continue_depth = self.scopes.len();
         self.set_current(body_block);
@@ -398,22 +377,14 @@ impl FnLower<'_> {
         }
         self.set_current(block);
         let context = self.switches.last_mut().expect("switch context");
-        if context
-            .cases
-            .iter()
-            .any(|case| case.value == constant)
-        {
+        if context.cases.iter().any(|case| case.value == constant) {
             return Err(Diagnostic::new(span, "duplicate case value"));
         }
         context.cases.push(ir::SwitchCase::new(constant, block));
         self.lower_stmt(statement)
     }
 
-    fn lower_default(
-        &mut self,
-        statement: &ast::Stmt,
-        span: Span,
-    ) -> Result<(), Diagnostic> {
+    fn lower_default(&mut self, statement: &ast::Stmt, span: Span) -> Result<(), Diagnostic> {
         if self.switches.last().is_none() {
             return Err(Diagnostic::new(span, "`default` outside a switch"));
         }
@@ -462,10 +433,8 @@ impl FnLower<'_> {
         }
         self.set_current(block);
         let path = self.scope_path();
-        self.labels.insert(
-            name.text.clone(),
-            LabelInfo { block, path },
-        );
+        self.labels
+            .insert(name.text.clone(), LabelInfo { block, path });
         self.lower_stmt(statement)
     }
 
@@ -541,19 +510,12 @@ impl FnLower<'_> {
         Ok(())
     }
 
-    fn lower_return(
-        &mut self,
-        value: Option<&ast::Expr>,
-        span: Span,
-    ) -> Result<(), Diagnostic> {
+    fn lower_return(&mut self, value: Option<&ast::Expr>, span: Span) -> Result<(), Diagnostic> {
         if self.l.types.is_void(self.return_ty) {
             if let Some(value) = value {
                 let expression = self.lower_expr(value)?;
                 if !matches!(expression.kind, ExprKind::Void) {
-                    return Err(Diagnostic::new(
-                        span,
-                        "void function cannot return a value",
-                    ));
+                    return Err(Diagnostic::new(span, "void function cannot return a value"));
                 }
             }
             self.emit_all_drops();

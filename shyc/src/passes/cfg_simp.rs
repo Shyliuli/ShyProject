@@ -109,8 +109,7 @@ pub fn prune_stale_phi_inputs(function: &mut Function) -> bool {
             let before = phi.incoming.len();
             let mut seen: Vec<BlockId> = Vec::new();
             phi.incoming.retain(|incoming| {
-                if !expected.contains(&incoming.predecessor)
-                    || seen.contains(&incoming.predecessor)
+                if !expected.contains(&incoming.predecessor) || seen.contains(&incoming.predecessor)
                 {
                     return false;
                 }
@@ -358,8 +357,7 @@ fn forward_block(
 /// `Function::predecessors`: one predecessor block supplies exactly one phi
 /// input even when several switch cases reach it.
 fn predecessor_map(function: &Function) -> Vec<Vec<BlockId>> {
-    let mut predecessors: Vec<Vec<BlockId>> =
-        vec![Vec::new(); function.blocks.len()];
+    let mut predecessors: Vec<Vec<BlockId>> = vec![Vec::new(); function.blocks.len()];
     for (id, block) in function.live_blocks() {
         for successor in block.unique_successors() {
             predecessors[successor.0 as usize].push(id);

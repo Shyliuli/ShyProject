@@ -6,19 +6,14 @@
 
 use super::const_eval::ConstKind;
 use super::types::ResolvedSpecsWithName;
-use super::{
-    FnLower, GlobalRef, Local, Lowerer, ObjectInfo, PendingFunction, ResolvedSpecs,
-};
+use super::{FnLower, GlobalRef, Local, Lowerer, ObjectInfo, PendingFunction, ResolvedSpecs};
 use crate::ast;
 use crate::ir;
 use crate::sema::types::{QualifiedType, Qualifiers, TypeId, TypeKind};
 use crate::source::{Diagnostic, Span};
 
 impl Lowerer {
-    pub(super) fn collect(
-        &mut self,
-        unit: &ast::TranslationUnit,
-    ) -> Result<(), Diagnostic> {
+    pub(super) fn collect(&mut self, unit: &ast::TranslationUnit) -> Result<(), Diagnostic> {
         for item in &unit.items {
             match item {
                 ast::Item::Decl(declaration) => self.collect_declaration(declaration)?,
@@ -29,12 +24,8 @@ impl Lowerer {
         Ok(())
     }
 
-    fn collect_declaration(
-        &mut self,
-        declaration: &ast::Declaration,
-    ) -> Result<(), Diagnostic> {
-        let ResolvedSpecs { ty, qualifiers } =
-            self.resolve_specs(&declaration.specs)?;
+    fn collect_declaration(&mut self, declaration: &ast::Declaration) -> Result<(), Diagnostic> {
+        let ResolvedSpecs { ty, qualifiers } = self.resolve_specs(&declaration.specs)?;
         let storage = declaration.specs.storage;
         if storage == Some(ast::StorageClass::Typedef) {
             for init in &declaration.declarators {
@@ -44,8 +35,7 @@ impl Lowerer {
                         "a typedef cannot have an initializer",
                     ));
                 }
-                let resolved =
-                    self.resolve_declarator(ty, qualifiers, &init.declarator)?;
+                let resolved = self.resolve_declarator(ty, qualifiers, &init.declarator)?;
                 let Some(name) = resolved.name else {
                     return Err(Diagnostic::new(
                         init.span,
@@ -56,8 +46,7 @@ impl Lowerer {
             }
             return Ok(());
         }
-        if storage == Some(ast::StorageClass::Auto)
-            || storage == Some(ast::StorageClass::Register)
+        if storage == Some(ast::StorageClass::Auto) || storage == Some(ast::StorageClass::Register)
         {
             return Err(Diagnostic::new(
                 declaration.span,
@@ -73,10 +62,7 @@ impl Lowerer {
                 init.span,
             )?;
             let Some(name) = resolved.name else {
-                return Err(Diagnostic::new(
-                    init.span,
-                    "declaration needs a name",
-                ));
+                return Err(Diagnostic::new(init.span, "declaration needs a name"));
             };
             if self.types.is_function(resolved.ty) {
                 if init.init.is_some() {
@@ -105,10 +91,8 @@ impl Lowerer {
         declaration: &ast::FunctionDecl,
         impl_context: Option<(TypeId, String)>,
     ) -> Result<(), Diagnostic> {
-        let ResolvedSpecs { ty, qualifiers } =
-            self.resolve_specs(&declaration.specs)?;
-        let resolved =
-            self.resolve_declarator(ty, qualifiers, &declaration.declarator)?;
+        let ResolvedSpecs { ty, qualifiers } = self.resolve_specs(&declaration.specs)?;
+        let resolved = self.resolve_declarator(ty, qualifiers, &declaration.declarator)?;
         let Some(name) = resolved.name else {
             return Err(Diagnostic::new(
                 declaration.span,
@@ -133,10 +117,13 @@ impl Lowerer {
         };
         self.declare_function_symbol(&symbol, resolved.ty, true, declaration.span)?;
         if let Some((implemented, _)) = &impl_context {
-            let info = self.impls.entry(*implemented).or_insert_with(|| super::ImplInfo {
-                name: String::new(),
-                methods: Default::default(),
-            });
+            let info = self
+                .impls
+                .entry(*implemented)
+                .or_insert_with(|| super::ImplInfo {
+                    name: String::new(),
+                    methods: Default::default(),
+                });
             if let Some((_, type_name)) = &impl_context {
                 info.name = type_name.clone();
             }
@@ -405,12 +392,7 @@ impl Lowerer {
                         "array initializer index is out of bounds",
                     ));
                 }
-                self.write_global_init(
-                    global,
-                    sub_ty,
-                    offset + sub_offset,
-                    &entry.value,
-                )?;
+                self.write_global_init(global, sub_ty, offset + sub_offset, &entry.value)?;
                 cursor = top_index + 1;
             }
             return Ok(());
@@ -418,10 +400,7 @@ impl Lowerer {
         if self.types.is_record(ty) {
             let fields = self.record_fields(ty);
             if fields.is_empty() {
-                return Err(Diagnostic::new(
-                    span,
-                    "initializer for an empty record",
-                ));
+                return Err(Diagnostic::new(span, "initializer for an empty record"));
             }
             let is_union = matches!(
                 self.types.kind(ty),
@@ -445,12 +424,7 @@ impl Lowerer {
                     cursor = index + 1;
                     (sub_ty, sub_offset)
                 };
-                self.write_global_init(
-                    global,
-                    sub_ty,
-                    offset + sub_offset,
-                    &entry.value,
-                )?;
+                self.write_global_init(global, sub_ty, offset + sub_offset, &entry.value)?;
                 initialized += 1;
                 if is_union && initialized > 1 {
                     return Err(Diagnostic::new(
@@ -461,10 +435,7 @@ impl Lowerer {
             }
             return Ok(());
         }
-        Err(Diagnostic::new(
-            span,
-            "invalid aggregate initializer",
-        ))
+        Err(Diagnostic::new(span, "invalid aggregate initializer"))
     }
 
     fn write_string_bytes(
@@ -477,7 +448,10 @@ impl Lowerer {
         let (bytes, unit) = self.decode_string(group)?;
         let element = self.array_element(ty).map(|element| element.ty);
         let Some(element) = element else {
-            return Err(Diagnostic::new(group.span, "string initializer needs an array"));
+            return Err(Diagnostic::new(
+                group.span,
+                "string initializer needs an array",
+            ));
         };
         if self.size_of(element, group.span)? as usize != unit {
             return Err(Diagnostic::new(
@@ -488,17 +462,17 @@ impl Lowerer {
         let size = self.types.size_of(ty).unwrap_or(0);
         let start = offset as usize;
         if start >= global.bytes.len() || start + size as usize > global.bytes.len() {
-            return Err(Diagnostic::new(group.span, "string initializer is out of bounds"));
+            return Err(Diagnostic::new(
+                group.span,
+                "string initializer is out of bounds",
+            ));
         }
         let copy = bytes.len().min(size as usize);
         global.bytes[start..start + copy].copy_from_slice(&bytes[..copy]);
         Ok(())
     }
 
-    fn decode_string(
-        &self,
-        group: &ast::StringLitGroup,
-    ) -> Result<(Vec<u8>, usize), Diagnostic> {
+    fn decode_string(&self, group: &ast::StringLitGroup) -> Result<(Vec<u8>, usize), Diagnostic> {
         let (mut bytes, unit) = self.decoded_string(group)?;
         bytes.extend(std::iter::repeat_n(0u8, unit));
         Ok((bytes, unit))
@@ -589,19 +563,14 @@ impl Lowerer {
             }))
         );
         if outer_unspecified && let Some(init) = init {
-            let (element_ty, element_qualifiers) = self.apply_derived(
-                base,
-                qualifiers,
-                &declarator.derived[1..],
-            )?;
+            let (element_ty, element_qualifiers) =
+                self.apply_derived(base, qualifiers, &declarator.derived[1..])?;
             let count = self.infer_array_count(init, element_ty, span)?;
             let element = QualifiedType::new(element_ty, element_qualifiers);
             let ty = self
                 .types
                 .array_of(element, Some(count))
-                .map_err(|error| {
-                    Diagnostic::new(span, format!("invalid array type: {error}"))
-                })?;
+                .map_err(|error| Diagnostic::new(span, format!("invalid array type: {error}")))?;
             return Ok(ResolvedSpecsWithName {
                 ty,
                 qualifiers: element_qualifiers,
@@ -665,9 +634,7 @@ impl Lowerer {
 
     pub(super) fn array_len(&self, ty: TypeId) -> u32 {
         match self.types.kind(ty) {
-            TypeKind::Array {
-                len: Some(len), ..
-            } => *len,
+            TypeKind::Array { len: Some(len), .. } => *len,
             _ => 0,
         }
     }
@@ -723,10 +690,7 @@ impl Lowerer {
                 return Ok((index, field.ty.ty, field.offset));
             }
         }
-        Err(Diagnostic::new(
-            span,
-            format!("no member named '{name}'"),
-        ))
+        Err(Diagnostic::new(span, format!("no member named '{name}'")))
     }
 
     /// Resolve a designator path to a sub-object type, its byte offset, and the
@@ -778,11 +742,9 @@ impl Lowerer {
                     if index == 0 {
                         cursor = value as u32;
                     }
-                    offset = offset
-                        .checked_add(value as u32 * size)
-                        .ok_or_else(|| {
-                            Diagnostic::new(expr.span(), "initializer offset overflow")
-                        })?;
+                    offset = offset.checked_add(value as u32 * size).ok_or_else(|| {
+                        Diagnostic::new(expr.span(), "initializer offset overflow")
+                    })?;
                     current = element.ty;
                 }
             }
@@ -844,10 +806,13 @@ impl FnLower<'_> {
                 }
                 self.l
                     .declare_function_symbol(&name, resolved.ty, false, init.span)?;
-                self.bind(name.clone(), super::LocalBinding::Function {
-                    symbol: name,
-                    ty: resolved.ty,
-                });
+                self.bind(
+                    name.clone(),
+                    super::LocalBinding::Function {
+                        symbol: name,
+                        ty: resolved.ty,
+                    },
+                );
                 continue;
             }
             match storage {
@@ -860,11 +825,14 @@ impl FnLower<'_> {
                         None,
                         init.span,
                     )?;
-                    self.bind(name.clone(), super::LocalBinding::Object {
-                        symbol: name,
-                        ty: resolved.ty,
-                        qualifiers: resolved.qualifiers,
-                    });
+                    self.bind(
+                        name.clone(),
+                        super::LocalBinding::Object {
+                            symbol: name,
+                            ty: resolved.ty,
+                            qualifiers: resolved.qualifiers,
+                        },
+                    );
                     continue;
                 }
                 Some(ast::StorageClass::Static) => {
@@ -878,11 +846,14 @@ impl FnLower<'_> {
                         init.span,
                     )?;
                     self.l.module.add_global(global);
-                    self.bind(name, super::LocalBinding::Object {
-                        symbol,
-                        ty: resolved.ty,
-                        qualifiers: resolved.qualifiers,
-                    });
+                    self.bind(
+                        name,
+                        super::LocalBinding::Object {
+                            symbol,
+                            ty: resolved.ty,
+                            qualifiers: resolved.qualifiers,
+                        },
+                    );
                     continue;
                 }
                 _ => {}
@@ -914,11 +885,7 @@ impl FnLower<'_> {
                 self.current_scope_mut().drops.push(local);
             }
             if let Some(init) = &init.init {
-                self.init_local_at(
-                    ir::Address::slot(slot),
-                    resolved.ty,
-                    init,
-                )?;
+                self.init_local_at(ir::Address::slot(slot), resolved.ty, init)?;
                 if self.locals[local].drop_symbol.is_some() {
                     self.deactivate_if_local_expr(init);
                 }
@@ -972,10 +939,7 @@ impl FnLower<'_> {
                         return Ok(());
                     };
                     if entries.len() > 1 {
-                        return Err(Diagnostic::new(
-                            span,
-                            "too many initializers for a scalar",
-                        ));
+                        return Err(Diagnostic::new(span, "too many initializers for a scalar"));
                     }
                     if !entry.designators.is_empty() {
                         return Err(Diagnostic::new(
@@ -1016,7 +980,8 @@ impl FnLower<'_> {
                 let (sub_ty, sub_offset, top_index) = if entry.designators.is_empty() {
                     (element.ty, cursor * element_size, cursor)
                 } else {
-                    self.l.designator_target(ty, &entry.designators, entry.span)?
+                    self.l
+                        .designator_target(ty, &entry.designators, entry.span)?
                 };
                 if top_index >= len {
                     return Err(Diagnostic::new(
@@ -1056,7 +1021,8 @@ impl FnLower<'_> {
                     (field.1, field.2)
                 } else {
                     let (sub_ty, sub_offset, index) =
-                        self.l.designator_target(ty, &entry.designators, entry.span)?;
+                        self.l
+                            .designator_target(ty, &entry.designators, entry.span)?;
                     cursor = index + 1;
                     (sub_ty, sub_offset)
                 };
@@ -1176,10 +1142,7 @@ impl FnLower<'_> {
     }
 
     pub(super) fn declare_va_area(&mut self) -> Result<(), Diagnostic> {
-        let char_ty = self
-            .l
-            .types
-            .builtin(crate::sema::types::Builtin::Char);
+        let char_ty = self.l.types.builtin(crate::sema::types::Builtin::Char);
         let array = self
             .l
             .types
@@ -1194,11 +1157,9 @@ impl FnLower<'_> {
                     format!("cannot build the variadic area: {error}"),
                 )
             })?;
-        let slot = self.f.alloc_slot_aligned(
-            "__va_area__",
-            ir::Type::aggregate(136, 1),
-            1,
-        );
+        let slot = self
+            .f
+            .alloc_slot_aligned("__va_area__", ir::Type::aggregate(136, 1), 1);
         let local = self.locals.len();
         self.locals.push(Local {
             slot,
@@ -1207,10 +1168,7 @@ impl FnLower<'_> {
             drop_symbol: None,
             drop_active: false,
         });
-        self.bind(
-            "__va_area__".to_string(),
-            super::LocalBinding::Local(local),
-        );
+        self.bind("__va_area__".to_string(), super::LocalBinding::Local(local));
         Ok(())
     }
 }

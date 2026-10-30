@@ -41,9 +41,15 @@ impl Lowerer {
                         let len = function.len() as u32 + 1;
                         let element = self.types.builtin(Builtin::Char);
                         self.types
-                            .array_of(crate::sema::types::QualifiedType::unqualified(element), Some(len))
+                            .array_of(
+                                crate::sema::types::QualifiedType::unqualified(element),
+                                Some(len),
+                            )
                             .map_err(|error| {
-                                Diagnostic::new(name.span, format!("invalid __func__ type: {error}"))
+                                Diagnostic::new(
+                                    name.span,
+                                    format!("invalid __func__ type: {error}"),
+                                )
                             })
                     }
                     None => Err(Diagnostic::new(
@@ -64,10 +70,9 @@ impl Lowerer {
                         let decayed = self.decay_type(operand_ty);
                         match self.pointee(decayed) {
                             Some(pointee) => Ok(pointee.ty),
-                            None => Err(Diagnostic::new(
-                                *span,
-                                "unary `*` needs a pointer operand",
-                            )),
+                            None => {
+                                Err(Diagnostic::new(*span, "unary `*` needs a pointer operand"))
+                            }
                         }
                     }
                     ast::UnaryOp::Plus | ast::UnaryOp::Minus | ast::UnaryOp::BitNot => {
@@ -120,11 +125,7 @@ impl Lowerer {
                     )),
                 }
             }
-            ast::Expr::Index {
-                array,
-                index,
-                span,
-            } => {
+            ast::Expr::Index { array, index, span } => {
                 let left_ty = self.type_of(array, local)?;
                 if self.types.is_array(left_ty) || self.types.is_pointer(left_ty) {
                     return self.index_type(left_ty, *span);
@@ -195,8 +196,7 @@ impl Lowerer {
         let Ok(value) = self.eval_const(expr) else {
             return false;
         };
-        self.types.is_integer(value.ty)
-            && matches!(value.kind, ConstKind::Int(0))
+        self.types.is_integer(value.ty) && matches!(value.kind, ConstKind::Int(0))
     }
 
     fn binary_type(
@@ -245,10 +245,7 @@ impl Lowerer {
             }
             _ => {
                 if !self.types.is_arithmetic(left_ty) || !self.types.is_arithmetic(right_ty) {
-                    return Err(Diagnostic::new(
-                        span,
-                        "operator needs arithmetic operands",
-                    ));
+                    return Err(Diagnostic::new(span, "operator needs arithmetic operands"));
                 }
                 if op == ast::BinaryOp::Remainder
                     && (self.types.is_floating(left_ty) || self.types.is_floating(right_ty))
@@ -270,7 +267,10 @@ impl Lowerer {
         if let Some(pointee) = self.pointee(array_ty) {
             return Ok(pointee.ty);
         }
-        Err(Diagnostic::new(span, "subscripted value is not an array or pointer"))
+        Err(Diagnostic::new(
+            span,
+            "subscripted value is not an array or pointer",
+        ))
     }
 
     fn member_type(
@@ -288,9 +288,9 @@ impl Lowerer {
                 "`->` needs a pointer to a struct or union",
             ));
         }
-        let record = self.record_of(object_ty).ok_or_else(|| {
-            Diagnostic::new(span, "member access needs a struct or union")
-        })?;
+        let record = self
+            .record_of(object_ty)
+            .ok_or_else(|| Diagnostic::new(span, "member access needs a struct or union"))?;
         match self.field_of(record, &name.text, name.span) {
             Ok((ty, _)) => Ok(ty),
             Err(error) => {

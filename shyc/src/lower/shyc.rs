@@ -11,10 +11,7 @@ use crate::ir;
 use crate::source::{Diagnostic, Span};
 
 impl super::Lowerer {
-    pub(super) fn collect_impl(
-        &mut self,
-        block: &ast::ImplBlock,
-    ) -> Result<(), Diagnostic> {
+    pub(super) fn collect_impl(&mut self, block: &ast::ImplBlock) -> Result<(), Diagnostic> {
         let ty = self.resolve_type_name(&block.self_type)?;
         if !self.types.is_record(ty) {
             return Err(Diagnostic::new(
@@ -193,20 +190,13 @@ impl FnLower<'_> {
                         access,
                     ));
                 }
-                self.emit_statement(ir::InstKind::InlineAsm(ir::InlineAsm {
-                    text,
-                    bindings,
-                }));
+                self.emit_statement(ir::InstKind::InlineAsm(ir::InlineAsm { text, bindings }));
                 Ok(())
             }
         }
     }
 
-    fn asm_text(
-        &self,
-        templates: &[ast::StringLit],
-        span: Span,
-    ) -> Result<String, Diagnostic> {
+    fn asm_text(&self, templates: &[ast::StringLit], span: Span) -> Result<String, Diagnostic> {
         let mut text = String::new();
         for part in templates {
             let value = crate::literal::string(&part.prefix, &part.raw, part.span)?;
@@ -234,12 +224,8 @@ impl FnLower<'_> {
                 let local = &self.locals[index];
                 Ok((ir::Address::slot(local.slot), local.ty))
             }
-            Resolved::Object { symbol, ty, .. } => {
-                Ok((ir::Address::symbol(symbol), ty))
-            }
-            Resolved::Function { symbol, ty } => {
-                Ok((ir::Address::symbol(symbol), ty))
-            }
+            Resolved::Object { symbol, ty, .. } => Ok((ir::Address::symbol(symbol), ty)),
+            Resolved::Function { symbol, ty } => Ok((ir::Address::symbol(symbol), ty)),
             Resolved::EnumConstant { .. } | Resolved::FuncName { .. } => Err(Diagnostic::new(
                 span,
                 format!("asm! binding '{name}' is not an object"),

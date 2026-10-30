@@ -85,7 +85,8 @@ pub fn fold_constants(function: &mut Function) -> bool {
             if inst.effects().side_effects {
                 continue;
             }
-            let Some(constant) = fold_instruction(&inst.kind, &replacements, function.layout) else {
+            let Some(constant) = fold_instruction(&inst.kind, &replacements, function.layout)
+            else {
                 continue;
             };
             replacements.insert(result, Operand::Constant(constant));
@@ -136,10 +137,7 @@ pub fn propagate_copies(function: &mut Function) -> bool {
 ///
 /// Used by the CFG rewrite for trivial phis, which leaves the dead phi for
 /// `eliminate_dead_instructions` instead of deleting a definition here.
-pub(crate) fn apply_replacements(
-    function: &mut Function,
-    raw: &HashMap<ValueId, Operand>,
-) -> bool {
+pub(crate) fn apply_replacements(function: &mut Function, raw: &HashMap<ValueId, Operand>) -> bool {
     let replacements = resolve_replacements(raw);
     rewrite_uses(function, &replacements)
 }
@@ -537,11 +535,7 @@ fn cast_identity(op: CastOp, value: Operand, to: Type, from: Type) -> Option<Ope
     let identity = from == to
         && from.is_scalar()
         && matches!(op, CastOp::Bitcast | CastOp::ZExt | CastOp::SExt);
-    if identity {
-        Some(value)
-    } else {
-        None
-    }
+    if identity { Some(value) } else { None }
 }
 
 fn predicate_is_true(pred: IntPredicate) -> bool {

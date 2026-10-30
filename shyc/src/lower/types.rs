@@ -285,8 +285,7 @@ impl Lowerer {
         base_qualifiers: Qualifiers,
         declarator: &ast::Declarator,
     ) -> Result<ResolvedSpecsWithName, Diagnostic> {
-        let (ty, qualifiers) =
-            self.apply_derived(base, base_qualifiers, &declarator.derived)?;
+        let (ty, qualifiers) = self.apply_derived(base, base_qualifiers, &declarator.derived)?;
         Ok(ResolvedSpecsWithName {
             ty,
             qualifiers,
@@ -307,9 +306,7 @@ impl Lowerer {
                 ast::DerivedDeclarator::Pointer(pointer) => {
                     let pointer_qualifiers =
                         self.resolve_qualifiers(&pointer.qualifiers, pointer.span)?;
-                    ty = self
-                        .types
-                        .pointer_to(QualifiedType::new(ty, qualifiers));
+                    ty = self.types.pointer_to(QualifiedType::new(ty, qualifiers));
                     qualifiers = pointer_qualifiers;
                 }
                 ast::DerivedDeclarator::Array(array) => {
@@ -349,10 +346,7 @@ impl Lowerer {
         }
     }
 
-    fn array_length(
-        &mut self,
-        array: &ast::ArrayDeclarator,
-    ) -> Result<Option<u32>, Diagnostic> {
+    fn array_length(&mut self, array: &ast::ArrayDeclarator) -> Result<Option<u32>, Diagnostic> {
         match &array.length {
             ast::ArrayLength::Unspecified => Ok(None),
             ast::ArrayLength::Star => Err(Diagnostic::new(
@@ -370,10 +364,7 @@ impl Lowerer {
                     )
                 })?;
                 if value < 0 {
-                    return Err(Diagnostic::new(
-                        expr.span(),
-                        "array length is negative",
-                    ));
+                    return Err(Diagnostic::new(expr.span(), "array length is negative"));
                 }
                 u32::try_from(value).map(Some).map_err(|_| {
                     Diagnostic::new(expr.span(), "array length exceeds 32-bit object sizes")
@@ -421,9 +412,7 @@ impl Lowerer {
             return self.types.pointer_to(*element);
         }
         if self.types.is_function(ty) {
-            return self
-                .types
-                .pointer_to(QualifiedType::unqualified(ty));
+            return self.types.pointer_to(QualifiedType::unqualified(ty));
         }
         ty
     }
@@ -432,10 +421,7 @@ impl Lowerer {
     // Records and enums
     // -----------------------------------------------------------------------
 
-    fn resolve_record(
-        &mut self,
-        spec: &ast::RecordSpec,
-    ) -> Result<TypeId, Diagnostic> {
+    fn resolve_record(&mut self, spec: &ast::RecordSpec) -> Result<TypeId, Diagnostic> {
         let kind = match spec.kind {
             ast::RecordKind::Struct => RecordKind::Struct,
             ast::RecordKind::Union => RecordKind::Union,
@@ -467,18 +453,13 @@ impl Lowerer {
             return Ok(ty);
         };
 
-        let existing = tag
-            .as_ref()
-            .and_then(|tag| self.tag_in_current_scope(tag));
+        let existing = tag.as_ref().and_then(|tag| self.tag_in_current_scope(tag));
         let ty = match existing {
             Some(existing) => {
                 if self.types.get(existing).size.is_some() {
                     return Err(Diagnostic::new(
                         spec.span,
-                        format!(
-                            "redefinition of record '{}'",
-                            tag.as_deref().unwrap_or("")
-                        ),
+                        format!("redefinition of record '{}'", tag.as_deref().unwrap_or("")),
                     ));
                 }
                 match self.types.kind(existing) {
@@ -530,8 +511,7 @@ impl Lowerer {
                         "bit-fields are not supported",
                     ));
                 }
-                let resolved =
-                    self.resolve_declarator(ty, qualifiers, &declarator.declarator)?;
+                let resolved = self.resolve_declarator(ty, qualifiers, &declarator.declarator)?;
                 let Some(name) = resolved.name else {
                     return Err(Diagnostic::new(
                         declarator.span,
@@ -554,10 +534,7 @@ impl Lowerer {
         Ok(fields)
     }
 
-    fn resolve_enum(
-        &mut self,
-        spec: &ast::EnumSpec,
-    ) -> Result<TypeId, Diagnostic> {
+    fn resolve_enum(&mut self, spec: &ast::EnumSpec) -> Result<TypeId, Diagnostic> {
         let Some(enumerators) = &spec.enumerators else {
             let Some(tag) = &spec.tag else {
                 return Err(Diagnostic::new(
@@ -635,9 +612,7 @@ impl Lowerer {
     ) -> Result<TypeId, Diagnostic> {
         self.types
             .usual_arithmetic_conversions(left, right)
-            .map_err(|error| {
-                Diagnostic::new(span, format!("invalid arithmetic operands: {error}"))
-            })
+            .map_err(|error| Diagnostic::new(span, format!("invalid arithmetic operands: {error}")))
     }
 
     pub(super) fn is_unsigned(&self, ty: TypeId) -> bool {
@@ -653,8 +628,7 @@ impl Lowerer {
     }
 
     pub(super) fn pointer_to(&mut self, ty: TypeId) -> TypeId {
-        self.types
-            .pointer_to(QualifiedType::unqualified(ty))
+        self.types.pointer_to(QualifiedType::unqualified(ty))
     }
 
     /// Array-to-pointer and function-to-pointer decay for value contexts.
@@ -663,9 +637,7 @@ impl Lowerer {
             return self.types.pointer_to(*element);
         }
         if self.types.is_function(ty) {
-            return self
-                .types
-                .pointer_to(QualifiedType::unqualified(ty));
+            return self.types.pointer_to(QualifiedType::unqualified(ty));
         }
         ty
     }
@@ -690,9 +662,7 @@ impl Lowerer {
             return Some(ty);
         }
         match self.types.kind(ty) {
-            TypeKind::Pointer { pointee } if self.types.is_record(pointee.ty) => {
-                Some(pointee.ty)
-            }
+            TypeKind::Pointer { pointee } if self.types.is_record(pointee.ty) => Some(pointee.ty),
             _ => None,
         }
     }
@@ -751,9 +721,8 @@ impl Lowerer {
                 Diagnostic::new(literal.span, "invalid hexadecimal floating literal")
             })?
         } else {
-            text.parse::<f64>().map_err(|_| {
-                Diagnostic::new(literal.span, "invalid floating literal")
-            })?
+            text.parse::<f64>()
+                .map_err(|_| Diagnostic::new(literal.span, "invalid floating literal"))?
         };
         let ty = self.types.builtin(ty);
         let bits = if self.types.size_of(ty) == Ok(4) {
@@ -764,10 +733,7 @@ impl Lowerer {
         Ok(NumericLiteral::Float { bits, ty })
     }
 
-    pub(super) fn char_literal(
-        &self,
-        literal: &ast::CharLit,
-    ) -> Result<(u64, TypeId), Diagnostic> {
+    pub(super) fn char_literal(&self, literal: &ast::CharLit) -> Result<(u64, TypeId), Diagnostic> {
         let value = crate::literal::character(&literal.prefix, &literal.raw, literal.span)?;
         let builtin = match literal.prefix.as_str() {
             "" => Builtin::Int,
@@ -802,10 +768,7 @@ fn parse_hex_float(text: &str) -> Option<f64> {
         .strip_prefix("0x")
         .or_else(|| text.strip_prefix("0X"))?;
     let (mantissa, exponent) = match text.find(['p', 'P']) {
-        Some(index) => (
-            &text[..index],
-            text[index + 1..].parse::<i32>().ok()?,
-        ),
+        Some(index) => (&text[..index], text[index + 1..].parse::<i32>().ok()?),
         None => (text, 0),
     };
     let (whole, fraction) = match mantissa.split_once('.') {

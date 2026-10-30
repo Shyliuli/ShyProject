@@ -467,12 +467,7 @@ impl TypeStore {
         let id = EnumId(self.enums.len() as u32);
         let underlying = self.builtins.int;
         self.enums.push(EnumInfo { underlying });
-        push_type(
-            &mut self.types,
-            TypeKind::Enum(id),
-            Some(4),
-            Some(4),
-        )
+        push_type(&mut self.types, TypeKind::Enum(id), Some(4), Some(4))
     }
 
     pub fn record_info(&self, ty: TypeId) -> Option<&RecordInfo> {
@@ -549,8 +544,6 @@ impl TypeStore {
     pub fn is_complete(&self, ty: TypeId) -> bool {
         self.get(ty).size.is_some()
     }
-
-
 }
 
 fn push_type(

@@ -41,20 +41,19 @@ impl FnLower<'_> {
     ) -> Result<ExprVal, Diagnostic> {
         let first = self.lower_expr(array)?;
         let first_ty = first.ty;
-        let (base_value, index_expr) = if self.l.types.is_array(first_ty)
-            || self.l.types.is_pointer(first_ty)
-        {
-            (first, index)
-        } else {
-            let second = self.lower_expr(index)?;
-            if !self.l.types.is_array(second.ty) && !self.l.types.is_pointer(second.ty) {
-                return Err(Diagnostic::new(
-                    span,
-                    "subscripted value is not an array or pointer",
-                ));
-            }
-            (second, array)
-        };
+        let (base_value, index_expr) =
+            if self.l.types.is_array(first_ty) || self.l.types.is_pointer(first_ty) {
+                (first, index)
+            } else {
+                let second = self.lower_expr(index)?;
+                if !self.l.types.is_array(second.ty) && !self.l.types.is_pointer(second.ty) {
+                    return Err(Diagnostic::new(
+                        span,
+                        "subscripted value is not an array or pointer",
+                    ));
+                }
+                (second, array)
+            };
         let element = if let Some(element) = self.l.array_element(base_value.ty) {
             element
         } else if let Some(pointee) = self.l.pointee(base_value.ty) {
@@ -101,10 +100,7 @@ impl FnLower<'_> {
         let offset = if size == 1 {
             index_operand
         } else {
-            let scale = ir::Operand::Constant(ir::Constant::int(
-                ir::Type::I32,
-                i64::from(size),
-            ));
+            let scale = ir::Operand::Constant(ir::Constant::int(ir::Type::I32, i64::from(size)));
             ir::Operand::Value(self.emit_value(ir::InstKind::Binary {
                 op: ir::BinaryOp::Mul,
                 lhs: index_operand,
@@ -113,10 +109,7 @@ impl FnLower<'_> {
             }))
         };
         let base = self.address_value(base_address);
-        let pointer = self.emit_value(ir::InstKind::PtrOffset {
-            base,
-            offset,
-        });
+        let pointer = self.emit_value(ir::InstKind::PtrOffset { base, offset });
         Ok(ExprVal {
             ty: element.ty,
             qualifiers: element.qualifiers,
@@ -142,7 +135,9 @@ impl FnLower<'_> {
             }
         }
         if let ast::Expr::ScopedName {
-            qualifier, name, span: call_span,
+            qualifier,
+            name,
+            span: call_span,
         } = callee
         {
             let method = self.l.scoped_method(qualifier, name)?;
@@ -281,10 +276,7 @@ impl FnLower<'_> {
             TypeKind::Function {
                 params, variadic, ..
             } => Ok((params.clone(), *variadic)),
-            _ => Err(Diagnostic::new(
-                span,
-                "called object is not a function",
-            )),
+            _ => Err(Diagnostic::new(span, "called object is not a function")),
         }
     }
 
@@ -355,9 +347,7 @@ impl FnLower<'_> {
         let result_ty = *result;
         let call = match target {
             ir::CallTarget::Direct(symbol) => ir::Call::direct(symbol, arguments, signature),
-            ir::CallTarget::Indirect(callee) => {
-                ir::Call::indirect(callee, arguments, signature)
-            }
+            ir::CallTarget::Indirect(callee) => ir::Call::indirect(callee, arguments, signature),
         };
         if self.l.types.is_void(result_ty) {
             self.emit_statement(ir::InstKind::Call(call));

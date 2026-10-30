@@ -30,7 +30,6 @@ mod stmt;
 mod type_of;
 mod types;
 
-
 use std::collections::HashMap;
 
 use crate::ast;
@@ -76,10 +75,7 @@ impl Default for Options {
 }
 
 /// Lowers one parsed translation unit.
-pub fn lower(
-    unit: &ast::TranslationUnit,
-    options: &Options,
-) -> Result<Lowered, Diagnostic> {
+pub fn lower(unit: &ast::TranslationUnit, options: &Options) -> Result<Lowered, Diagnostic> {
     let mut lowerer = Lowerer::new(options);
     lowerer.collect(unit)?;
     lowerer.lower_functions()?;
@@ -240,9 +236,9 @@ impl Lowerer {
     }
 
     pub(super) fn size_of(&self, ty: TypeId, span: Span) -> Result<u32, Diagnostic> {
-        self.types.size_of(ty).map_err(|error| {
-            Diagnostic::new(span, format!("cannot compute object size: {error}"))
-        })
+        self.types
+            .size_of(ty)
+            .map_err(|error| Diagnostic::new(span, format!("cannot compute object size: {error}")))
     }
 
     pub(super) fn align_of(&self, ty: TypeId, span: Span) -> Result<u32, Diagnostic> {
@@ -360,9 +356,7 @@ impl Lowerer {
             2 => self
                 .types
                 .builtin(crate::sema::types::Builtin::UnsignedShort),
-            _ => self
-                .types
-                .builtin(crate::sema::types::Builtin::UnsignedInt),
+            _ => self.types.builtin(crate::sema::types::Builtin::UnsignedInt),
         }
     }
 
@@ -442,7 +436,12 @@ impl Lowerer {
         self.push_type_scope();
     }
 
-    pub(super) fn declare_typedef(&mut self, name: &str, ty: TypeId, span: Span) -> Result<(), Diagnostic> {
+    pub(super) fn declare_typedef(
+        &mut self,
+        name: &str,
+        ty: TypeId,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
         let innermost = self.type_scopes.last_mut().expect("type scope stack");
         if innermost.typedefs.contains_key(name) {
             return Err(Diagnostic::new(
@@ -468,8 +467,19 @@ impl Lowerer {
             .find_map(|scope| scope.tags.get(name).copied())
     }
 
-    pub(super) fn declare_tag(&mut self, name: &str, ty: TypeId, span: Span) -> Result<(), Diagnostic> {
-        if self.type_scopes.last().expect("type scope stack").tags.contains_key(name) {
+    pub(super) fn declare_tag(
+        &mut self,
+        name: &str,
+        ty: TypeId,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if self
+            .type_scopes
+            .last()
+            .expect("type scope stack")
+            .tags
+            .contains_key(name)
+        {
             return Err(Diagnostic::new(
                 span,
                 format!("redefinition of struct/union/enum tag '{name}'"),

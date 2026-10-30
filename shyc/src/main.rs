@@ -1,25 +1,42 @@
-//! Small frontend driver; the existing `shycc` driver owns assembly and linking.
+//! Command-line driver for the independent ShyC compiler.
+//!
+//! One invocation reads one source file, preprocesses it, parses it, lowers it
+//! to the typed IR, optionally optimizes it, and emits the selected backend's
+//! text. Assembly and linking belong to the existing `shycc` driver.
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use shyc::ir::Layout;
 use shyc::lexer::{self, Token, TokenKind};
+use shyc::lower::{self, StartupMode};
 use shyc::preprocess::{self, Attributes};
 use shyc::source::SourceMap;
+use shyc::{llvm, parser, passes, shy};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
     Tokens,
     Preprocess,
     Ast,
+    Ir,
+    Emit(Backend),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    Shy,
+    Llvm,
 }
 
 struct Options {
     stage: Stage,
     input: PathBuf,
     output: Option<PathBuf>,
+    target: Option<String>,
+    optimize: bool,
     preprocess: preprocess::Options,
 }
 
@@ -40,37 +57,148 @@ fn run() -> Result<(), String> {
     let text = fs::read_to_string(&options.input)
         .map_err(|error| format!("{}: {error}", options.input.display()))?;
     let mut sources = SourceMap::default();
-    let file = sources.add(options.input, text);
+    let file = sources.add(options.input.clone(), text);
     let output = match options.stage {
         Stage::Tokens => {
             let tokens = lexer::lex(&sources, file).map_err(|error| sources.render(&error))?;
             format!("{tokens:#?}\n")
         }
-        Stage::Preprocess | Stage::Ast => {
+        Stage::Preprocess => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
+            render_preprocessed(&preprocessed.tokens, &preprocessed.attributes)
+        }
+        Stage::Ast => {
+            let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
+                .map_err(|error| sources.render(&error))?;
+            let unit =
+                parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
+            format!("{unit:#?}\n")
+        }
+        Stage::Ir | Stage::Emit(_) => {
+            let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
+                .map_err(|error| sources.render(&error))?;
+            let unit =
+                parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
+            let target = resolve_target(&options)?;
+            let startup = if preprocessed.attributes.no_main {
+                StartupMode::Manual
+            } else {
+                StartupMode::Main
+            };
+            let mut lowered = lower::lower(
+                &unit,
+                &lower::Options {
+                    module_name: module_name(&options.input),
+                    layout: target.layout,
+                    startup,
+                },
+            )
+            .map_err(|error| sources.render(&error))?;
+            lowered.module.resources.memory_bytes = preprocessed.attributes.memory.map(u64::from);
+            lowered.module.resources.stack_bytes = preprocessed.attributes.stack.map(u64::from);
+            if options.optimize {
+                for function in &mut lowered.module.functions {
+                    passes::mem2reg::promote(function);
+                    passes::simplify(function);
+                }
+            }
             match options.stage {
-                Stage::Preprocess => {
-                    render_preprocessed(&preprocessed.tokens, &preprocessed.attributes)
-                }
-                Stage::Ast => {
-                    let unit = shyc::parser::parse(&preprocessed.tokens)
-                        .map_err(|error| sources.render(&error))?;
-                    format!("{unit:#?}\n")
-                }
-                Stage::Tokens => unreachable!(),
+                Stage::Ir => lowered.module.to_string(),
+                Stage::Emit(Backend::Llvm) => llvm::emit(
+                    &lowered.module,
+                    &llvm::Options {
+                        triple: target.triple,
+                        layout: target.layout,
+                    },
+                )
+                .map_err(|error| sources.render(&error))?,
+                Stage::Emit(Backend::Shy) => shy::emit(
+                    &lowered.module,
+                    &shy::Options {
+                        layout: target.layout,
+                        emit_source_comments: false,
+                    },
+                )
+                .map_err(|error| sources.render(&error))?,
+                _ => unreachable!(),
             }
         }
     };
-    if let Some(path) = options.output {
-        fs::write(&path, output).map_err(|error| format!("{}: {error}", path.display()))?;
-    } else {
-        io::stdout()
+    match options.output {
+        Some(path) => {
+            fs::write(&path, output).map_err(|error| format!("{}: {error}", path.display()))
+        }
+        None => io::stdout()
             .lock()
             .write_all(output.as_bytes())
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string()),
     }
-    Ok(())
+}
+
+struct Target {
+    triple: String,
+    layout: Layout,
+}
+
+/// Resolve the target triple and the IR pointer layout it implies.
+///
+/// An explicit target is never guessed: the Shy backend only accepts `shy`,
+/// and the LLVM backend only accepts the 64-bit architectures whose layout is
+/// [`Layout::LP64`].
+fn resolve_target(options: &Options) -> Result<Target, String> {
+    let backend = match options.stage {
+        Stage::Emit(backend) => Some(backend),
+        _ => None,
+    };
+    let Some(name) = options.target.as_deref() else {
+        return match backend {
+            Some(Backend::Llvm) => Err("--emit=llvm requires --target <triple>".into()),
+            _ => Ok(Target {
+                triple: "shy".into(),
+                layout: Layout::SHY,
+            }),
+        };
+    };
+    let arch = name.split('-').next().unwrap_or(name);
+    match backend {
+        Some(Backend::Shy) if name != "shy" => Err(format!(
+            "the Shy backend emits ShyISA (`--target shy`), not `{name}`; \
+             use --emit=llvm for that target"
+        )),
+        Some(Backend::Llvm) => match arch {
+            "x86_64" | "riscv64" | "loongarch64" | "aarch64" => Ok(Target {
+                triple: name.into(),
+                layout: Layout::LP64,
+            }),
+            _ => Err(format!(
+                "unsupported --target `{name}`: --emit=llvm supports x86_64, riscv64, \
+                 loongarch64, and aarch64"
+            )),
+        },
+        _ => match arch {
+            "shy" if name == "shy" => Ok(Target {
+                triple: name.into(),
+                layout: Layout::SHY,
+            }),
+            "x86_64" | "riscv64" | "loongarch64" | "aarch64" => Ok(Target {
+                triple: name.into(),
+                layout: Layout::LP64,
+            }),
+            _ => Err(format!(
+                "unknown target `{name}`: expected `shy` or a 64-bit LLVM triple \
+                 (x86_64, riscv64, loongarch64, aarch64)"
+            )),
+        },
+    }
+}
+
+fn module_name(input: &Path) -> String {
+    input
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("module")
+        .to_string()
 }
 
 fn arguments() -> Result<Option<Options>, String> {
@@ -78,22 +206,42 @@ fn arguments() -> Result<Option<Options>, String> {
     let mut stage = None;
     let mut input = None;
     let mut output = None;
+    let mut target = None;
+    let mut optimize = false;
     let mut preprocess = preprocess::Options::default();
     while let Some(arg) = args.next() {
         let selected = match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "usage: shyc (-E | --dump-tokens | --dump-ast) [options] file\n\
-                    options: -I dir, -D name[=value], -U name, -o file\n\
-                    frontend inspection is available; assembly generation is under development"
+                    "usage: shyc [options] file\n\
+                     output: -S / --emit=shy (default), --emit=llvm, -E, --dump-tokens, \
+                     --dump-ast, --dump-ir\n\
+                     options: -O0..-O3, --target <triple>, -I dir, -D name[=value], \
+                     -U name, -o file\n\
+                     --emit=llvm requires a 64-bit --target triple; \
+                     assembly and linking stay in shycc"
                 );
                 return Ok(None);
             }
             "--dump-tokens" => Some(Stage::Tokens),
             "-E" => Some(Stage::Preprocess),
             "--dump-ast" => Some(Stage::Ast),
+            "--dump-ir" => Some(Stage::Ir),
+            "-S" => Some(Stage::Emit(Backend::Shy)),
             "-o" => {
                 output = Some(PathBuf::from(args.next().ok_or("-o requires a path")?));
+                None
+            }
+            "--target" => {
+                target = Some(args.next().ok_or("--target requires a triple")?);
+                None
+            }
+            "-O0" => {
+                optimize = false;
+                None
+            }
+            "-O1" | "-O2" | "-O3" => {
+                optimize = true;
                 None
             }
             "-I" | "-D" | "-U" => {
@@ -101,6 +249,15 @@ fn arguments() -> Result<Option<Options>, String> {
                     .next()
                     .ok_or_else(|| format!("{arg} requires an argument"))?;
                 preprocess_option(&mut preprocess, &arg, &value)?;
+                None
+            }
+            _ if arg.starts_with("--emit=") => Some(Stage::Emit(match &arg[7..] {
+                "shy" => Backend::Shy,
+                "llvm" => Backend::Llvm,
+                other => return Err(format!("unknown --emit value: {other}")),
+            })),
+            _ if arg.starts_with("--target=") => {
+                target = Some(arg[9..].to_string());
                 None
             }
             _ if arg.starts_with("-I") || arg.starts_with("-D") || arg.starts_with("-U") => {
@@ -115,18 +272,22 @@ fn arguments() -> Result<Option<Options>, String> {
                 None
             }
         };
-        if let Some(selected) = selected {
-            if stage.replace(selected).is_some() {
-                return Err("select exactly one of -E, --dump-tokens, or --dump-ast".into());
-            }
+        if let Some(selected) = selected
+            && stage.replace(selected).is_some()
+        {
+            return Err(
+                "select exactly one of -E, --dump-tokens, --dump-ast, --dump-ir, -S, \
+                 or --emit=<backend>"
+                    .into(),
+            );
         }
     }
     Ok(Some(Options {
-        stage: stage.ok_or(
-            "select -E, --dump-tokens, or --dump-ast; code generation is not available yet",
-        )?,
+        stage: stage.unwrap_or(Stage::Emit(Backend::Shy)),
         input: input.ok_or("no input source file")?,
         output,
+        target,
+        optimize,
         preprocess,
     }))
 }

@@ -60,8 +60,8 @@ mod const_prop;
 mod dce;
 
 pub use cfg_simp::{
-    prune_stale_phi_inputs, remove_forwarding_blocks, remove_unreachable_blocks,
-    simplify_branches, simplify_trivial_phis,
+    prune_stale_phi_inputs, remove_forwarding_blocks, remove_unreachable_blocks, simplify_branches,
+    simplify_trivial_phis,
 };
 pub use const_prop::{fold_constants, propagate_copies};
 pub use dce::eliminate_dead_instructions;

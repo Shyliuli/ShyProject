@@ -73,7 +73,9 @@ pub fn eliminate_dead_instructions(function: &mut Function) -> bool {
     let mut removed = false;
     for (_, block) in function.live_blocks_mut() {
         block.insts.retain(|inst| {
-            let Some(result) = inst.result else { return true };
+            let Some(result) = inst.result else {
+                return true;
+            };
             if inst.effects().is_pure() && !live.contains(&result) {
                 removed = true;
                 false
@@ -116,7 +118,9 @@ pub(crate) fn remove_unused_definitions(
         let mut removed = false;
         for (_, block) in function.live_blocks_mut() {
             block.insts.retain(|inst| {
-                let Some(result) = inst.result else { return true };
+                let Some(result) = inst.result else {
+                    return true;
+                };
                 if candidates.contains(&result) && !used.contains(&result) {
                     removed = true;
                     false

@@ -7,9 +7,7 @@
 
 use super::call::MemberTarget;
 use super::types::NumericLiteral;
-use super::{
-    ExprKind, ExprVal, FnLower, GlobalRef, LocalBinding, Resolved,
-};
+use super::{ExprKind, ExprVal, FnLower, GlobalRef, LocalBinding, Resolved};
 use crate::ast;
 use crate::ir;
 use crate::sema::types::{Builtin, Qualifiers, TypeId};
@@ -73,10 +71,7 @@ impl FnLower<'_> {
             return base;
         }
         let offset = ir::Operand::Constant(ir::Constant::int(ir::Type::I32, address.offset));
-        ir::Operand::Value(self.emit_value(ir::InstKind::PtrOffset {
-            base,
-            offset,
-        }))
+        ir::Operand::Value(self.emit_value(ir::InstKind::PtrOffset { base, offset }))
     }
 
     pub(super) fn load_value(
@@ -140,10 +135,7 @@ impl FnLower<'_> {
         }
     }
 
-    pub(super) fn rvalue(
-        &mut self,
-        expr: &ast::Expr,
-    ) -> Result<(ir::Operand, TypeId), Diagnostic> {
+    pub(super) fn rvalue(&mut self, expr: &ast::Expr) -> Result<(ir::Operand, TypeId), Diagnostic> {
         let value = self.lower_expr(expr)?;
         let span = expr.span();
         self.rvalue_val(value, span)
@@ -161,16 +153,10 @@ impl FnLower<'_> {
             return Ok(operand);
         }
         if self.l.types.is_void(from) || self.l.types.is_void(to) {
-            return Err(Diagnostic::new(
-                span,
-                "cannot convert a void value",
-            ));
+            return Err(Diagnostic::new(span, "cannot convert a void value"));
         }
         if self.l.types.is_aggregate(from) || self.l.types.is_aggregate(to) {
-            return Err(Diagnostic::new(
-                span,
-                "incompatible aggregate conversion",
-            ));
+            return Err(Diagnostic::new(span, "incompatible aggregate conversion"));
         }
         if self.l.types.is_bool(to) {
             return self.boolean_operand(operand, from, span);
@@ -280,10 +266,7 @@ impl FnLower<'_> {
             });
             return self.convert(ir::Operand::Value(integer), self.int_type(), to, span, true);
         }
-        Err(Diagnostic::new(
-            span,
-            "cannot convert between these types",
-        ))
+        Err(Diagnostic::new(span, "cannot convert between these types"))
     }
 
     fn integer_to_ir_width(
@@ -360,10 +343,7 @@ impl FnLower<'_> {
             });
             return Ok(ir::Operand::Value(value));
         }
-        Err(Diagnostic::new(
-            span,
-            "condition needs a scalar value",
-        ))
+        Err(Diagnostic::new(span, "condition needs a scalar value"))
     }
 
     pub(super) fn bool_to_int(&mut self, operand: ir::Operand) -> ir::Operand {
@@ -383,11 +363,7 @@ impl FnLower<'_> {
     // Names
     // -----------------------------------------------------------------------
 
-    pub(super) fn resolve_name(
-        &mut self,
-        name: &str,
-        span: Span,
-    ) -> Result<Resolved, Diagnostic> {
+    pub(super) fn resolve_name(&mut self, name: &str, span: Span) -> Result<Resolved, Diagnostic> {
         for scope in self.scopes.iter().rev() {
             let Some(binding) = scope.bindings.get(name) else {
                 continue;
@@ -515,9 +491,10 @@ impl FnLower<'_> {
                 NumericLiteral::Integer { bits, ty } => Ok(ExprVal {
                     ty,
                     qualifiers: Qualifiers::NONE,
-                    kind: ExprKind::Value(ir::Operand::Constant(
-                        ir::Constant::uint(self.l.ir_type(ty), bits),
-                    )),
+                    kind: ExprKind::Value(ir::Operand::Constant(ir::Constant::uint(
+                        self.l.ir_type(ty),
+                        bits,
+                    ))),
                 }),
                 NumericLiteral::Float { bits, ty } => Ok(ExprVal {
                     ty,
@@ -563,7 +540,9 @@ impl FnLower<'_> {
                 type_args,
                 span,
             } => {
-                let value = self.l.eval_builtin_type_call(&name.text, type_args, *span)?;
+                let value = self
+                    .l
+                    .eval_builtin_type_call(&name.text, type_args, *span)?;
                 let ty = self.int_type();
                 Ok(ExprVal {
                     ty,
@@ -574,9 +553,7 @@ impl FnLower<'_> {
                     ))),
                 })
             }
-            ast::Expr::Unary { op, operand, span } => {
-                self.lower_unary(*op, operand, *span)
-            }
+            ast::Expr::Unary { op, operand, span } => self.lower_unary(*op, operand, *span),
             ast::Expr::Postfix { op, operand, span } => {
                 let delta = match op {
                     ast::PostfixOp::Increment => 1,
@@ -612,14 +589,8 @@ impl FnLower<'_> {
                         kind: ExprKind::Value(operand),
                     })
             }
-            ast::Expr::Call { callee, args, span } => {
-                self.lower_call(callee, args, *span)
-            }
-            ast::Expr::Index {
-                array,
-                index,
-                span,
-            } => self.lower_index(array, index, *span),
+            ast::Expr::Call { callee, args, span } => self.lower_call(callee, args, *span),
+            ast::Expr::Index { array, index, span } => self.lower_index(array, index, *span),
             ast::Expr::Member {
                 object,
                 name,
@@ -677,20 +648,18 @@ impl FnLower<'_> {
                     kind: ExprKind::Place(ir::Address::slot(slot)),
                 })
             }
-            ast::Expr::StatementExpr { block, span: _ } => {
-                match self.lower_block_value(block)? {
-                    Some((operand, ty)) => Ok(ExprVal {
-                        ty,
-                        qualifiers: Qualifiers::NONE,
-                        kind: ExprKind::Value(operand),
-                    }),
-                    None => Ok(ExprVal {
-                        ty: self.l.types.builtin(Builtin::Void),
-                        qualifiers: Qualifiers::NONE,
-                        kind: ExprKind::Void,
-                    }),
-                }
-            }
+            ast::Expr::StatementExpr { block, span: _ } => match self.lower_block_value(block)? {
+                Some((operand, ty)) => Ok(ExprVal {
+                    ty,
+                    qualifiers: Qualifiers::NONE,
+                    kind: ExprKind::Value(operand),
+                }),
+                None => Ok(ExprVal {
+                    ty: self.l.types.builtin(Builtin::Void),
+                    qualifiers: Qualifiers::NONE,
+                    kind: ExprKind::Void,
+                }),
+            },
         }
     }
 
@@ -710,13 +679,14 @@ impl FnLower<'_> {
         let scopes = &self.scopes;
         let locals = &self.locals;
         self.l.type_of(expr, &mut |name| {
-            scopes.iter().rev().find_map(|scope| {
-                match scope.bindings.get(name)? {
+            scopes
+                .iter()
+                .rev()
+                .find_map(|scope| match scope.bindings.get(name)? {
                     LocalBinding::Local(index) => Some(locals[*index].ty),
                     LocalBinding::Object { ty, .. } => Some(*ty),
                     LocalBinding::Function { ty, .. } => Some(*ty),
-                }
-            })
+                })
         })
     }
 
@@ -766,10 +736,7 @@ impl FnLower<'_> {
             ast::UnaryOp::Dereference => {
                 let (operand, pointer_ty) = self.rvalue(operand)?;
                 let Some(pointee) = self.l.pointee(pointer_ty) else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "unary `*` needs a pointer operand",
-                    ));
+                    return Err(Diagnostic::new(span, "unary `*` needs a pointer operand"));
                 };
                 Ok(ExprVal {
                     ty: pointee.ty,
@@ -780,7 +747,10 @@ impl FnLower<'_> {
             ast::UnaryOp::Plus => {
                 let (operand, ty) = self.rvalue(operand)?;
                 if !self.l.types.is_arithmetic(ty) {
-                    return Err(Diagnostic::new(span, "unary `+` needs an arithmetic operand"));
+                    return Err(Diagnostic::new(
+                        span,
+                        "unary `+` needs an arithmetic operand",
+                    ));
                 }
                 let promoted = self.l.integer_promotion(ty);
                 let operand = self.convert(operand, ty, promoted, span, false)?;
@@ -805,7 +775,10 @@ impl FnLower<'_> {
                     });
                 }
                 if !self.l.types.is_integer(ty) {
-                    return Err(Diagnostic::new(span, "unary `-` needs an arithmetic operand"));
+                    return Err(Diagnostic::new(
+                        span,
+                        "unary `-` needs an arithmetic operand",
+                    ));
                 }
                 let promoted = self.l.integer_promotion(ty);
                 let operand = self.convert(operand, ty, promoted, span, false)?;
@@ -868,10 +841,7 @@ impl FnLower<'_> {
         let value = self.lower_expr(operand)?;
         let (address, ty, qualifiers) = self.place_of(value, span)?;
         if qualifiers.is_const {
-            return Err(Diagnostic::new(
-                span,
-                "cannot modify a const object",
-            ));
+            return Err(Diagnostic::new(span, "cannot modify a const object"));
         }
         if self.l.types.is_array(ty) {
             return Err(Diagnostic::new(span, "cannot increment an array"));
@@ -937,13 +907,25 @@ impl FnLower<'_> {
         let float = self.l.types.is_floating(common);
         let binary = match op {
             ast::BinaryOp::Add => {
-                if float { ir::BinaryOp::FAdd } else { ir::BinaryOp::Add }
+                if float {
+                    ir::BinaryOp::FAdd
+                } else {
+                    ir::BinaryOp::Add
+                }
             }
             ast::BinaryOp::Subtract => {
-                if float { ir::BinaryOp::FSub } else { ir::BinaryOp::Sub }
+                if float {
+                    ir::BinaryOp::FSub
+                } else {
+                    ir::BinaryOp::Sub
+                }
             }
             ast::BinaryOp::Multiply => {
-                if float { ir::BinaryOp::FMul } else { ir::BinaryOp::Mul }
+                if float {
+                    ir::BinaryOp::FMul
+                } else {
+                    ir::BinaryOp::Mul
+                }
             }
             ast::BinaryOp::Divide => {
                 if float {
@@ -956,7 +938,10 @@ impl FnLower<'_> {
             }
             ast::BinaryOp::Remainder => {
                 if float {
-                    return Err(Diagnostic::new(span, "remainder `%` needs integer operands"));
+                    return Err(Diagnostic::new(
+                        span,
+                        "remainder `%` needs integer operands",
+                    ));
                 }
                 if self.l.is_unsigned(common) {
                     ir::BinaryOp::URem
@@ -1032,7 +1017,10 @@ impl FnLower<'_> {
             });
         }
         if !self.l.types.is_arithmetic(left_ty) || !self.l.types.is_arithmetic(right_ty) {
-            return Err(Diagnostic::new(span, "comparison needs arithmetic or pointer operands"));
+            return Err(Diagnostic::new(
+                span,
+                "comparison needs arithmetic or pointer operands",
+            ));
         }
         let common = self.l.usual_arithmetic(left_ty, right_ty, span)?;
         let left = self.convert(left, left_ty, common, span, false)?;
@@ -1165,18 +1153,14 @@ impl FnLower<'_> {
         match op {
             ast::BinaryOp::Add => {
                 if self.l.types.is_pointer(left_ty) && self.l.types.is_integer(right_ty) {
-                    let value =
-                        self.pointer_offset(left, right, right_ty, left_ty, false, span)?;
+                    let value = self.pointer_offset(left, right, right_ty, left_ty, false, span)?;
                     Ok(ExprVal {
                         ty: left_ty,
                         qualifiers: Qualifiers::NONE,
                         kind: ExprKind::Value(value),
                     })
-                } else if self.l.types.is_integer(left_ty)
-                    && self.l.types.is_pointer(right_ty)
-                {
-                    let value =
-                        self.pointer_offset(right, left, left_ty, right_ty, false, span)?;
+                } else if self.l.types.is_integer(left_ty) && self.l.types.is_pointer(right_ty) {
+                    let value = self.pointer_offset(right, left, left_ty, right_ty, false, span)?;
                     Ok(ExprVal {
                         ty: right_ty,
                         qualifiers: Qualifiers::NONE,
@@ -1188,16 +1172,13 @@ impl FnLower<'_> {
             }
             ast::BinaryOp::Subtract => {
                 if self.l.types.is_pointer(left_ty) && self.l.types.is_integer(right_ty) {
-                    let value =
-                        self.pointer_offset(left, right, right_ty, left_ty, true, span)?;
+                    let value = self.pointer_offset(left, right, right_ty, left_ty, true, span)?;
                     Ok(ExprVal {
                         ty: left_ty,
                         qualifiers: Qualifiers::NONE,
                         kind: ExprKind::Value(value),
                     })
-                } else if self.l.types.is_pointer(left_ty)
-                    && self.l.types.is_pointer(right_ty)
-                {
+                } else if self.l.types.is_pointer(left_ty) && self.l.types.is_pointer(right_ty) {
                     let pointee = self.l.pointee(left_ty).ok_or_else(|| {
                         Diagnostic::new(span, "pointer difference needs a pointee type")
                     })?;
@@ -1271,9 +1252,10 @@ impl FnLower<'_> {
         negative: bool,
         span: Span,
     ) -> Result<ir::Operand, Diagnostic> {
-        let pointee = self.l.pointee(pointer_ty).ok_or_else(|| {
-            Diagnostic::new(span, "pointer arithmetic needs a pointee type")
-        })?;
+        let pointee = self
+            .l
+            .pointee(pointer_ty)
+            .ok_or_else(|| Diagnostic::new(span, "pointer arithmetic needs a pointee type"))?;
         let size = self.l.size_of(pointee.ty, span)?;
         if size == 0 {
             return Err(Diagnostic::new(
@@ -1304,10 +1286,9 @@ impl FnLower<'_> {
         } else {
             scaled
         };
-        Ok(ir::Operand::Value(self.emit_value(ir::InstKind::PtrOffset {
-            base,
-            offset,
-        })))
+        Ok(ir::Operand::Value(
+            self.emit_value(ir::InstKind::PtrOffset { base, offset }),
+        ))
     }
 
     fn lower_logical(
@@ -1374,9 +1355,9 @@ impl FnLower<'_> {
     ) -> Result<ExprVal, Diagnostic> {
         let then_ty = self.type_of(then_expr)?;
         let else_ty = self.type_of(else_expr)?;
-        let result_ty =
-            self.l
-                .conditional_type(then_ty, else_ty, then_expr, else_expr, span)?;
+        let result_ty = self
+            .l
+            .conditional_type(then_ty, else_ty, then_expr, else_expr, span)?;
         let (condition_operand, condition_ty) = self.rvalue(condition)?;
         let condition_operand = self.boolean_operand(condition_operand, condition_ty, span)?;
         let then_block = self.f.alloc_block();
@@ -1466,10 +1447,7 @@ impl FnLower<'_> {
             let (operand, operand_ty) = self.rvalue(right)?;
             if self.l.types.is_aggregate(ty) {
                 if !self.l.types.is_compatible(ty, operand_ty) {
-                    return Err(Diagnostic::new(
-                        span,
-                        "incompatible aggregate assignment",
-                    ));
+                    return Err(Diagnostic::new(span, "incompatible aggregate assignment"));
                 }
                 self.store_value(address, operand, ty, qualifiers);
                 return Ok(ExprVal {
@@ -1507,14 +1485,8 @@ impl FnLower<'_> {
     ) -> Result<(ir::Address, TypeId, Qualifiers), Diagnostic> {
         match value.kind {
             ExprKind::Place(address) => Ok((address, value.ty, value.qualifiers)),
-            ExprKind::Value(_) => Err(Diagnostic::new(
-                span,
-                "expression is not an lvalue",
-            )),
-            ExprKind::Void => Err(Diagnostic::new(
-                span,
-                "void expression is not an lvalue",
-            )),
+            ExprKind::Value(_) => Err(Diagnostic::new(span, "expression is not an lvalue")),
+            ExprKind::Void => Err(Diagnostic::new(span, "void expression is not an lvalue")),
         }
     }
 
@@ -1595,7 +1567,10 @@ impl FnLower<'_> {
             (object_ty, address)
         } else if let Some(pointee) = self.l.pointee(object_ty) {
             if !self.l.types.is_record(pointee.ty) {
-                return Err(Diagnostic::new(span, "member access needs a struct or union"));
+                return Err(Diagnostic::new(
+                    span,
+                    "member access needs a struct or union",
+                ));
             }
             let (operand, _) = self.rvalue_val(
                 ExprVal {
@@ -1607,7 +1582,10 @@ impl FnLower<'_> {
             )?;
             (pointee.ty, super::address_operand(operand))
         } else {
-            return Err(Diagnostic::new(span, "member access needs a struct or union"));
+            return Err(Diagnostic::new(
+                span,
+                "member access needs a struct or union",
+            ));
         };
         let (field_ty, offset) = self.l.field_of(record, &name.text, name.span)?;
         let field_qualifiers = self.l.field_qualifiers(record, &name.text);
@@ -1633,12 +1611,7 @@ impl FnLower<'_> {
             ExprKind::Place(address) => Ok(address),
             ExprKind::Value(operand) if self.l.types.is_aggregate(value.ty) => {
                 let slot = self.temp_slot(value.ty, "");
-                self.store_value(
-                    ir::Address::slot(slot),
-                    operand,
-                    value.ty,
-                    Qualifiers::NONE,
-                );
+                self.store_value(ir::Address::slot(slot), operand, value.ty, Qualifiers::NONE);
                 Ok(ir::Address::slot(slot))
             }
             _ => Err(Diagnostic::new(

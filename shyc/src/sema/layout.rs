@@ -37,9 +37,7 @@ struct FunctionSignature<'a> {
     prototype: bool,
 }
 
-use super::types::{
-    Builtin, IntegerRank, QualifiedType, RecordKind, TypeId, TypeKind, TypeStore,
-};
+use super::types::{Builtin, IntegerRank, QualifiedType, RecordKind, TypeId, TypeKind, TypeStore};
 
 /// One member supplied to record layout.
 ///
@@ -286,17 +284,10 @@ impl TypeStore {
         }
 
         let size = align_up(offset, align).ok_or(TypeError::LayoutOverflow)?;
-        Ok((
-            offsets,
-            Layout { size, align },
-            flexible.is_some(),
-        ))
+        Ok((offsets, Layout { size, align }, flexible.is_some()))
     }
 
-    fn layout_union(
-        &self,
-        fields: &[RecordField],
-    ) -> Result<(Vec<u32>, Layout, bool), TypeError> {
+    fn layout_union(&self, fields: &[RecordField]) -> Result<(Vec<u32>, Layout, bool), TypeError> {
         let mut offsets = Vec::with_capacity(fields.len());
         let mut size = 0u32;
         let mut align = 1u32;
@@ -347,11 +338,7 @@ impl TypeStore {
     /// promoted, and the C signedness/rank rules choose the result. Because
     /// `long` and `long long` are both 64-bit but keep distinct ranks,
     /// `unsigned long` and `long long` produce `unsigned long long`.
-    pub fn usual_arithmetic_conversions(
-        &self,
-        a: TypeId,
-        b: TypeId,
-    ) -> Result<TypeId, TypeError> {
+    pub fn usual_arithmetic_conversions(&self, a: TypeId, b: TypeId) -> Result<TypeId, TypeError> {
         if !self.is_arithmetic(a) || !self.is_arithmetic(b) {
             return Err(TypeError::NotArithmetic);
         }
@@ -451,10 +438,9 @@ impl TypeStore {
             ) => a_rank == b_rank && a_unsigned == b_unsigned,
             (TypeKind::Float32, TypeKind::Float32) => true,
             (TypeKind::Float64, TypeKind::Float64) => true,
-            (
-                TypeKind::Pointer { pointee: a },
-                TypeKind::Pointer { pointee: b },
-            ) => self.qualified_compatible(*a, *b),
+            (TypeKind::Pointer { pointee: a }, TypeKind::Pointer { pointee: b }) => {
+                self.qualified_compatible(*a, *b)
+            }
             (
                 TypeKind::Array {
                     element: a_element,
@@ -530,12 +516,12 @@ impl TypeStore {
         if variadic {
             return false;
         }
-        params.iter().all(|&param| {
-            match self.default_argument_promotion(param) {
+        params
+            .iter()
+            .all(|&param| match self.default_argument_promotion(param) {
                 Some(promoted) => self.is_compatible(param, promoted),
                 None => false,
-            }
-        })
+            })
     }
 
     fn default_argument_promotion(&self, ty: TypeId) -> Option<TypeId> {

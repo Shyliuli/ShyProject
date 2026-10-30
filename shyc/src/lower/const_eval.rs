@@ -7,8 +7,8 @@
 //! that becomes an [`ir::Relocation`], `None` is an absolute integer address
 //! from a cast.
 
-use super::types::NumericLiteral;
 use super::Lowerer;
+use super::types::NumericLiteral;
 use crate::ast;
 use crate::ir;
 use crate::sema::types::{TypeId, TypeKind};
@@ -17,10 +17,7 @@ use crate::source::{Diagnostic, Span};
 pub(super) enum ConstKind {
     Int(u64),
     Float(u64),
-    Address {
-        symbol: Option<String>,
-        addend: i64,
-    },
+    Address { symbol: Option<String>, addend: i64 },
 }
 
 pub(super) struct ConstValue {
@@ -114,11 +111,11 @@ impl Lowerer {
                             let function = self.function(index);
                             (function.ty, function.symbol.clone())
                         };
-                        let ty = self
-                            .types
-                            .pointer_to(crate::sema::types::QualifiedType::unqualified(
-                                function_ty,
-                            ));
+                        let ty =
+                            self.types
+                                .pointer_to(crate::sema::types::QualifiedType::unqualified(
+                                    function_ty,
+                                ));
                         Ok(ConstValue::address(ty, Some(symbol), 0))
                     }
                 }
@@ -135,10 +132,7 @@ impl Lowerer {
                     )
                 })?;
                 let method = self.method_of(record, &name.text).ok_or_else(|| {
-                    Diagnostic::new(
-                        name.span,
-                        format!("no method '{}' on this type", name.text),
-                    )
+                    Diagnostic::new(name.span, format!("no method '{}' on this type", name.text))
                 })?;
                 let ty = self
                     .types
@@ -203,7 +197,10 @@ impl Lowerer {
             ast::Expr::SizeofExpr { value, span } => {
                 let ty = self.type_of(value, &mut |_| None)?;
                 if self.types.is_function(ty) || self.types.is_void(ty) {
-                    return Err(Diagnostic::new(*span, "`sizeof` needs a complete object type"));
+                    return Err(Diagnostic::new(
+                        *span,
+                        "`sizeof` needs a complete object type",
+                    ));
                 }
                 let size = self.size_of(ty, *span)?;
                 let result = self.types.builtin(crate::sema::types::Builtin::UnsignedInt);
@@ -258,19 +255,24 @@ impl Lowerer {
                     match value.kind {
                         ConstKind::Int(bits) => {
                             let width = self.int_width(value.ty);
-                            Ok(ConstValue::int(value.ty, mask_width(bits.wrapping_neg(), width)))
+                            Ok(ConstValue::int(
+                                value.ty,
+                                mask_width(bits.wrapping_neg(), width),
+                            ))
                         }
                         ConstKind::Float(bits) => Ok(ConstValue {
                             ty: value.ty,
                             kind: ConstKind::Float(self.float_bits_negate(value.ty, bits)),
                         }),
-                        ConstKind::Address { .. } => Err(Diagnostic::new(
-                            span,
-                            "cannot negate an address constant",
-                        )),
+                        ConstKind::Address { .. } => {
+                            Err(Diagnostic::new(span, "cannot negate an address constant"))
+                        }
                     }
                 } else {
-                    Err(Diagnostic::new(span, "unary `-` needs an arithmetic operand"))
+                    Err(Diagnostic::new(
+                        span,
+                        "unary `-` needs an arithmetic operand",
+                    ))
                 }
             }
             ast::UnaryOp::LogicalNot => {
@@ -288,9 +290,7 @@ impl Lowerer {
                 let value = self.const_cast(value, promoted, span)?;
                 let width = self.int_width(value.ty);
                 match value.kind {
-                    ConstKind::Int(bits) => {
-                        Ok(ConstValue::int(value.ty, mask_width(!bits, width)))
-                    }
+                    ConstKind::Int(bits) => Ok(ConstValue::int(value.ty, mask_width(!bits, width))),
                     _ => Err(Diagnostic::new(span, "unary `~` needs an integer operand")),
                 }
             }
@@ -432,7 +432,8 @@ impl Lowerer {
                         } else if unsigned {
                             a >> amount
                         } else {
-                            ((sign_extend(*a, width) >> amount) as u64) & mask_width(u64::MAX, width)
+                            ((sign_extend(*a, width) >> amount) as u64)
+                                & mask_width(u64::MAX, width)
                         }
                     }
                     ast::BinaryOp::Equal
@@ -469,13 +470,10 @@ impl Lowerer {
                 };
                 Ok(ConstValue::int(common, mask_width(result, width)))
             }
-            (ConstKind::Address { .. }, _) | (_, ConstKind::Address { .. }) => Err(
-                Diagnostic::new(span, "invalid operands to binary operator"),
-            ),
-            _ => Err(Diagnostic::new(
-                span,
-                "invalid operands to binary operator",
-            )),
+            (ConstKind::Address { .. }, _) | (_, ConstKind::Address { .. }) => {
+                Err(Diagnostic::new(span, "invalid operands to binary operator"))
+            }
+            _ => Err(Diagnostic::new(span, "invalid operands to binary operator")),
         }
     }
 
@@ -487,11 +485,7 @@ impl Lowerer {
         address_on_left: bool,
         span: Span,
     ) -> Result<ConstValue, Diagnostic> {
-        let ConstKind::Address {
-            symbol,
-            addend,
-        } = &address.kind
-        else {
+        let ConstKind::Address { symbol, addend } = &address.kind else {
             unreachable!();
         };
         if let ConstKind::Address {
@@ -516,10 +510,7 @@ impl Lowerer {
                 ast::BinaryOp::Subtract if address_on_left => {
                     let difference = addend - other_addend;
                     let ty = self.types.builtin(crate::sema::types::Builtin::Int);
-                    Ok(ConstValue::int(
-                        ty,
-                        (difference / size) as u64,
-                    ))
+                    Ok(ConstValue::int(ty, (difference / size) as u64))
                 }
                 ast::BinaryOp::Equal
                 | ast::BinaryOp::NotEqual
@@ -636,10 +627,7 @@ impl Lowerer {
                     )
                 })?;
                 let method = self.method_of(record, &name.text).ok_or_else(|| {
-                    Diagnostic::new(
-                        name.span,
-                        format!("no method '{}' on this type", name.text),
-                    )
+                    Diagnostic::new(name.span, format!("no method '{}' on this type", name.text))
                 })?;
                 Ok((Some(method.symbol), 0))
             }
@@ -657,11 +645,7 @@ impl Lowerer {
                     )),
                 }
             }
-            ast::Expr::Index {
-                array,
-                index,
-                span,
-            } => {
+            ast::Expr::Index { array, index, span } => {
                 let base = self.eval_const(array)?;
                 let base_ty = base.ty;
                 let element = self
@@ -774,7 +758,10 @@ impl Lowerer {
         match value.kind {
             ConstKind::Int(bits) => {
                 if self.types.is_integer(target) {
-                    Ok(ConstValue::int(target, mask_width(bits, self.int_width(target))))
+                    Ok(ConstValue::int(
+                        target,
+                        mask_width(bits, self.int_width(target)),
+                    ))
                 } else if self.types.is_floating(target) {
                     let value = if self.is_unsigned(value.ty) {
                         bits as f64
@@ -851,7 +838,11 @@ impl Lowerer {
         }
     }
 
-    pub(super) fn const_int_of_ir(&self, value: &ConstValue, span: Span) -> Result<ir::Constant, Diagnostic> {
+    pub(super) fn const_int_of_ir(
+        &self,
+        value: &ConstValue,
+        span: Span,
+    ) -> Result<ir::Constant, Diagnostic> {
         match value.kind {
             ConstKind::Int(bits) => {
                 let ty = self.ir_type(value.ty);
