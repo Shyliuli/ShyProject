@@ -31,7 +31,11 @@ int arch_space_copy(struct proc *parent, struct proc *child) {
 }
 
 void arch_space_load(struct proc *p, const void *src, unsigned int n) {
-    memcpy((void *)p->segbase, src, n);
+    arch_space_write(p, 0, src, n);
+}
+
+void arch_space_write(struct proc *p, unsigned int user_addr, const void *src, unsigned int n) {
+    memcpy((void *)(p->segbase + user_addr), src, n);
 }
 
 void ctx_set_ret(struct context *ctx, int value) {

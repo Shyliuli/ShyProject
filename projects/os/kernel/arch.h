@@ -23,6 +23,7 @@ void arch_space_alloc(struct proc *p);
 void arch_space_free(struct proc *p);
 int arch_space_copy(struct proc *parent, struct proc *child);
 void arch_space_load(struct proc *p, const void *src, unsigned int n);
+void arch_space_write(struct proc *p, unsigned int user_addr, const void *src, unsigned int n);
 
 /* Enable the periodic timer interrupt. */
 void arch_enable_timer(void);

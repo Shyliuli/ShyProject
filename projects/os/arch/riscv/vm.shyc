@@ -198,7 +198,7 @@ int arch_space_copy(struct proc *parent, struct proc *child) {
         if (dst == 0) return -1;
         zero_page((unsigned long *)dst);
         if (src != 0) {
-            memcpy((void *)dst, (void *)PTE_PA(src), 4096);
+            memcpy((void *)dst, (void *)src, 4096);
         }
         if (map_page(dst_root, va, dst) != 0) return -1;
     }
@@ -207,13 +207,17 @@ int arch_space_copy(struct proc *parent, struct proc *child) {
 }
 
 void arch_space_load(struct proc *p, const void *src, unsigned int n) {
+    arch_space_write(p, 0, src, n);
+}
+
+void arch_space_write(struct proc *p, unsigned int user_addr, const void *src, unsigned int n) {
     unsigned int done = 0;
 
     while (done < n) {
-        unsigned int va = USER_ENTRY + done;
+        unsigned int va = user_addr + done;
         unsigned int off = va & 0xfff;
         unsigned int chunk = 4096 - off;
-        unsigned long page = translate(root_for(p), va & ~0xfffU);
+        unsigned long page = translate(root_for(p), va);
 
         if (page == 0) return;
         if (chunk > n - done) chunk = n - done;

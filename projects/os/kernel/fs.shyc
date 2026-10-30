@@ -1007,7 +1007,6 @@ int sys_exec(const char *path, const char *arg) {
     unsigned char argbuf[USER_ARG_MAX];
     int fd;
     struct fs_file *fsf;
-    unsigned char *dst;
     unsigned int stack_base;
 
     if (copy_exec_name(path, namebuf) < 0) {
@@ -1030,10 +1029,9 @@ int sys_exec(const char *path, const char *arg) {
     }
     stack_base = user_image_stack_base(fsf);
 
-    dst = (unsigned char *)arch_user_ptr(current, 0);
-    memcpy(dst, fsf->data, fsf->size);
-    memcpy(dst + USER_ARG0_ADDR, namebuf, USER_ARG_MAX);
-    memcpy(dst + USER_ARG_ADDR, argbuf, USER_ARG_MAX);
+    arch_space_write(current, 0, fsf->data, fsf->size);
+    arch_space_write(current, USER_ARG0_ADDR, namebuf, USER_ARG_MAX);
+    arch_space_write(current, USER_ARG_ADDR, argbuf, USER_ARG_MAX);
     arch_fence_i();
     file_close_fd(fd);
 

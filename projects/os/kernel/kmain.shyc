@@ -23,15 +23,13 @@ unsigned int user_seg_size = USER_SEG_SIZE;
 
 static void load_init(struct proc *p) {
     struct fs_file *file = fs_lookup("init");
-    unsigned char *dst = (unsigned char *)arch_user_ptr(p, 0);
-
     if (!user_image_layout_ok(file)) {
         arch_uart_putc('!');
         arch_uart_putc('\n');
         arch_shutdown(0);
     }
 
-    memcpy(dst, file->data, file->size);
+    arch_space_load(p, file->data, file->size);
 
     p->ctx.epc = USER_ENTRY;
     p->ctx.sp = user_image_stack_base(file);

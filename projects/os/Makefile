@@ -126,7 +126,7 @@ RISCV_KERNEL_SRCS = arch/riscv/boot.S arch/riscv/trap.S arch/riscv/platform.S \
 	kernel/kmain.shyc kernel/console.shyc kernel/mem.shyc kernel/proc.shyc \
 	kernel/fs.shyc kernel/lock.shyc kernel/trap.shyc \
 	arch/riscv/platform.shyc arch/riscv/vm.shyc arch/riscv/ctx.shyc arch/riscv/string.shyc
-RISCV_USER_SRCS = arch/riscv/user/header.S arch/riscv/user/syscall.S \
+RISCV_USER_SRCS = arch/riscv/user/header.S arch/riscv/user/entry.S arch/riscv/user/syscall.S \
 	arch/riscv/user/usys.shyc
 RISCV_USER_PROGS := $(basename $(notdir $(USER_PROG_SRCS))) $(BUSYBOX_APPLETS)
 RISCV_USER_SFS := $(addprefix $(RISCV_USER)/,$(addsuffix .sfs,$(RISCV_USER_PROGS)))
@@ -135,13 +135,13 @@ riscv: $(RISCV_ELF)
 
 riscv_user: $(RISCV_USER_SFS)
 
-$(RISCV_TARGET)/init.sfs: arch/riscv/user/header.S arch/riscv/user/syscall.S arch/riscv/user/usys.shyc user/init.shyc user/ulib.shyc | dirs
+$(RISCV_TARGET)/init.sfs: $(RISCV_USER_SRCS) user/init.shyc user/ulib.shyc | dirs
 	mkdir -p $(RISCV_USER)
 	$(SHYCC) --target=riscv64-unknown-none -Iuser \
 		-Wl,--oformat=binary -Wl,-T,arch/riscv/user/user.ld \
 		-o $@ user/init.shyc user/ulib.shyc $(RISCV_USER_SRCS)
 
-$(RISCV_USER)/%.sfs: arch/riscv/user/header.S arch/riscv/user/syscall.S arch/riscv/user/usys.shyc user/%.shyc user/ulib.shyc | dirs
+$(RISCV_USER)/%.sfs: $(RISCV_USER_SRCS) user/%.shyc user/ulib.shyc | dirs
 	mkdir -p $(RISCV_USER)
 	$(SHYCC) --target=riscv64-unknown-none -Iuser \
 		-Wl,--oformat=binary -Wl,-T,arch/riscv/user/user.ld \
