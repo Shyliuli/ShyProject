@@ -457,6 +457,13 @@ fn shyc_command(repo: &Path, print_only: bool) -> Result<Command> {
     Ok(cmd)
 }
 
+/// GCC/clang-style freestanding target detection. `unknown-none`, bare
+/// `none`, and ELF firmware triples do not get a hosted libc or CRT.
+fn bare_target(triple: &str) -> bool {
+    let lower = triple.to_ascii_lowercase();
+    lower.contains("none") || lower.contains("unknown-elf") || lower.ends_with("-elf")
+}
+
 /// Lower to LLVM IR with `shyc`, then let clang do instruction selection and
 /// linking. This is the same shape as the Shy pipeline, which hands its
 /// assembly to `shyasm` and the objects to `shyld`.
@@ -476,8 +483,11 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
                 };
                 let mut cmd = shyc_command(repo, opts.print_only)?;
                 cmd.arg("--emit=llvm")
-                    .arg(format!("--target={}", opts.target))
-                    .arg(format!("-I{}", repo.join("libshy/include").display()));
+                    .arg(format!("--target={}", opts.target));
+                if bare_target(&opts.target) {
+                    cmd.arg("-ffreestanding");
+                }
+                cmd.arg(format!("-I{}", repo.join("libshy/include").display()));
                 for arg in &opts.compile_args {
                     if arg.starts_with("-I") || arg.starts_with("-D") || arg.starts_with("-U") {
                         cmd.arg(arg);
@@ -495,6 +505,18 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
     let clang = env::var("SHYCC_CLANG").unwrap_or_else(|_| "clang".to_string());
     let mut cmd = Command::new(clang);
     cmd.arg(format!("--target={}", opts.target));
+    if bare_target(&opts.target) {
+        cmd.args([
+            "-ffreestanding",
+            "-nostdlib",
+            "-nostartfiles",
+            "-nodefaultlibs",
+            "-static",
+        ]);
+        if opts.stage == Stage::Link {
+            cmd.arg("-Wl,-e,_start");
+        }
+    }
     match opts.stage {
         Stage::Asm => {
             cmd.arg("-S");

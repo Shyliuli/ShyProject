@@ -37,6 +37,7 @@ struct Options {
     output: Option<PathBuf>,
     target: Option<String>,
     opt_level: u8,
+    freestanding: bool,
     preprocess: preprocess::Options,
 }
 
@@ -81,7 +82,7 @@ fn run() -> Result<(), String> {
             let unit =
                 parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
             let target = resolve_target(&options)?;
-            let startup = if preprocessed.attributes.no_main {
+            let startup = if preprocessed.attributes.no_main || options.freestanding {
                 StartupMode::Manual
             } else {
                 StartupMode::Main
@@ -198,6 +199,11 @@ fn resolve_target(options: &Options) -> Result<Target, String> {
     }
 }
 
+fn is_bare_target(triple: &str) -> bool {
+    let lower = triple.to_ascii_lowercase();
+    lower.contains("none") || lower.contains("unknown-elf") || lower.ends_with("-elf")
+}
+
 /// The target C ABI behind a triple.
 fn abi_kind(triple: &str) -> abi_plan::AbiKind {
     match triple.split('-').next().unwrap_or(triple) {
@@ -225,6 +231,7 @@ fn arguments() -> Result<Option<Options>, String> {
     let mut output = None;
     let mut target = None;
     let mut opt_level = 0;
+    let mut freestanding = false;
     let mut preprocess = preprocess::Options::default();
     // Hosted targets use the system C library, so the preprocessor searches the
     // same directories gcc and clang do. The target's own directory comes
@@ -250,8 +257,8 @@ fn arguments() -> Result<Option<Options>, String> {
                     "usage: shyc [options] file\n\
                      output: -S / --emit=shy (default), --emit=llvm, -E, --dump-tokens, \
                      --dump-ast, --dump-ir\n\
-                     options: -O0..-O3, --target <triple>, -I dir, -D name[=value], \
-                     -U name, -o file\n\
+                     options: -O0..-O3, --target <triple>, -ffreestanding, -fhosted, \
+                     -I dir, -D name[=value], -U name, -o file\n\
                      --emit=llvm requires a 64-bit --target triple; \
                      assembly and linking stay in shycc"
                 );
@@ -272,6 +279,14 @@ fn arguments() -> Result<Option<Options>, String> {
             }
             flag if flag.starts_with("--target=") => {
                 target = Some(flag["--target=".len()..].to_string());
+                None
+            }
+            "-ffreestanding" => {
+                freestanding = true;
+                None
+            }
+            "-fhosted" => {
+                freestanding = false;
                 None
             }
             "-O0" => {
@@ -328,8 +343,11 @@ fn arguments() -> Result<Option<Options>, String> {
             );
         }
     }
+    if target.as_deref().is_some_and(is_bare_target) {
+        freestanding = true;
+    }
     // Target facts that a hosted C library needs before it includes anything.
-    if target.as_deref().is_some_and(|target| target != "shy") {
+    if target.as_deref().is_some_and(|target| target != "shy") && !freestanding {
         // `__shy__` is predefined for the Shy target; a hosted build must not
         // see it, or headers pick the Shy variant.
         preprocess.undefines.push("__shy__".to_string());
@@ -385,6 +403,7 @@ fn arguments() -> Result<Option<Options>, String> {
         output,
         target,
         opt_level,
+        freestanding,
         preprocess,
     }))
 }
