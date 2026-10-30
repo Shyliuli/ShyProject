@@ -270,6 +270,10 @@ fn arguments() -> Result<Option<Options>, String> {
                 target = Some(args.next().ok_or("--target requires a triple")?);
                 None
             }
+            flag if flag.starts_with("--target=") => {
+                target = Some(flag["--target=".len()..].to_string());
+                None
+            }
             "-O0" => {
                 opt_level = 0;
                 None
@@ -326,6 +330,9 @@ fn arguments() -> Result<Option<Options>, String> {
     }
     // Target facts that a hosted C library needs before it includes anything.
     if target.as_deref().is_some_and(|target| target != "shy") {
+        // `__shy__` is predefined for the Shy target; a hosted build must not
+        // see it, or headers pick the Shy variant.
+        preprocess.undefines.push("__shy__".to_string());
         for (name, value) in [
             ("__STDC__", "1"),
             ("__STDC_HOSTED__", "1"),
