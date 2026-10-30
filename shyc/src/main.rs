@@ -36,7 +36,7 @@ struct Options {
     input: PathBuf,
     output: Option<PathBuf>,
     target: Option<String>,
-    optimize: bool,
+    opt_level: u8,
     preprocess: preprocess::Options,
 }
 
@@ -97,10 +97,9 @@ fn run() -> Result<(), String> {
             .map_err(|error| sources.render(&error))?;
             lowered.module.resources.memory_bytes = preprocessed.attributes.memory.map(u64::from);
             lowered.module.resources.stack_bytes = preprocessed.attributes.stack.map(u64::from);
-            if options.optimize {
+            if options.opt_level > 0 {
                 for function in &mut lowered.module.functions {
-                    passes::mem2reg::promote(function);
-                    passes::simplify(function);
+                    passes::optimize(function, options.opt_level);
                 }
             }
             match options.stage {
@@ -207,7 +206,7 @@ fn arguments() -> Result<Option<Options>, String> {
     let mut input = None;
     let mut output = None;
     let mut target = None;
-    let mut optimize = false;
+    let mut opt_level = 0;
     let mut preprocess = preprocess::Options::default();
     while let Some(arg) = args.next() {
         let selected = match arg.as_str() {
@@ -237,11 +236,19 @@ fn arguments() -> Result<Option<Options>, String> {
                 None
             }
             "-O0" => {
-                optimize = false;
+                opt_level = 0;
                 None
             }
-            "-O1" | "-O2" | "-O3" => {
-                optimize = true;
+            "-O1" => {
+                opt_level = 1;
+                None
+            }
+            "-O2" => {
+                opt_level = 2;
+                None
+            }
+            "-O3" => {
+                opt_level = 3;
                 None
             }
             "-I" | "-D" | "-U" => {
@@ -287,7 +294,7 @@ fn arguments() -> Result<Option<Options>, String> {
         input: input.ok_or("no input source file")?,
         output,
         target,
-        optimize,
+        opt_level,
         preprocess,
     }))
 }

@@ -42,7 +42,9 @@ cargo run -q -p shyc -- --dump-ast file.shyc
 cargo run -q -p shyc -- --dump-ir -O1 file.shyc
 ```
 
-Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `-O0`..`-O3`,
+Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `-O0`..`-O3`
+(`-O1` promotes slots and cleans up, `-O2` repeats that to a fixed point, and
+`-O3` adds block-local common subexpression elimination),
 `--target <triple>`. `#![no_main]`, `#![mem(...)]`, and `#![stack(...)]` are
 honoured, and the resource hints reach the linked image.
 

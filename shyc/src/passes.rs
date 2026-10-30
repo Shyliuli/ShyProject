@@ -57,6 +57,7 @@ pub mod mem2reg;
 
 mod cfg_simp;
 mod const_prop;
+pub mod cse;
 mod dce;
 
 pub use cfg_simp::{
@@ -82,6 +83,32 @@ pub const MAX_ROUNDS: usize = 8;
 /// instruction elimination, and empty-block forwarding. Returns `true` if any
 /// round changed the function. Value and block IDs stay stable, and the entry
 /// block plus every reachable loop are preserved.
+/// Run the scheduling level `level` on one function.
+///
+/// `-O1` promotes slots and cleans up once, `-O2` repeats that pair until a
+/// round changes nothing, and `-O3` adds block-local common subexpression
+/// elimination.
+pub fn optimize(function: &mut Function, level: u8) -> bool {
+    if level == 0 {
+        return false;
+    }
+    let mut changed = false;
+    let rounds = if level >= 2 { 8 } else { 1 };
+    for _ in 0..rounds {
+        let mut round = mem2reg::promote(function);
+        round |= simplify(function);
+        changed |= round;
+        if !round {
+            break;
+        }
+    }
+    if level >= 3 && cse::eliminate(function) {
+        simplify(function);
+        changed = true;
+    }
+    changed
+}
+
 pub fn simplify(function: &mut Function) -> bool {
     let mut changed = false;
     for _ in 0..MAX_ROUNDS {
