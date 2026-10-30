@@ -1429,6 +1429,8 @@ mod tests {
         e.status = 0b01;
         e.sp = 0x100;
         e.ksp = 0x100000;
+        e.trap = 0x200;
+        put(&mut e, 0x200, &encode(0x3E, 0x1B, 0)); // kernel: setn exit 0
         put(&mut e, 0x00300200, &0x12345678u32.to_be_bytes());
         put(&mut e, 0x00300100, &encode(0x40, 0x01, 0x200)); // getn 1x 0x200
         put(&mut e, 0x0030010C, &encode(0x3E, 0x1B, 0));
@@ -1588,6 +1590,8 @@ mod tests {
         e.status = 0b01;
         e.sp = 0x100;
         e.ksp = 0x100000;
+        e.trap = 0x300;
+        put(&mut e, 0x300, &encode(0x3E, 0x1B, 0)); // kernel: setn exit 0
         put(&mut e, 0x00000200, &0xDEADBEEFu32.to_be_bytes());
         put(&mut e, 0x00300200, &0xCAFEBABEu32.to_be_bytes());
         put(&mut e, 0x00300100, &encode(0x40, 0x01, 0x200));
@@ -1646,13 +1650,16 @@ mod tests {
         e.ksp = 0x003ff000;
         e.segs = 0x00400000;
         e.sege = 0x00800000;
+        e.trap = 0x20200;
+        put(&mut e, 0x20200, &encode(0x3D, 0x1B, 0x00)); // kernel: seta exit 0x
         put(&mut e, 0x100, &encode(0x61, 0x100, 0)); // enteruser 0x100
         put(&mut e, 0x00400100, &encode(0x3E, 0x1B, 7)); // user: setn exit 7
-        let code = e.run();
-        assert_eq!(code, 7);
+        e.step_one();
         assert_eq!(e.status, 0b11);
         assert_eq!(e.sp, 0x003ff000);
         assert_eq!(e.ksp, 0x00100000);
+        let code = e.run();
+        assert_eq!(code, 7);
     }
 
     #[test]
