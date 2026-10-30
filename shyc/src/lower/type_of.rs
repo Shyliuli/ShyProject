@@ -1,0 +1,372 @@
+//! Type-only expression analysis.
+//!
+//! `sizeof`, `_Alignof`, `case` types, and conditional-expression typing need
+//! the C type of an expression without evaluating it. This is deliberately
+//! separate from lowering: a `sizeof(x++)` must not increment `x`.
+
+use super::const_eval::ConstKind;
+use super::{Lowerer, MethodInfo};
+use crate::ast;
+use crate::sema::types::{Builtin, TypeId, TypeKind};
+use crate::source::{Diagnostic, Span};
+
+/// A local-name lookup supplied by the function lowerer.
+pub(super) type LocalLookup<'a> = &'a mut dyn FnMut(&str) -> Option<TypeId>;
+
+impl Lowerer {
+    pub(super) fn type_of(
+        &mut self,
+        expr: &ast::Expr,
+        local: LocalLookup<'_>,
+    ) -> Result<TypeId, Diagnostic> {
+        match expr {
+            ast::Expr::Number(literal) => Ok(match self.number_literal(literal)? {
+                super::types::NumericLiteral::Integer { ty, .. } => ty,
+                super::types::NumericLiteral::Float { ty, .. } => ty,
+            }),
+            ast::Expr::Char(literal) => Ok(self.char_literal(literal)?.1),
+            ast::Expr::String(group) => self.string_type(group),
+            ast::Expr::Name(name) => {
+                if let Some(ty) = local(&name.text) {
+                    return Ok(ty);
+                }
+                if self.enum_consts.contains_key(&name.text) {
+                    return Ok(self.types.builtin(Builtin::Int));
+                }
+                match self.global_ref(&name.text) {
+                    Some(super::GlobalRef::Object(index)) => Ok(self.object(index).ty),
+                    Some(super::GlobalRef::Function(index)) => Ok(self.function(index).ty),
+                    None if name.text == "__func__" || name.text == "__FUNCTION__" => {
+                        let function = self.current_function_name.clone().unwrap_or_default();
+                        let len = function.len() as u32 + 1;
+                        let element = self.types.builtin(Builtin::Char);
+                        self.types
+                            .array_of(crate::sema::types::QualifiedType::unqualified(element), Some(len))
+                            .map_err(|error| {
+                                Diagnostic::new(name.span, format!("invalid __func__ type: {error}"))
+                            })
+                    }
+                    None => Err(Diagnostic::new(
+                        name.span,
+                        format!("use of undeclared identifier '{}'", name.text),
+                    )),
+                }
+            }
+            ast::Expr::ScopedName {
+                qualifier, name, ..
+            } => Ok(self.scoped_method(qualifier, name)?.ty),
+            ast::Expr::BuiltinTypeCall { .. } => Ok(self.types.builtin(Builtin::Int)),
+            ast::Expr::Unary { op, operand, span } => {
+                let operand_ty = self.type_of(operand, local)?;
+                match op {
+                    ast::UnaryOp::AddressOf => Ok(self.pointer_to(operand_ty)),
+                    ast::UnaryOp::Dereference => {
+                        let decayed = self.decay_type(operand_ty);
+                        match self.pointee(decayed) {
+                            Some(pointee) => Ok(pointee.ty),
+                            None => Err(Diagnostic::new(
+                                *span,
+                                "unary `*` needs a pointer operand",
+                            )),
+                        }
+                    }
+                    ast::UnaryOp::Plus | ast::UnaryOp::Minus | ast::UnaryOp::BitNot => {
+                        if self.types.is_arithmetic(operand_ty) {
+                            Ok(self.integer_promotion(operand_ty))
+                        } else {
+                            Err(Diagnostic::new(
+                                *span,
+                                "unary arithmetic operator needs an arithmetic operand",
+                            ))
+                        }
+                    }
+                    ast::UnaryOp::LogicalNot => Ok(self.types.builtin(Builtin::Int)),
+                    ast::UnaryOp::PreIncrement | ast::UnaryOp::PreDecrement => Ok(operand_ty),
+                }
+            }
+            ast::Expr::Postfix { operand, .. } => self.type_of(operand, local),
+            ast::Expr::Binary {
+                op,
+                left,
+                right,
+                span,
+            } => {
+                let left_ty = self.type_of(left, local)?;
+                let right_ty = self.type_of(right, local)?;
+                self.binary_type(*op, left_ty, right_ty, *span)
+            }
+            ast::Expr::Assignment { left, .. } => self.type_of(left, local),
+            ast::Expr::Conditional {
+                then_expr,
+                else_expr,
+                span,
+                ..
+            } => {
+                let then_ty = self.type_of(then_expr, local)?;
+                let else_ty = self.type_of(else_expr, local)?;
+                self.conditional_type(then_ty, else_ty, then_expr, else_expr, *span)
+            }
+            ast::Expr::Comma { right, .. } => {
+                let ty = self.type_of(right, local)?;
+                Ok(self.decay_type(ty))
+            }
+            ast::Expr::Call { callee, .. } => {
+                let function_ty = self.callee_function_type(callee, local)?;
+                match self.types.kind(function_ty) {
+                    TypeKind::Function { result, .. } => Ok(*result),
+                    _ => Err(Diagnostic::new(
+                        expr.span(),
+                        "called object is not a function",
+                    )),
+                }
+            }
+            ast::Expr::Index {
+                array,
+                index,
+                span,
+            } => {
+                let left_ty = self.type_of(array, local)?;
+                if self.types.is_array(left_ty) || self.types.is_pointer(left_ty) {
+                    return self.index_type(left_ty, *span);
+                }
+                let right_ty = self.type_of(index, local)?;
+                self.index_type(right_ty, *span)
+            }
+            ast::Expr::Member {
+                object,
+                name,
+                op,
+                span,
+            } => self.member_type(object, name, *op, *span, local),
+            ast::Expr::Cast { type_name, .. } => self.resolve_type_name(type_name),
+            ast::Expr::SizeofType { .. }
+            | ast::Expr::SizeofExpr { .. }
+            | ast::Expr::AlignofType { .. }
+            | ast::Expr::AlignofExpr { .. } => Ok(self.types.builtin(Builtin::UnsignedInt)),
+            ast::Expr::CompoundLiteral { type_name, .. } => self.resolve_type_name(type_name),
+            ast::Expr::StatementExpr { block, .. } => match tail_expr(block) {
+                Some(expr) => {
+                    let ty = self.type_of(expr, local)?;
+                    Ok(self.decay_type(ty))
+                }
+                None => Ok(self.types.builtin(Builtin::Void)),
+            },
+        }
+    }
+
+    pub(super) fn conditional_type(
+        &mut self,
+        then_ty: TypeId,
+        else_ty: TypeId,
+        then_expr: &ast::Expr,
+        else_expr: &ast::Expr,
+        span: Span,
+    ) -> Result<TypeId, Diagnostic> {
+        let then_ty = self.decay_type(then_ty);
+        let else_ty = self.decay_type(else_ty);
+        if self.types.is_void(then_ty) && self.types.is_void(else_ty) {
+            return Ok(then_ty);
+        }
+        if self.types.is_arithmetic(then_ty) && self.types.is_arithmetic(else_ty) {
+            return self.usual_arithmetic(then_ty, else_ty, span);
+        }
+        if self.types.is_pointer(then_ty) && self.types.is_pointer(else_ty) {
+            let then_void = self
+                .pointee(then_ty)
+                .is_some_and(|pointee| self.types.is_void(pointee.ty));
+            return Ok(if then_void { then_ty } else { else_ty });
+        }
+        if self.types.is_pointer(then_ty) && self.is_null_pointer_constant(else_expr) {
+            return Ok(then_ty);
+        }
+        if self.types.is_pointer(else_ty) && self.is_null_pointer_constant(then_expr) {
+            return Ok(else_ty);
+        }
+        if self.types.is_compatible(then_ty, else_ty) {
+            return Ok(then_ty);
+        }
+        Err(Diagnostic::new(
+            span,
+            "incompatible operand types in conditional expression",
+        ))
+    }
+
+    pub(super) fn is_null_pointer_constant(&mut self, expr: &ast::Expr) -> bool {
+        let Ok(value) = self.eval_const(expr) else {
+            return false;
+        };
+        self.types.is_integer(value.ty)
+            && matches!(value.kind, ConstKind::Int(0))
+    }
+
+    fn binary_type(
+        &mut self,
+        op: ast::BinaryOp,
+        left_ty: TypeId,
+        right_ty: TypeId,
+        span: Span,
+    ) -> Result<TypeId, Diagnostic> {
+        let left_ty = self.decay_type(left_ty);
+        let right_ty = self.decay_type(right_ty);
+        match op {
+            ast::BinaryOp::LogicalAnd | ast::BinaryOp::LogicalOr => {
+                Ok(self.types.builtin(Builtin::Int))
+            }
+            ast::BinaryOp::Equal
+            | ast::BinaryOp::NotEqual
+            | ast::BinaryOp::Less
+            | ast::BinaryOp::LessEqual
+            | ast::BinaryOp::Greater
+            | ast::BinaryOp::GreaterEqual => Ok(self.types.builtin(Builtin::Int)),
+            ast::BinaryOp::ShiftLeft | ast::BinaryOp::ShiftRight => {
+                if self.types.is_integer(left_ty) && self.types.is_integer(right_ty) {
+                    Ok(self.integer_promotion(left_ty))
+                } else {
+                    Err(Diagnostic::new(span, "shift needs integer operands"))
+                }
+            }
+            ast::BinaryOp::Add => {
+                if self.types.is_pointer(left_ty) && self.types.is_integer(right_ty) {
+                    Ok(left_ty)
+                } else if self.types.is_integer(left_ty) && self.types.is_pointer(right_ty) {
+                    Ok(right_ty)
+                } else {
+                    self.usual_arithmetic(left_ty, right_ty, span)
+                }
+            }
+            ast::BinaryOp::Subtract => {
+                if self.types.is_pointer(left_ty) && self.types.is_integer(right_ty) {
+                    Ok(left_ty)
+                } else if self.types.is_pointer(left_ty) && self.types.is_pointer(right_ty) {
+                    Ok(self.types.builtin(Builtin::Int))
+                } else {
+                    self.usual_arithmetic(left_ty, right_ty, span)
+                }
+            }
+            _ => {
+                if !self.types.is_arithmetic(left_ty) || !self.types.is_arithmetic(right_ty) {
+                    return Err(Diagnostic::new(
+                        span,
+                        "operator needs arithmetic operands",
+                    ));
+                }
+                if op == ast::BinaryOp::Remainder
+                    && (self.types.is_floating(left_ty) || self.types.is_floating(right_ty))
+                {
+                    return Err(Diagnostic::new(
+                        span,
+                        "remainder `%` needs integer operands",
+                    ));
+                }
+                self.usual_arithmetic(left_ty, right_ty, span)
+            }
+        }
+    }
+
+    fn index_type(&mut self, array_ty: TypeId, span: Span) -> Result<TypeId, Diagnostic> {
+        if let Some(element) = self.array_element(array_ty) {
+            return Ok(element.ty);
+        }
+        if let Some(pointee) = self.pointee(array_ty) {
+            return Ok(pointee.ty);
+        }
+        Err(Diagnostic::new(span, "subscripted value is not an array or pointer"))
+    }
+
+    fn member_type(
+        &mut self,
+        object: &ast::Expr,
+        name: &ast::Name,
+        op: ast::MemberOp,
+        span: Span,
+        local: LocalLookup<'_>,
+    ) -> Result<TypeId, Diagnostic> {
+        let object_ty = self.type_of(object, local)?;
+        if op == ast::MemberOp::Arrow && !self.types.is_pointer(object_ty) {
+            return Err(Diagnostic::new(
+                span,
+                "`->` needs a pointer to a struct or union",
+            ));
+        }
+        let record = self.record_of(object_ty).ok_or_else(|| {
+            Diagnostic::new(span, "member access needs a struct or union")
+        })?;
+        match self.field_of(record, &name.text, name.span) {
+            Ok((ty, _)) => Ok(ty),
+            Err(error) => {
+                if self.method_of(record, &name.text).is_some() {
+                    Err(Diagnostic::new(
+                        span,
+                        format!("method '{}' must be called", name.text),
+                    ))
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    pub(super) fn scoped_method(
+        &self,
+        qualifier: &ast::Name,
+        name: &ast::Name,
+    ) -> Result<MethodInfo, Diagnostic> {
+        let record = self.lookup_named_type(&qualifier.text).ok_or_else(|| {
+            Diagnostic::new(
+                qualifier.span,
+                format!("unknown type name '{}'", qualifier.text),
+            )
+        })?;
+        self.method_of(record, &name.text).ok_or_else(|| {
+            Diagnostic::new(name.span, format!("no method '{}' on this type", name.text))
+        })
+    }
+
+    pub(super) fn callee_function_type(
+        &mut self,
+        callee: &ast::Expr,
+        local: LocalLookup<'_>,
+    ) -> Result<TypeId, Diagnostic> {
+        if let ast::Expr::Member {
+            object, name, op, ..
+        } = callee
+        {
+            let object_ty = self.type_of(object, local)?;
+            if let Some(record) = self.record_of(object_ty)
+                && let Some(method) = self.method_of(record, &name.text)
+            {
+                return Ok(method.ty);
+            }
+            let _ = op;
+        }
+        if let ast::Expr::ScopedName {
+            qualifier, name, ..
+        } = callee
+        {
+            return Ok(self.scoped_method(qualifier, name)?.ty);
+        }
+        let ty = self.type_of(callee, local)?;
+        if self.types.is_function(ty) {
+            return Ok(ty);
+        }
+        let decayed = self.decay_type(ty);
+        if let Some(pointee) = self.pointee(decayed)
+            && self.types.is_function(pointee.ty)
+        {
+            return Ok(pointee.ty);
+        }
+        Err(Diagnostic::new(
+            callee.span(),
+            "called object is not a function",
+        ))
+    }
+}
+
+/// The expression that a GNU statement expression yields, if it has one.
+pub(super) fn tail_expr(block: &ast::Block) -> Option<&ast::Expr> {
+    match block.stmts.last()? {
+        ast::Stmt::Expr { expr, .. } => Some(expr),
+        ast::Stmt::Block(block) => tail_expr(block),
+        _ => None,
+    }
+}

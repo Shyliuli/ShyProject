@@ -8,6 +8,8 @@ pub mod ast;
 pub mod ir;
 pub mod lexer;
 pub mod literal;
+pub mod llvm;
+pub mod lower;
 pub mod parser;
 pub mod passes;
 pub mod preprocess;
