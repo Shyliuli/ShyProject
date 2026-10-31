@@ -312,6 +312,13 @@ impl Parser {
 
     fn enum_spec(&mut self) -> Result<EnumSpec, Diagnostic> {
         let start = self.bump().span;
+        let underlying = if self.eat_punct("(") {
+            let type_name = self.type_name()?;
+            self.expect_punct(")")?;
+            Some(type_name)
+        } else {
+            None
+        };
         let tag = if self.ident_here().is_some() {
             Some(self.expect_ident()?)
         } else {
@@ -355,6 +362,7 @@ impl Parser {
 
         Ok(EnumSpec {
             span: self.finish(start),
+            underlying,
             tag,
             enumerators,
         })

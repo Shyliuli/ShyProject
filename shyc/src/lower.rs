@@ -316,7 +316,15 @@ impl Lowerer {
                 4 => ir::Type::I32,
                 _ => ir::Type::I64,
             },
-            TypeKind::Enum(_) => ir::Type::I32,
+            // An enum value has its underlying integer's width; a plain enum
+            // keeps the `int` representation and the 32-bit IR type.
+            TypeKind::Enum(_) => {
+                let underlying = self
+                    .types
+                    .enum_underlying(ty)
+                    .unwrap_or_else(|| self.types.builtin(crate::sema::types::Builtin::Int));
+                self.ir_type(underlying)
+            }
             TypeKind::Float32 => ir::Type::F32,
             TypeKind::Float64 => ir::Type::F64,
             TypeKind::Pointer { .. } | TypeKind::Function { .. } => ir::Type::Ptr,

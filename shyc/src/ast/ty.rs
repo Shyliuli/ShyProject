@@ -191,13 +191,16 @@ pub struct MemberDeclarator {
     pub bit_width: Option<Expr>,
 }
 
-/// `enum Tag { A, B = 2 }` or a reference to `enum Tag`.
+/// `enum Tag { A, B = 2 }`, `enum(u8) Tag { ... }`, or a reference to
+/// `enum Tag`.
 ///
-/// `enumerators` is `None` for a reference and `Some` for a definition,
-/// following the same rule as [`RecordSpec::members`].
+/// `underlying` is the optional storage type written in parentheses directly
+/// after `enum`. `enumerators` is `None` for a reference and `Some` for a
+/// definition, following the same rule as [`RecordSpec::members`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumSpec {
     pub span: Span,
+    pub underlying: Option<TypeName>,
     pub tag: Option<Name>,
     pub enumerators: Option<Vec<Enumerator>>,
 }

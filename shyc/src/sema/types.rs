@@ -235,8 +235,9 @@ pub enum RecordKind {
     Union,
 }
 
-/// An enum type. ShyC enums use `int` as their representation, as the current
-/// chibicc fork does. Enum identity is still distinct from `int`.
+/// An enum type and its integer representation. A plain `enum` uses `int`,
+/// while an explicit `enum(type)` stores the chosen type. Enum identity is
+/// still distinct from the underlying type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumInfo {
     pub underlying: TypeId,
@@ -462,12 +463,19 @@ impl TypeStore {
         push_type(&mut self.types, TypeKind::Record { id, kind }, None, None)
     }
 
-    /// Creates a fresh enum type. ShyC represents every enum as `int`.
-    pub fn new_enum(&mut self) -> TypeId {
+    /// Creates a fresh enum type whose object size and alignment follow
+    /// `underlying`. Callers must supply a complete integer type.
+    pub fn new_enum(&mut self, underlying: TypeId) -> Result<TypeId, TypeError> {
+        let size = self.size_of(underlying)?;
+        let align = self.align_of(underlying)?;
         let id = EnumId(self.enums.len() as u32);
-        let underlying = self.builtins.int;
         self.enums.push(EnumInfo { underlying });
-        push_type(&mut self.types, TypeKind::Enum(id), Some(4), Some(4))
+        Ok(push_type(
+            &mut self.types,
+            TypeKind::Enum(id),
+            Some(size),
+            Some(align),
+        ))
     }
 
     pub fn record_info(&self, ty: TypeId) -> Option<&RecordInfo> {

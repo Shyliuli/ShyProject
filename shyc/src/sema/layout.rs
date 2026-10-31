@@ -378,12 +378,21 @@ impl TypeStore {
     // Integer promotions and usual arithmetic conversions
     // -----------------------------------------------------------------------
 
-    /// C integer promotion. `_Bool`, `char`, `short`, and enums become `int`;
-    /// wider types are unchanged.
+    /// C integer promotion. `_Bool`, `char`, and `short` become `int`, as
+    /// does an enum whose underlying type has a rank below `int`. Wider
+    /// types, including wider enums, are unchanged.
     pub fn integer_promotion(&self, ty: TypeId) -> Result<TypeId, TypeError> {
         match self.kind(ty) {
             TypeKind::Bool => Ok(self.builtin(Builtin::Int)),
-            TypeKind::Enum(id) => Ok(self.enums[id.index()].underlying),
+            TypeKind::Enum(id) => {
+                let underlying = self.enums[id.index()].underlying;
+                match self.kind(underlying) {
+                    TypeKind::Integer { rank, .. } if *rank < IntegerRank::Int => {
+                        Ok(self.builtin(Builtin::Int))
+                    }
+                    _ => Ok(underlying),
+                }
+            }
             TypeKind::Integer { rank, .. } if *rank < IntegerRank::Int => {
                 Ok(self.builtin(Builtin::Int))
             }

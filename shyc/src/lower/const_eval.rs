@@ -59,6 +59,26 @@ impl Lowerer {
         }
     }
 
+    /// Evaluate an enumerator initializer as a mathematical integer.
+    ///
+    /// Unlike [`Self::eval_const_int`], an unsigned value wider than `i64`
+    /// stays positive, so the caller can range-check it against an unsigned
+    /// enum underlying type without mistaking the top bit for a sign bit.
+    pub(super) fn eval_enum_value(&mut self, expr: &ast::Expr) -> Result<i128, Diagnostic> {
+        let value = self.eval_const(expr)?;
+        let ConstKind::Int(bits) = value.kind else {
+            return Err(Diagnostic::new(
+                expr.span(),
+                "enumerator value is not an integer constant expression",
+            ));
+        };
+        Ok(if self.is_unsigned(value.ty) {
+            i128::from(bits)
+        } else {
+            i128::from(sign_extend(bits, self.int_width(value.ty)))
+        })
+    }
+
     pub(super) fn eval_const(&mut self, expr: &ast::Expr) -> Result<ConstValue, Diagnostic> {
         if let ast::Expr::Call { type_args, .. } = expr
             && let Some(argument) = type_args.first()

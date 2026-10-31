@@ -338,14 +338,19 @@ fn record_text(record: &RecordSpec) -> String {
     text
 }
 
-/// Print an `enum` specifier, with its enumerators if it has them.
+/// Print an `enum` specifier, with its underlying type and enumerators when
+/// it has them.
 fn enum_text(enumeration: &EnumSpec) -> String {
+    let underlying = match &enumeration.underlying {
+        Some(type_name) => format!("({})", type_name_text(type_name)),
+        None => String::new(),
+    };
     let tag = match &enumeration.tag {
         Some(tag) => format!(" {}", tag.text),
         None => String::new(),
     };
     let Some(enumerators) = &enumeration.enumerators else {
-        return format!("enum{tag}");
+        return format!("enum{underlying}{tag}");
     };
     let mut items = Vec::new();
     for enumerator in enumerators {
@@ -354,7 +359,7 @@ fn enum_text(enumeration: &EnumSpec) -> String {
             None => enumerator.name.text.clone(),
         });
     }
-    format!("enum{tag} {{ {} }}", items.join(", "))
+    format!("enum{underlying}{tag} {{ {} }}", items.join(", "))
 }
 
 /// Print one member declaration of a `struct` or `union`.

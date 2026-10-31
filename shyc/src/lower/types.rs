@@ -691,6 +691,10 @@ impl Lowerer {
     }
 
     fn resolve_enum(&mut self, spec: &ast::EnumSpec) -> Result<TypeId, Diagnostic> {
+        let explicit = match &spec.underlying {
+            Some(type_name) => Some(self.resolve_enum_underlying(type_name)?),
+            None => None,
+        };
         let Some(enumerators) = &spec.enumerators else {
             let Some(tag) = &spec.tag else {
                 return Err(Diagnostic::new(
@@ -698,19 +702,51 @@ impl Lowerer {
                     "enum specifier needs a tag or a definition",
                 ));
             };
-            if let Some(existing) = self.lookup_tag(&tag.text)
-                && matches!(self.types.kind(existing), TypeKind::Enum(_))
+            let Some(existing) = self.lookup_tag(&tag.text) else {
+                return Err(Diagnostic::new(
+                    spec.span,
+                    format!("unknown enum tag '{}'", tag.text),
+                ));
+            };
+            let Some(stored) = self.types.enum_underlying(existing) else {
+                return Err(Diagnostic::new(
+                    spec.span,
+                    format!("unknown enum tag '{}'", tag.text),
+                ));
+            };
+            if let Some(explicit) = explicit
+                && !self.types.is_compatible(explicit, stored)
             {
-                return Ok(existing);
+                return Err(Diagnostic::new(
+                    spec.underlying.as_ref().map_or(spec.span, |ty| ty.span),
+                    format!(
+                        "enum '{}' was already declared with a different underlying type",
+                        tag.text
+                    ),
+                ));
             }
-            return Err(Diagnostic::new(
-                spec.span,
-                format!("unknown enum tag '{}'", tag.text),
-            ));
+            return Ok(existing);
         };
-        let ty = self.types.new_enum();
+
+        let underlying = explicit.unwrap_or_else(|| self.types.builtin(Builtin::Int));
+        let ty = self
+            .types
+            .new_enum(underlying)
+            .map_err(|error| Diagnostic::new(spec.span, format!("invalid enum layout: {error}")))?;
         if let Some(tag) = &spec.tag {
-            if self.tag_in_current_scope(&tag.text).is_some() {
+            if let Some(existing) = self.tag_in_current_scope(&tag.text) {
+                if let Some(explicit) = explicit
+                    && let Some(stored) = self.types.enum_underlying(existing)
+                    && !self.types.is_compatible(explicit, stored)
+                {
+                    return Err(Diagnostic::new(
+                        spec.underlying.as_ref().map_or(spec.span, |ty| ty.span),
+                        format!(
+                            "enum '{}' was already declared with a different underlying type",
+                            tag.text
+                        ),
+                    ));
+                }
                 return Err(Diagnostic::new(
                     spec.span,
                     format!("redefinition of enum '{}'", tag.text),
@@ -718,13 +754,48 @@ impl Lowerer {
             }
             self.declare_tag(&tag.text, ty, spec.span)?;
         }
-        let mut next = 0i64;
+        self.define_enum(ty, underlying, enumerators)
+    }
+
+    fn define_enum(
+        &mut self,
+        ty: TypeId,
+        underlying: TypeId,
+        enumerators: &[ast::Enumerator],
+    ) -> Result<TypeId, Diagnostic> {
+        let (min, max, bits, unsigned) = self.enum_value_range(underlying);
+        let mut next: i128 = 0;
         for enumerator in enumerators {
             let value = match &enumerator.value {
-                Some(expr) => self.eval_const_int(expr)?,
+                Some(expr) => self.eval_enum_value(expr)?,
                 None => next,
             };
-            next = value.wrapping_add(1);
+            let span = match &enumerator.value {
+                Some(expr) => expr.span(),
+                None => enumerator.name.span,
+            };
+            if unsigned && value < 0 {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "enumerator '{}' cannot be negative for an unsigned underlying type",
+                        enumerator.name.text
+                    ),
+                ));
+            }
+            if value < min || value > max {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "enumerator '{}' value {} does not fit in the {}-bit {} underlying type",
+                        enumerator.name.text,
+                        value,
+                        bits,
+                        if unsigned { "unsigned" } else { "signed" }
+                    ),
+                ));
+            }
+            next = value + 1;
             if self.enum_consts.contains_key(&enumerator.name.text) {
                 return Err(Diagnostic::new(
                     enumerator.name.span,
@@ -734,10 +805,53 @@ impl Lowerer {
                     ),
                 ));
             }
+            let int = self.types.builtin(Builtin::Int);
             self.enum_consts
-                .insert(enumerator.name.text.clone(), (value, ty));
+                .insert(enumerator.name.text.clone(), (value as i64, int));
         }
         Ok(ty)
+    }
+
+    /// Validate and resolve the type in `enum(type)`.
+    fn resolve_enum_underlying(&mut self, type_name: &ast::TypeName) -> Result<TypeId, Diagnostic> {
+        let ty = self.resolve_type_name(type_name)?;
+        let invalid = |message: &str| Diagnostic::new(type_name.span, message);
+        match self.types.kind(ty) {
+            TypeKind::Integer { .. } => {
+                if self.types.size_of(ty).is_err() {
+                    return Err(invalid("enum underlying type must be complete"));
+                }
+                Ok(ty)
+            }
+            TypeKind::Bool => Err(invalid("enum underlying type cannot be `_Bool`")),
+            TypeKind::Enum(_) => Err(invalid("enum underlying type cannot be another enum")),
+            TypeKind::Float32 | TypeKind::Float64 => {
+                Err(invalid("enum underlying type cannot be floating point"))
+            }
+            TypeKind::Pointer { .. } => Err(invalid("enum underlying type cannot be a pointer")),
+            _ => Err(invalid(
+                "enum underlying type must be a complete integer type",
+            )),
+        }
+    }
+
+    /// The signed or unsigned value range of an already validated enum
+    /// underlying type, with its width in bits.
+    fn enum_value_range(&self, underlying: TypeId) -> (i128, i128, u32, bool) {
+        let (bits, unsigned) = match self.types.kind(underlying) {
+            TypeKind::Integer { rank, unsigned } => (rank.size() * 8, *unsigned),
+            _ => unreachable!("enum underlying type was validated"),
+        };
+        if unsigned {
+            (0, (1i128 << bits) - 1, bits, true)
+        } else {
+            (
+                -(1i128 << (bits - 1)),
+                (1i128 << (bits - 1)) - 1,
+                bits,
+                false,
+            )
+        }
     }
 
     fn tag_in_current_scope(&self, name: &str) -> Option<TypeId> {
