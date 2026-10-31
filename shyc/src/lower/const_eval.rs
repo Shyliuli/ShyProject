@@ -33,7 +33,7 @@ impl ConstValue {
         }
     }
 
-    fn address(ty: TypeId, symbol: Option<String>, addend: i64) -> ConstValue {
+    pub(super) fn address(ty: TypeId, symbol: Option<String>, addend: i64) -> ConstValue {
         ConstValue {
             ty,
             kind: ConstKind::Address { symbol, addend },

@@ -277,6 +277,9 @@ pub(super) struct Lowerer {
     /// `(trait, type)` pairs already implemented, to reject a second
     /// implementation of the same pair.
     pub trait_impls: HashSet<(String, String)>,
+    /// Synthetic record that represents each trait used as a value. It has one
+    /// function-pointer field per trait method, named after that method.
+    pub trait_values: HashMap<String, TypeId>,
     /// Placeholder record used as `self` when a trait signature is checked
     /// without an implementation. It is never emitted.
     trait_self_type: Option<TypeId>,
@@ -323,6 +326,7 @@ impl Lowerer {
             instantiation_depth: 0,
             traits: HashMap::new(),
             trait_impls: HashSet::new(),
+            trait_values: HashMap::new(),
             trait_self_type: None,
             impls: HashMap::new(),
             impl_context: None,

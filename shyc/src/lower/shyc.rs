@@ -6,15 +6,19 @@
 //! pointer parameter. Locals whose type has a `drop` method are dropped in
 //! reverse declaration order at scope exit, `return`, `break`, and `continue`.
 //!
-//! A `trait` is compile-time metadata only. `impl Trait for Type` checks that
-//! the method set and every signature match the trait, then registers the
-//! methods exactly like an ordinary `impl Type`; dispatch stays static and no
-//! object or vtable is allocated.
+//! A `trait` declares compile-time signatures and a transparent value shape.
+//! `impl Trait for Type` checks that the method set and every signature match
+//! the trait, then registers the methods exactly like an ordinary `impl Type`.
+//! Used as a type, the trait denotes a synthetic struct with one
+//! function-pointer field per method; `Trait::from<Type>()` fills it with the
+//! implementation's symbols. The only erased part of a signature is `self`,
+//! which becomes `void *`, so the table is plain C data with no hidden data
+//! pointer, vtable header, or allocation.
 
 use super::{ExprKind, ExprVal, FnLower, Resolved, ResolvedSpecs, TraitInfo};
 use crate::ast;
 use crate::ir;
-use crate::sema::types::{RecordKind, TypeId};
+use crate::sema::types::{Builtin, QualifiedType, RecordField, RecordKind, TypeId};
 use crate::source::{Diagnostic, Span};
 
 impl super::Lowerer {
@@ -292,9 +296,180 @@ impl super::Lowerer {
         Ok(())
     }
 
+    /// Whether `name` denotes a trait value rather than an ordinary type.
+    ///
+    /// A real type with the same spelling wins, matching type resolution: the
+    /// trait value record is not entered in the tag or typedef tables.
+    pub(super) fn is_trait_value_name(&self, name: &str) -> bool {
+        self.traits.contains_key(name) && self.lookup_named_type(name).is_none()
+    }
+
+    /// The synthetic record a trait name denotes when it is used as a value.
+    ///
+    /// The record has one field per method, named after the method, and each
+    /// field is a pointer to that method's function type with `self` erased to
+    /// `void`. That is exactly one pointer per method: no hidden data pointer,
+    /// no vtable header, and no allocation.
+    pub(super) fn trait_value_type(
+        &mut self,
+        trait_name: &ast::Name,
+    ) -> Result<TypeId, Diagnostic> {
+        if let Some(&ty) = self.trait_values.get(&trait_name.text) {
+            return Ok(ty);
+        }
+        let Some(info) = self.traits.get(&trait_name.text).cloned() else {
+            return Err(Diagnostic::new(
+                trait_name.span,
+                format!("unknown trait '{}'", trait_name.text),
+            ));
+        };
+        // Publish the incomplete record first: a method signature may mention
+        // this same trait through a pointer.
+        let ty = self.types.record_forward(RecordKind::Struct);
+        self.trait_values.insert(trait_name.text.clone(), ty);
+        let result = self.complete_trait_value(ty, trait_name, &info);
+        if result.is_err() {
+            self.trait_values.remove(&trait_name.text);
+        }
+        result?;
+        Ok(ty)
+    }
+
+    fn complete_trait_value(
+        &mut self,
+        ty: TypeId,
+        trait_name: &ast::Name,
+        info: &TraitInfo,
+    ) -> Result<(), Diagnostic> {
+        if info.methods.is_empty() {
+            return Err(Diagnostic::new(
+                trait_name.span,
+                format!(
+                    "trait '{}' has no methods, so it has no C function-pointer layout",
+                    trait_name.text
+                ),
+            ));
+        }
+        let saved = self.impl_context.clone();
+        self.impl_context = Some((self.types.builtin(Builtin::Void), String::new()));
+        let result = (|| {
+            let mut fields = Vec::new();
+            for method in &info.methods {
+                let Some(name) = &method.declarator.name else {
+                    continue;
+                };
+                check_trait_value_self(trait_name, method)?;
+                let function_ty = self.trait_method_type(method).map_err(|error| {
+                    Diagnostic::new(
+                        error.span,
+                        format!("in trait '{}': {}", trait_name.text, error.message),
+                    )
+                })?;
+                let pointer = self
+                    .types
+                    .pointer_to(QualifiedType::unqualified(function_ty));
+                fields.push(RecordField::new(
+                    name.text.clone(),
+                    QualifiedType::unqualified(pointer),
+                ));
+            }
+            self.types.complete_record(ty, fields).map_err(|error| {
+                Diagnostic::new(
+                    trait_name.span,
+                    format!(
+                        "trait '{}' cannot be used as a value: {error}",
+                        trait_name.text
+                    ),
+                )
+            })?;
+            Ok(())
+        })();
+        self.impl_context = saved;
+        result
+    }
+
+    /// Resolve `Trait::from<Type>()` into the trait value record plus the
+    /// concrete function symbol that fills each of its fields.
+    pub(super) fn trait_table(
+        &mut self,
+        trait_name: &ast::Name,
+        type_args: &[ast::GenericArg],
+        span: Span,
+    ) -> Result<(TypeId, Vec<(String, String)>), Diagnostic> {
+        if type_args.len() != 1 {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "trait value construction '{}::from<Type>()' takes exactly one type argument",
+                    trait_name.text
+                ),
+            ));
+        }
+        let ast::GenericArgKind::Type(concrete_name) = &type_args[0].kind else {
+            return Err(Diagnostic::new(
+                type_args[0].span,
+                "the argument of `Trait::from<Type>()` must be a type",
+            ));
+        };
+        let value_ty = self.trait_value_type(trait_name)?;
+        let concrete = self.resolve_type_name(concrete_name)?;
+        let Some(impl_info) = self.impls.get(&concrete) else {
+            return Err(Diagnostic::new(
+                concrete_name.span,
+                format!(
+                    "trait '{}' is not implemented for this type",
+                    trait_name.text
+                ),
+            ));
+        };
+        let impl_name = impl_info.name.clone();
+        if !self
+            .trait_impls
+            .contains(&(trait_name.text.clone(), impl_name.clone()))
+        {
+            return Err(Diagnostic::new(
+                concrete_name.span,
+                format!(
+                    "trait '{}' is not implemented for this type",
+                    trait_name.text
+                ),
+            ));
+        }
+        let Some(info) = self.traits.get(&trait_name.text).cloned() else {
+            return Err(Diagnostic::new(
+                trait_name.span,
+                format!("unknown trait '{}'", trait_name.text),
+            ));
+        };
+        let mut methods = Vec::new();
+        for method in &info.methods {
+            let Some(name) = &method.declarator.name else {
+                continue;
+            };
+            let Some(found) = self
+                .impls
+                .get(&concrete)
+                .and_then(|info| info.methods.get(&name.text))
+            else {
+                return Err(Diagnostic::new(
+                    concrete_name.span,
+                    format!(
+                        "implementation of trait '{}' for '{}' is missing method '{}'",
+                        trait_name.text, impl_name, name.text
+                    ),
+                ));
+            };
+            methods.push((name.text.clone(), found.symbol.clone()));
+        }
+        Ok((value_ty, methods))
+    }
+
     /// The function type of a trait method with `self` bound to the
     /// implementing type currently in `impl_context`.
-    fn trait_method_type(&mut self, method: &ast::TraitMethod) -> Result<TypeId, Diagnostic> {
+    pub(super) fn trait_method_type(
+        &mut self,
+        method: &ast::TraitMethod,
+    ) -> Result<TypeId, Diagnostic> {
         let ResolvedSpecs { ty, qualifiers } = self.resolve_specs(&method.specs)?;
         let resolved = self.resolve_declarator(ty, qualifiers, &method.declarator)?;
         if !self.types.is_function(resolved.ty) {
@@ -331,7 +506,106 @@ impl super::Lowerer {
     }
 }
 
+/// Whether a declaration specifier list names Shy's `self` type.
+fn has_self_type(specs: &ast::DeclSpecs) -> bool {
+    specs
+        .type_specs
+        .iter()
+        .any(|specifier| matches!(specifier, ast::TypeSpecifier::SelfType))
+}
+
+/// Whether a method return type is written as a pointer to `self`.
+///
+/// `self *clone()` is `[Function, Pointer]`: the function operator is applied
+/// first, then the pointer makes the return type a pointer.
+fn return_self_is_pointer(declarator: &ast::Declarator) -> bool {
+    matches!(
+        declarator.derived.as_slice(),
+        [
+            ast::DerivedDeclarator::Function(_),
+            ast::DerivedDeclarator::Pointer(_),
+            ..
+        ]
+    )
+}
+
+/// Whether a parameter is written as a pointer to `self`.
+fn parameter_self_is_pointer(param: &ast::ParamDecl) -> bool {
+    param.declarator.as_ref().is_some_and(|declarator| {
+        matches!(
+            declarator.derived.first(),
+            Some(ast::DerivedDeclarator::Pointer(_))
+        )
+    })
+}
+
+/// Reject the two signatures a trait value cannot represent: `self` by value
+/// as the receiver and `self` by value as the return type.
+///
+/// A trait value stores function pointers, so the erased signature replaces
+/// `self` with `void`. `self *` then becomes `void *`, which is
+/// pointer-compatible with the implementation's `Circle *`. A by-value
+/// `self` would become a `void` parameter or return, which is not a value.
+fn check_trait_value_self(
+    trait_name: &ast::Name,
+    method: &ast::TraitMethod,
+) -> Result<(), Diagnostic> {
+    if has_self_type(&method.specs) && !return_self_is_pointer(&method.declarator) {
+        return Err(Diagnostic::new(
+            method.span,
+            format!(
+                "trait '{}' cannot be used as a value: method returns `self` by value; \
+                 write `self *` so the trait table can erase it to `void *`",
+                trait_name.text
+            ),
+        ));
+    }
+    let Some(ast::DerivedDeclarator::Function(function)) = method.declarator.derived.first() else {
+        return Ok(());
+    };
+    for param in &function.params {
+        if has_self_type(&param.specs) && !parameter_self_is_pointer(param) {
+            return Err(Diagnostic::new(
+                param.span,
+                format!(
+                    "trait '{}' cannot be used as a value: method takes `self` by value; \
+                     write `self *` so the trait table can erase it to `void *`",
+                    trait_name.text
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl FnLower<'_> {
+    /// Materialize `Trait::from<Type>()` as an ordinary record value whose
+    /// fields are function pointers.
+    pub(super) fn lower_trait_table(
+        &mut self,
+        trait_name: &ast::Name,
+        type_args: &[ast::GenericArg],
+        span: Span,
+    ) -> Result<ExprVal, Diagnostic> {
+        let (ty, methods) = self.l.trait_table(trait_name, type_args, span)?;
+        let slot = self.temp_slot(ty, "");
+        for (name, symbol) in methods {
+            let (field_ty, offset) = self.l.field_of(ty, &name, span)?;
+            let value = ir::Operand::Value(self.emit_value(ir::InstKind::SymbolAddr { symbol }));
+            self.store_value(
+                ir::Address::slot(slot).with_offset(i64::from(offset)),
+                value,
+                field_ty,
+                super::Qualifiers::NONE,
+            );
+        }
+        Ok(ExprVal {
+            ty,
+            qualifiers: super::Qualifiers::NONE,
+            kind: ExprKind::Place(ir::Address::slot(slot)),
+        })
+    }
+
     /// Emit the `drop` call for one local and mark it moved.
     pub(super) fn emit_drop(&mut self, local: usize) {
         let (slot, ty, symbol, active) = {

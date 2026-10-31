@@ -517,6 +517,24 @@ impl Lowerer {
                         "an array initializer must be a string literal or a brace-enclosed list",
                     ));
                 }
+                if !self.types.is_scalar(ty)
+                    && let ast::Expr::Call {
+                        callee,
+                        type_args,
+                        args,
+                        span: call_span,
+                    } = &**expr
+                    && args.is_empty()
+                    && let ast::Expr::ScopedName {
+                        qualifier, name, ..
+                    } = callee.as_ref()
+                    && name.text == "from"
+                    && self.is_trait_value_name(&qualifier.text)
+                {
+                    return self.write_trait_table_init(
+                        global, ty, offset, qualifier, type_args, *call_span,
+                    );
+                }
                 if !self.types.is_scalar(ty) {
                     return Err(Diagnostic::new(
                         init.span,
@@ -724,6 +742,32 @@ impl Lowerer {
                 "an address constant cannot initialize a non-pointer object",
             )),
         }
+    }
+
+    /// Write `Trait::from<Type>()` into a global object as one relocation per
+    /// function-pointer field.
+    fn write_trait_table_init(
+        &mut self,
+        global: &mut ir::Global,
+        ty: TypeId,
+        offset: u32,
+        trait_name: &ast::Name,
+        type_args: &[ast::GenericArg],
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let (table_ty, methods) = self.trait_table(trait_name, type_args, span)?;
+        if !self.types.is_compatible(table_ty, ty) {
+            return Err(Diagnostic::new(
+                span,
+                "trait value initializer type does not match the destination",
+            ));
+        }
+        for (name, symbol) in methods {
+            let (field_ty, field_offset) = self.field_of(ty, &name, span)?;
+            let value = super::const_eval::ConstValue::address(field_ty, Some(symbol), 0);
+            self.write_global_scalar(global, field_ty, offset + field_offset, value, span)?;
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------

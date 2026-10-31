@@ -387,6 +387,25 @@ impl FnLower<'_> {
         // template, so the callee is never lowered as a value: the instance
         // has its own direct symbol.
         if !type_args.is_empty() {
+            // `Trait::from<Type>()` is the explicit construction of a trait
+            // value, not a generic function call.
+            if let ast::Expr::ScopedName {
+                qualifier, name, ..
+            } = callee
+                && name.text == "from"
+                && self.l.is_trait_value_name(&qualifier.text)
+            {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "trait value construction '{}::from<Type>()' takes no arguments",
+                            qualifier.text
+                        ),
+                    ));
+                }
+                return self.lower_trait_table(qualifier, type_args, span);
+            }
             let instance = self.l.generic_call_target(callee, type_args, span)?;
             let (params, variadic) = self.function_params(instance.ty, span)?;
             let operands = self.lower_arguments(args, &params, variadic, span)?;

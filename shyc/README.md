@@ -52,11 +52,12 @@ target/bin/shyc --emit=c       api.shyc -o api.c    # the TU as plain C
 `--emit=c-header` walks the parsed translation unit and prints an include-guarded
 header: file-scope typedefs, record and enum definitions, prototypes for every
 non-`static` function, and `extern` declarations for objects (initializers are
-dropped). `static` declarations, `impl` blocks, and `trait` declarations are not
-exported; methods need a concrete symbol before they can be declared. `--emit=c`
-prints the preprocessed unit as plain C and drops the `#![...]` attribute lines.
-A `let` declaration has no C spelling, so a unit that uses one is rejected with
-a diagnostic instead of being printed as invalid C.
+dropped). `static` declarations and `impl` blocks are not exported; methods need
+a concrete symbol before they can be declared. A `trait` is exported as a
+forward `typedef` plus the `struct` of function pointers that its value type
+uses. `--emit=c` prints the preprocessed unit as plain C and drops the `#![...]`
+attribute lines. A `let` declaration has no C spelling, so a unit that uses one
+is rejected with a diagnostic instead of being printed as invalid C.
 
 Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `-O0`..`-O3`
 (`-O1` promotes slots and cleans up, `-O2` repeats that to a fixed point, and
@@ -98,19 +99,54 @@ Checked against clang for x86-64, aarch64, riscv64, and loongarch64.
 
 Working: integers, pointers, arrays, structs and unions, enums, control flow,
 direct and indirect calls, recursion, global initialisers with symbol
-relocations, ShyC's `impl`/`self`/`drop`, compile-time traits, and floating
-point through the soft-float runtime.
+relocations, ShyC's `impl`/`self`/`drop`, compile-time traits and trait values,
+and floating point through the soft-float runtime.
 
-Traits are compile-time only. `trait Drawable { void draw(self *value); }`
-declares method signatures, and `impl Drawable for Circle { ... }` checks that
-the implementation defines exactly those methods with matching signatures. The
-methods are then lowered exactly like an ordinary `impl`: they become plain
-`____Circle__draw` functions and every call stays statically dispatched, with
-no vtable and no hidden allocation. A trait name cannot be used as a value type
-yet; that use, a second implementation of the same trait for one type, a
-duplicate method name across two traits on one type, generic trait methods, and
-`<T: Drawable>` bounds all get an explicit diagnostic. There is no dynamic
-dispatch.
+`trait Drawable { void draw(self *value); }` declares method signatures, and
+`impl Drawable for Circle { ... }` checks that the implementation defines exactly
+those methods with matching signatures. The methods are lowered exactly like an
+ordinary `impl`: they become plain `____Circle__draw` functions and a call on a
+concrete type stays statically dispatched.
+
+A trait name can also be used as an object or field type. It denotes a
+transparent record with one function-pointer field per method, named after the
+method, and no hidden data pointer, vtable header, or allocation:
+
+```c
+trait Drawable { void draw(self *value); }
+struct Widget { Drawable drawable; void *data; };
+
+struct Circle { int r; };
+impl Drawable for Circle {
+    void draw(self *value) { value->r = value->r + 1; }
+}
+
+int main() {
+    Circle c = { 3 };
+    Widget w = { Drawable::from<Circle>(), &c };
+    w.drawable.draw(w.data);      // indirect call through the table
+    return c.r;                   // 4
+}
+```
+
+`Trait::from<Type>()` fills every field with the `impl Trait for Type` method
+symbol. The method signature is erased only at `self`: `self *` becomes
+`void *`, which has the same C ABI as the implementation's `Circle *`; every
+other parameter and the return type stay as written. This is why a trait method
+that takes or returns `self` by value still works for static dispatch but is
+rejected when the trait is used as a value type. A second implementation of the
+same trait for one type, a duplicate method name across two traits on one type,
+generic trait methods, and `<T: Drawable>` bounds also get an explicit
+diagnostic. Construction at file scope must follow the `impl` in source order;
+function bodies are lowered after the whole unit is collected, so their
+construction does not depend on declaration order. There is no other dynamic
+dispatch mechanism.
+
+`--emit=c-header` prints a forward `typedef` for every trait and the matching
+`struct` of function pointers, with `self` erased to `void`, so a C caller sees
+the same layout. Implementation methods still have no exported prototypes: a C
+translation unit that builds a table by hand must declare the
+`____Type__method` symbols itself.
 
 `let name = expression;` infers its type from the initializer as an rvalue:
 arrays and functions decay, and top-level qualifiers do not carry over. The

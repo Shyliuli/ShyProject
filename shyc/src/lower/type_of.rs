@@ -228,6 +228,19 @@ impl Lowerer {
                 {
                     return Ok(variant.ty);
                 }
+                // `Trait::from<Type>()` builds the trait's function-pointer
+                // record; it is not a generic function instantiation.
+                if !type_args.is_empty()
+                    && let ast::Expr::ScopedName {
+                        qualifier, name, ..
+                    } = callee.as_ref()
+                    && name.text == "from"
+                    && self.is_trait_value_name(&qualifier.text)
+                {
+                    return self
+                        .trait_table(qualifier, type_args, *span)
+                        .map(|(ty, _)| ty);
+                }
                 // Type-only analysis instantiates through the same cache as
                 // lowering, so `sizeof(identity<int>(1))` names the instance
                 // the call will later use.

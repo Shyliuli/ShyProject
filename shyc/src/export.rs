@@ -45,7 +45,11 @@
 //!   declaration whose type mentions one stay private too, because C cannot
 //!   spell a template and every instance is internal to its unit;
 //! - `impl` blocks are skipped: method export arrives with generic
-//!   instantiation work, because a method name alone does not name a symbol.
+//!   instantiation work, because a method name alone does not name a symbol;
+//! - every trait gets a forward `typedef` and a `struct` of function pointers,
+//!   printed before other declarations so a field can name the trait in any
+//!   order. `self` is erased to `void`, which is what the compiler's trait value
+//!   uses.
 //!
 //! The header is built from the AST, never from source spans. A preprocessed
 //! span may point into an included header or a macro expansion, so slicing
@@ -62,7 +66,8 @@ use crate::ast::{
     Declarator, DerivedDeclarator, Designator, EnumSpec, Enumerator, Expr, FunctionDecl,
     FunctionDeclarator, GenericArg, GenericArgKind, GenericParam, GenericParamKind, GenericSpec,
     Initializer, InitializerKind, Item, MemberDecl, MemberOp, ParamDecl, PostfixOp, Qualifier,
-    RecordKind, RecordSpec, StorageClass, TranslationUnit, TypeName, TypeSpecifier, UnaryOp,
+    RecordKind, RecordSpec, StorageClass, TraitDecl, TraitMethod, TranslationUnit, TypeName,
+    TypeSpecifier, UnaryOp,
 };
 use crate::lexer::{Token, TokenKind};
 use crate::source::Diagnostic;
@@ -143,12 +148,32 @@ pub fn render_c_header(unit: &TranslationUnit) -> String {
         "#ifndef {HEADER_GUARD}\n#define {HEADER_GUARD}\n\n"
     ));
     output.push_str("#include <stddef.h>\n#include <stdint.h>\n\n");
+    // Trait value records come first so a declaration anywhere in the unit can
+    // name a trait type, whatever its source order. Every trait name is
+    // forward-declared before any record body, so a method may mention the same
+    // trait (or another one) through a pointer.
+    for item in &unit.items {
+        if let Item::Trait(declaration) = item {
+            output.push_str(&format!(
+                "typedef struct {name} {name};\n",
+                name = declaration.name.text
+            ));
+        }
+    }
+    output.push('\n');
+    for item in &unit.items {
+        if let Item::Trait(declaration) = item {
+            let text = trait_value_text(declaration);
+            output.push_str(&text);
+            output.push_str("\n\n");
+        }
+    }
     for item in &unit.items {
         let text = match item {
             Item::Decl(declaration) => declaration_text(declaration),
             Item::Function(function) => prototype_text(function),
-            // Methods need a symbol of their own before they can be declared,
-            // and a trait has no C spelling at all.
+            // Methods need a symbol of their own before they can be declared;
+            // a trait value record was printed above.
             Item::Impl(_) | Item::Trait(_) => String::new(),
         };
         if text.is_empty() {
@@ -159,6 +184,98 @@ pub fn render_c_header(unit: &TranslationUnit) -> String {
     }
     output.push_str(&format!("#endif /* {HEADER_GUARD} */\n"));
     output
+}
+
+// ---------------------------------------------------------------------------
+// Trait value records
+// ---------------------------------------------------------------------------
+
+/// Print the C structure a trait name denotes when it is used as a value.
+///
+/// One function-pointer field per method, in declaration order. `self` is
+/// erased to `void`, so `self *value` becomes `void *value`: the implementation
+/// keeps its concrete `Circle *` symbol, and the two pointers have the same C
+/// ABI. A method that takes or returns `self` by value has no erased C spelling;
+/// such a trait cannot be a value type, so the header says so instead of
+/// printing a structure with the wrong layout.
+fn trait_value_text(declaration: &TraitDecl) -> String {
+    if declaration.methods.is_empty() {
+        return format!(
+            "/* trait '{}' cannot be a value type: it has no methods */",
+            declaration.name.text
+        );
+    }
+    let mut fields = Vec::new();
+    for method in &declaration.methods {
+        let Some(field) = trait_method_field_text(method) else {
+            return format!(
+                "/* trait '{}' cannot be a value type: a method takes or returns \
+                 `self` by value */",
+                declaration.name.text
+            );
+        };
+        fields.push(format!("    {field}"));
+    }
+    format!(
+        "struct {} {{\n{}\n}};",
+        declaration.name.text,
+        fields.join("\n")
+    )
+}
+
+/// Print one method as a C function-pointer field, or `None` when `self`
+/// appears somewhere that cannot be erased to `void`.
+fn trait_method_field_text(method: &TraitMethod) -> Option<String> {
+    let name = method.declarator.name.as_ref()?;
+    let Some(DerivedDeclarator::Function(function)) = method.declarator.derived.first() else {
+        return None;
+    };
+    if specs_have_self(&method.specs) && !return_self_is_pointer(&method.declarator) {
+        return None;
+    }
+    if function
+        .params
+        .iter()
+        .any(|param| specs_have_self(&param.specs) && !parameter_self_is_pointer(param))
+    {
+        return None;
+    }
+    let base = specs_text(&method.specs);
+    let mut declarator = declarator_text(&method.declarator);
+    // `declarator_text` already wrote the return pointers and the parameter
+    // list; wrapping the name in `(*name)` turns the whole thing into the
+    // declarator of a pointer to that function.
+    let position = declarator.find(&name.text)?;
+    let end = position + name.text.len();
+    declarator.replace_range(position..end, &format!("(*{})", name.text));
+    Some(format!("{base} {declarator};"))
+}
+
+fn specs_have_self(specs: &DeclSpecs) -> bool {
+    specs
+        .type_specs
+        .iter()
+        .any(|specifier| matches!(specifier, TypeSpecifier::SelfType))
+}
+
+fn return_self_is_pointer(declarator: &Declarator) -> bool {
+    matches!(
+        declarator.derived.as_slice(),
+        [
+            DerivedDeclarator::Function(_),
+            DerivedDeclarator::Pointer(_),
+            ..
+        ]
+    )
+}
+
+fn parameter_self_is_pointer(param: &ParamDecl) -> bool {
+    param.declarator.as_ref().is_some_and(|declarator| {
+        matches!(
+            declarator.derived.first(),
+            Some(DerivedDeclarator::Pointer(_))
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -322,9 +439,11 @@ fn specifier_text(specifier: &TypeSpecifier) -> String {
         TypeSpecifier::Record(record) => record_text(record),
         TypeSpecifier::Enum(enumeration) => enum_text(enumeration),
         TypeSpecifier::Atomic(type_name) => format!("_Atomic({})", type_name_text(type_name)),
-        // `self` names a type only inside an `impl` block, and those are not
-        // exported; refusing to print it keeps the output honest.
-        TypeSpecifier::SelfType => UNSUPPORTED.to_string(),
+        // `self` appears only in a trait method signature here. The trait
+        // value structure erases the implementing type, so `self *value`
+        // prints as `void *value`. A by-value `self` is caught before this
+        // printer is used, because `void value` is not a C object.
+        TypeSpecifier::SelfType => "void".to_string(),
     }
 }
 

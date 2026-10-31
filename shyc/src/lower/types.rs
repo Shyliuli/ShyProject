@@ -98,14 +98,9 @@ impl Lowerer {
                             ));
                         }
                         None if self.traits.contains_key(&name.text) => {
-                            return Err(Diagnostic::new(
-                                name.span,
-                                format!(
-                                    "trait '{}' has no runtime value type; traits are \
-                                     compile-time only",
-                                    name.text
-                                ),
-                            ));
+                            // A trait used as a type is its transparent record
+                            // of function pointers.
+                            self.trait_value_type(name)?
                         }
                         None => {
                             return Err(Diagnostic::new(

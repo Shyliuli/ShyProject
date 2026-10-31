@@ -102,7 +102,10 @@ fn render<T: Drawable>(T *value);
 ```
 
 A trait value is equivalent to a transparent function-pointer structure. It does
-not use a hidden `dyn` object, allocation, or garbage collection. Closed
+not use a hidden `dyn` object, allocation, or garbage collection. Construction
+is explicit: `Drawable::from<Circle>()` fills the table with the `impl` method
+symbols, and `self *` is erased to `void *` because the implementation's
+`Circle *` has the same C ABI. Closed
 runtime polymorphism can instead use a tagged enum and an `impl Trait for Enum`
 implementation with an exhaustive `switch`.
 
