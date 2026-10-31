@@ -101,7 +101,8 @@ impl Lowerer {
                         Err(Diagnostic::new(
                             name.span,
                             format!(
-                                "generic function '{}' needs explicit generic arguments",
+                                "generic function '{}' needs explicit generic arguments to be \
+                                 used as a value",
                                 name.text
                             ),
                         ))
@@ -199,8 +200,8 @@ impl Lowerer {
             ast::Expr::Call {
                 callee,
                 type_args,
+                args,
                 span,
-                ..
             } => {
                 // `Enum::Variant(value)` constructs an aggregate; it is not a
                 // function call, so it never reaches the signature path.
@@ -243,9 +244,23 @@ impl Lowerer {
                 }
                 // Type-only analysis instantiates through the same cache as
                 // lowering, so `sizeof(identity<int>(1))` names the instance
-                // the call will later use.
+                // the call will later use. A call that writes no type arguments
+                // infers them from the same argument expressions.
                 let function_ty = if type_args.is_empty() {
-                    self.callee_function_type(callee, local)?
+                    match callee.as_ref() {
+                        ast::Expr::Name(name)
+                            if local(&name.text).is_none()
+                                && self.is_inferred_generic_call(&name.text) =>
+                        {
+                            let mut arguments = Vec::with_capacity(args.len());
+                            for argument in args {
+                                let ty = self.type_of(argument, local)?;
+                                arguments.push((argument.span(), ty));
+                            }
+                            self.infer_generic_function(name, &arguments)?.ty
+                        }
+                        _ => self.callee_function_type(callee, local)?,
+                    }
                 } else {
                     self.generic_call_target(callee, type_args, *span)?.ty
                 };

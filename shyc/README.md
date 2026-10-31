@@ -102,6 +102,17 @@ direct and indirect calls, recursion, global initialisers with symbol
 relocations, ShyC's `impl`/`self`/`drop`, compile-time traits and trait values,
 and floating point through the soft-float runtime.
 
+Generics are compile-time templates. `fn identity<T>(T value) -> T` and
+`struct Pair<T> { ... }` are instantiated on use; an explicit `identity<int>(1)`
+and an inferred `identity(1)` instantiate through the same cache, so a repeated
+call and the type-only analysis before lowering reuse one instance. Inference
+uses the value arguments only: a type parameter binds through `T`, `T *`,
+`T [N]`, and generic records or enums such as `Pair<T>`. A `const` parameter, a
+type parameter that appears only inside a function type, and an argument list
+that binds one parameter inconsistently or not at all are not inferred; those
+calls report that explicit generic arguments are needed. A local binding or
+ordinary function of the same name shadows the template.
+
 `trait Drawable { void draw(self *value); }` declares method signatures, and
 `impl Drawable for Circle { ... }` checks that the implementation defines exactly
 those methods with matching signatures. The methods are lowered exactly like an

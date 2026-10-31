@@ -436,7 +436,9 @@ impl FnLower<'_> {
                 } else if self.l.generic_functions.contains_key(name) {
                     Err(Diagnostic::new(
                         span,
-                        format!("generic function '{name}' needs explicit generic arguments"),
+                        format!(
+                            "generic function '{name}' needs explicit generic arguments to be used as a value"
+                        ),
                     ))
                 } else {
                     Err(Diagnostic::new(

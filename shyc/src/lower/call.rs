@@ -5,7 +5,7 @@
 //! call passes the receiver explicitly and targets the mangled
 //! `____Type__method` symbol.
 
-use super::{ExprKind, ExprVal, FnLower};
+use super::{ExprKind, ExprVal, FnLower, FunctionInstance};
 use crate::ast;
 use crate::ir;
 use crate::sema::types::{Qualifiers, TypeId, TypeKind};
@@ -407,14 +407,18 @@ impl FnLower<'_> {
                 return self.lower_trait_table(qualifier, type_args, span);
             }
             let instance = self.l.generic_call_target(callee, type_args, span)?;
-            let (params, variadic) = self.function_params(instance.ty, span)?;
-            let operands = self.lower_arguments(args, &params, variadic, span)?;
-            return self.emit_call(
-                ir::CallTarget::Direct(instance.symbol),
-                instance.ty,
-                operands,
-                span,
-            );
+            return self.lower_instance_call(instance, args, span);
+        }
+        // A template name with no written type arguments infers them from the
+        // value arguments, then calls the one instance those arguments name. A
+        // local binding of the same name keeps shadowing the template, as it
+        // does for any ordinary lookup.
+        if let ast::Expr::Name(name) = callee
+            && !self.has_local_binding(&name.text)
+            && self.l.is_inferred_generic_call(&name.text)
+        {
+            let instance = self.infer_generic_call(name, args)?;
+            return self.lower_instance_call(instance, args, span);
         }
         if let ast::Expr::Member {
             object, name, op, ..
@@ -504,6 +508,45 @@ impl FnLower<'_> {
         let (params, variadic) = self.function_params(function_ty, span)?;
         let operands = self.lower_arguments(args, &params, variadic, span)?;
         self.emit_call(target, function_ty, operands, span)
+    }
+
+    /// Lower a call through one already instantiated generic function.
+    fn lower_instance_call(
+        &mut self,
+        instance: FunctionInstance,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<ExprVal, Diagnostic> {
+        let (params, variadic) = self.function_params(instance.ty, span)?;
+        let operands = self.lower_arguments(args, &params, variadic, span)?;
+        self.emit_call(
+            ir::CallTarget::Direct(instance.symbol),
+            instance.ty,
+            operands,
+            span,
+        )
+    }
+
+    /// Instantiates `name(args)` without written type arguments, taking the
+    /// bindings from the argument expression types.
+    fn infer_generic_call(
+        &mut self,
+        name: &ast::Name,
+        args: &[ast::Expr],
+    ) -> Result<FunctionInstance, Diagnostic> {
+        let mut arguments = Vec::with_capacity(args.len());
+        for argument in args {
+            arguments.push((argument.span(), self.type_of(argument)?));
+        }
+        self.l.infer_generic_function(name, &arguments)
+    }
+
+    /// Whether a parameter or block-scope declaration hides a file-scope name.
+    fn has_local_binding(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.bindings.contains_key(name))
     }
 
     fn lower_method_call(
