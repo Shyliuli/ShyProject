@@ -14,6 +14,7 @@ use crate::source::{Diagnostic, Span};
 
 impl Lowerer {
     pub(super) fn collect(&mut self, unit: &ast::TranslationUnit) -> Result<(), Diagnostic> {
+        self.register_generic_records(unit)?;
         for item in &unit.items {
             match item {
                 ast::Item::Decl(declaration) => self.collect_declaration(declaration)?,
@@ -24,7 +25,61 @@ impl Lowerer {
         Ok(())
     }
 
+    /// Registers every generic record definition before anything is resolved.
+    ///
+    /// A use may appear before the definition it instantiates, so all templates
+    /// are collected in one pass first. Generic records never enter the plain
+    /// tag table: only an instantiation creates a record type.
+    fn register_generic_records(&mut self, unit: &ast::TranslationUnit) -> Result<(), Diagnostic> {
+        for item in &unit.items {
+            let ast::Item::Decl(declaration) = item else {
+                continue;
+            };
+            let Some(record) = generic_definition(&declaration.specs) else {
+                continue;
+            };
+            let Some(tag) = &record.tag else {
+                return Err(Diagnostic::new(
+                    record.span,
+                    "a generic record definition needs a tag",
+                ));
+            };
+            if record.members.is_none() {
+                return Err(Diagnostic::new(
+                    record.span,
+                    format!("generic record '{}' needs a definition", tag.text),
+                ));
+            }
+            if self.generic_records.contains_key(&tag.text) {
+                return Err(Diagnostic::new(
+                    record.span,
+                    format!("redefinition of generic record '{}'", tag.text),
+                ));
+            }
+            self.generic_records.insert(
+                tag.text.clone(),
+                super::GenericRecord {
+                    params: record.generics.clone(),
+                    spec: record.clone(),
+                },
+            );
+        }
+        Ok(())
+    }
+
     fn collect_declaration(&mut self, declaration: &ast::Declaration) -> Result<(), Diagnostic> {
+        // The registration pass already holds the member declarations, so a
+        // generic definition has nothing left to resolve. Declarators next to
+        // one would use the generic record without its arguments.
+        if generic_definition(&declaration.specs).is_some() {
+            if let Some(init) = declaration.declarators.first() {
+                return Err(Diagnostic::new(
+                    init.span,
+                    "a generic record needs type arguments before it can be used",
+                ));
+            }
+            return Ok(());
+        }
         for init in &declaration.declarators {
             self.reject_generic_declarator(&init.declarator)?;
         }
@@ -1278,4 +1333,12 @@ fn target_bytes(value: u64, width: usize, endian: crate::ir::Endian) -> Vec<u8> 
         crate::ir::Endian::Big => tail.to_vec(),
         crate::ir::Endian::Little => tail.iter().rev().copied().collect(),
     }
+}
+
+/// The generic record specifier in a declaration, if it declares or uses one.
+fn generic_definition(specs: &ast::DeclSpecs) -> Option<&ast::RecordSpec> {
+    specs.type_specs.iter().find_map(|spec| match spec {
+        ast::TypeSpecifier::Record(record) if !record.generics.is_empty() => Some(record),
+        _ => None,
+    })
 }

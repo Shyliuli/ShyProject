@@ -2,7 +2,7 @@
 //! types, and answer the layout, conversion, and literal questions the rest of
 //! lowering needs.
 
-use super::{Lowerer, ResolvedSpecs};
+use super::{InstanceKey, Lowerer, ResolvedSpecs};
 use crate::ast;
 use crate::sema::types::{
     Builtin, QualifiedType, Qualifiers, RecordField, RecordKind, TypeId, TypeKind,
@@ -87,15 +87,30 @@ impl Lowerer {
                             "more than one type specifier in one declaration",
                         ));
                     }
-                    base = Some(self.lookup_named_type(&name.text).ok_or_else(|| {
-                        Diagnostic::new(name.span, format!("unknown type name '{}'", name.text))
-                    })?);
+                    base = Some(match self.lookup_named_type(&name.text) {
+                        Some(ty) => ty,
+                        None if self.generic_records.contains_key(&name.text) => {
+                            return Err(Diagnostic::new(
+                                name.span,
+                                format!("generic type '{}' needs type arguments", name.text),
+                            ));
+                        }
+                        None => {
+                            return Err(Diagnostic::new(
+                                name.span,
+                                format!("unknown type name '{}'", name.text),
+                            ));
+                        }
+                    });
                 }
                 ast::TypeSpecifier::Generic(generic) => {
-                    return Err(Diagnostic::new(
-                        generic.span,
-                        "generic type arguments are not supported by lowering yet",
-                    ));
+                    if base.is_some() {
+                        return Err(Diagnostic::new(
+                            generic.span,
+                            "more than one type specifier in one declaration",
+                        ));
+                    }
+                    base = Some(self.instantiate_generic(generic)?);
                 }
                 ast::TypeSpecifier::Record(record) => {
                     if base.is_some() {
@@ -455,10 +470,12 @@ impl Lowerer {
     // -----------------------------------------------------------------------
 
     fn resolve_record(&mut self, spec: &ast::RecordSpec) -> Result<TypeId, Diagnostic> {
-        if !spec.generics.is_empty() {
+        // File-scope generic definitions were registered by `collect`, so a
+        // generic specifier that reaches here was reached another way.
+        if let Some(parameter) = spec.generics.first() {
             return Err(Diagnostic::new(
-                spec.generics[0].span,
-                "generic struct or union declarations are not supported by lowering yet",
+                parameter.span,
+                "generic record definitions are only supported at file scope",
             ));
         }
         let kind = match spec.kind {
@@ -466,6 +483,16 @@ impl Lowerer {
             ast::RecordKind::Union => RecordKind::Union,
         };
         let tag = spec.tag.as_ref().map(|name| name.text.clone());
+        // A generic record has no plain tag: using its name without arguments
+        // must not create a second, non-generic record.
+        if let Some(tag) = &tag
+            && self.generic_records.contains_key(tag)
+        {
+            return Err(Diagnostic::new(
+                spec.span,
+                format!("generic type '{tag}' needs type arguments"),
+            ));
+        }
         let Some(members) = &spec.members else {
             let Some(tag) = tag else {
                 return Err(Diagnostic::new(
@@ -527,6 +554,112 @@ impl Lowerer {
             Diagnostic::new(spec.span, format!("invalid record layout: {error}"))
         })?;
         Ok(ty)
+    }
+
+    /// Instantiate `Name<args>`: validate the arguments, then re-resolve the
+    /// generic record's member declarations with its parameters bound.
+    ///
+    /// The forward record is cached before its members resolve, so a member may
+    /// mention its own instantiation (`Node<T> *next`) and every use of the
+    /// same arguments gets the same record identity back.
+    fn instantiate_generic(&mut self, generic: &ast::GenericSpec) -> Result<TypeId, Diagnostic> {
+        /// How deep `Pair<Pair<...>>` may nest before instantiation gives up.
+        const MAX_DEPTH: u32 = 64;
+
+        if self.instantiation_depth >= MAX_DEPTH {
+            return Err(Diagnostic::new(
+                generic.span,
+                format!("generic type instantiation is nested more than {MAX_DEPTH} levels deep"),
+            ));
+        }
+        let Some(template) = self.generic_records.get(&generic.name.text).cloned() else {
+            if self.lookup_named_type(&generic.name.text).is_some() {
+                return Err(Diagnostic::new(
+                    generic.name.span,
+                    format!("type '{}' is not generic", generic.name.text),
+                ));
+            }
+            return Err(Diagnostic::new(
+                generic.name.span,
+                format!("unknown generic type '{}'", generic.name.text),
+            ));
+        };
+        if generic.args.len() != template.params.len() {
+            return Err(Diagnostic::new(
+                generic.span,
+                format!(
+                    "generic type '{}' expects {} type argument(s), but {} were given",
+                    generic.name.text,
+                    template.params.len(),
+                    generic.args.len()
+                ),
+            ));
+        }
+        let mut args = Vec::with_capacity(generic.args.len());
+        for (arg, parameter) in generic.args.iter().zip(&template.params) {
+            let ast::GenericArgKind::Type(type_name) = &arg.kind else {
+                return Err(Diagnostic::new(
+                    arg.span,
+                    format!(
+                        "const generic arguments are not supported yet ('{}' of '{}')",
+                        parameter.name.text, generic.name.text
+                    ),
+                ));
+            };
+            if parameter.kind != ast::GenericParamKind::Type {
+                return Err(Diagnostic::new(
+                    arg.span,
+                    format!(
+                        "generic parameter '{}' of '{}' expects a const argument, not a type",
+                        parameter.name.text, generic.name.text
+                    ),
+                ));
+            }
+            // Arguments resolve in the caller's scope, never the template's.
+            args.push(self.resolve_type_name(type_name)?);
+        }
+        let key = InstanceKey {
+            name: generic.name.text.clone(),
+            args,
+        };
+        if let Some(&ty) = self.record_instances.get(&key) {
+            return Ok(ty);
+        }
+        let kind = match template.spec.kind {
+            ast::RecordKind::Struct => RecordKind::Struct,
+            ast::RecordKind::Union => RecordKind::Union,
+        };
+        let Some(members) = &template.spec.members else {
+            return Err(Diagnostic::new(
+                template.spec.span,
+                format!("generic record '{}' has no definition", generic.name.text),
+            ));
+        };
+        let ty = self.types.record_forward(kind);
+        self.record_instances.insert(key.clone(), ty);
+        self.instantiation_depth += 1;
+        self.push_type_scope();
+        let resolved = (|| {
+            for (parameter, &arg) in template.params.iter().zip(&key.args) {
+                // A direct insert, unlike `declare_typedef`, lets a parameter
+                // shadow an outer name.
+                self.type_scopes
+                    .last_mut()
+                    .expect("type scope stack")
+                    .typedefs
+                    .insert(parameter.name.text.clone(), arg);
+            }
+            let fields = self.resolve_members(members)?;
+            self.types.complete_record(ty, fields).map_err(|error| {
+                Diagnostic::new(
+                    template.spec.span,
+                    format!("invalid record layout: {error}"),
+                )
+            })
+        })();
+        self.pop_type_scope();
+        self.instantiation_depth -= 1;
+        resolved.map(|_| ty)
     }
 
     fn resolve_members(

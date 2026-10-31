@@ -34,6 +34,8 @@
 //! - objects become `extern` declarations without their initializers, so the
 //!   header declares but never defines anything;
 //! - `static` objects and functions stay private to their translation unit;
+//! - generic records, their instantiations, and any declaration whose type
+//!   mentions one stay private too, because C cannot spell them;
 //! - `impl` blocks are skipped: method export arrives with generic
 //!   instantiation work, because a method name alone does not name a symbol.
 //!
@@ -121,14 +123,16 @@ pub fn render_c_header(unit: &TranslationUnit) -> String {
 /// Print one file-scope declaration the way a header sees it.
 ///
 /// `static` declarations are internal to their translation unit and print
-/// nothing. Everything else keeps its declarators on one line, so a record
-/// definition shared by `typedef struct { ... } A, *AP;` is written once
-/// instead of once per declarator. Objects and prototypes become `extern`,
-/// which declares without defining: a header must never define an object, and
-/// `extern` on a prototype is the same linkage a definition gets.
+/// nothing, and so does anything that mentions a generic record: C has no
+/// spelling for a template or for one of its instantiations. Everything else
+/// keeps its declarators on one line, so a record definition shared by
+/// `typedef struct { ... } A, *AP;` is written once instead of once per
+/// declarator. Objects and prototypes become `extern`, which declares without
+/// defining: a header must never define an object, and `extern` on a prototype
+/// is the same linkage a definition gets.
 fn declaration_text(declaration: &Declaration) -> String {
     let specs = &declaration.specs;
-    if specs.storage == Some(StorageClass::Static) {
+    if specs.storage == Some(StorageClass::Static) || declaration_uses_generics(declaration) {
         return String::new();
     }
     let base = specs_text(specs);
@@ -150,7 +154,10 @@ fn declaration_text(declaration: &Declaration) -> String {
 
 /// Print the prototype of one exported function definition.
 fn prototype_text(function: &FunctionDecl) -> String {
-    if function.specs.storage == Some(StorageClass::Static) {
+    if function.specs.storage == Some(StorageClass::Static)
+        || specs_use_generics(&function.specs)
+        || declarator_uses_generics(&function.declarator)
+    {
         return String::new();
     }
     format!(
@@ -158,6 +165,49 @@ fn prototype_text(function: &FunctionDecl) -> String {
         specs_text(&function.specs),
         declarator_text(&function.declarator)
     )
+}
+
+// ---------------------------------------------------------------------------
+// Generic records
+// ---------------------------------------------------------------------------
+
+/// Whether a declaration mentions a generic record anywhere in its type.
+fn declaration_uses_generics(declaration: &Declaration) -> bool {
+    specs_use_generics(&declaration.specs)
+        || declaration
+            .declarators
+            .iter()
+            .any(|declarator| declarator_uses_generics(&declarator.declarator))
+}
+
+fn specs_use_generics(specs: &DeclSpecs) -> bool {
+    specs.type_specs.iter().any(|specifier| match specifier {
+        TypeSpecifier::Generic(_) => true,
+        TypeSpecifier::Record(record) => record_uses_generics(record),
+        _ => false,
+    })
+}
+
+fn record_uses_generics(record: &RecordSpec) -> bool {
+    !record.generics.is_empty()
+        || record.members.as_ref().is_some_and(|members| {
+            members
+                .iter()
+                .any(|member| specs_use_generics(&member.specs))
+        })
+}
+
+fn declarator_uses_generics(declarator: &Declarator) -> bool {
+    declarator.derived.iter().any(|derived| match derived {
+        DerivedDeclarator::Function(function) => function.params.iter().any(|param| {
+            specs_use_generics(&param.specs)
+                || param
+                    .declarator
+                    .as_ref()
+                    .is_some_and(declarator_uses_generics)
+        }),
+        _ => false,
+    })
 }
 
 // ---------------------------------------------------------------------------

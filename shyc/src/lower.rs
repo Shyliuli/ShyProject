@@ -140,6 +140,26 @@ pub(super) struct TypeScope {
     pub tags: HashMap<String, TypeId>,
 }
 
+/// One generic struct or union definition, kept as the AST template it is.
+///
+/// Instantiating it re-resolves the same member declarations under a pushed
+/// type scope that binds the parameters, so no source is copied and the type
+/// arena needs no generic kind.
+#[derive(Clone)]
+pub(super) struct GenericRecord {
+    pub params: Vec<ast::GenericParam>,
+    pub spec: ast::RecordSpec,
+}
+
+/// Identity of one instantiation: the generic record's tag plus its concrete
+/// type arguments. Stage 2 only instantiates type arguments, so the key has no
+/// const part yet.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct InstanceKey {
+    pub name: String,
+    pub args: Vec<TypeId>,
+}
+
 /// One resolved declaration specifier list.
 pub(super) struct ResolvedSpecs {
     pub ty: TypeId,
@@ -160,6 +180,12 @@ pub(super) struct Lowerer {
     pub globals: HashMap<String, GlobalRef>,
     pub type_scopes: Vec<TypeScope>,
     pub enum_consts: HashMap<String, (i64, TypeId)>,
+    /// Every generic record definition, registered before anything resolves.
+    pub generic_records: HashMap<String, GenericRecord>,
+    /// Instantiated generic records, keyed by tag and concrete arguments.
+    pub record_instances: HashMap<InstanceKey, TypeId>,
+    /// Nesting level of the instantiation currently being resolved.
+    pub instantiation_depth: u32,
     pub impls: HashMap<TypeId, ImplInfo>,
     pub impl_context: Option<(TypeId, String)>,
     pub current_function_name: Option<String>,
@@ -192,6 +218,9 @@ impl Lowerer {
             globals: HashMap::new(),
             type_scopes: vec![TypeScope::default()],
             enum_consts: HashMap::new(),
+            generic_records: HashMap::new(),
+            record_instances: HashMap::new(),
+            instantiation_depth: 0,
             impls: HashMap::new(),
             impl_context: None,
             current_function_name: None,
