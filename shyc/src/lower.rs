@@ -142,6 +142,7 @@ pub(super) struct ImplInfo {
 /// implementing type, which is known when an `impl ... for ...` is checked.
 #[derive(Clone)]
 pub(super) struct TraitInfo {
+    pub params: Vec<ast::GenericParam>,
     pub methods: Vec<ast::TraitMethod>,
 }
 
@@ -274,9 +275,12 @@ pub(super) struct Lowerer {
     /// Every trait declaration, by name. Registered before any `impl` is
     /// checked.
     pub traits: HashMap<String, TraitInfo>,
-    /// `(trait, type)` pairs already implemented, to reject a second
-    /// implementation of the same pair.
-    pub trait_impls: HashSet<(String, String)>,
+    /// `(trait, trait arguments, type)` triples already implemented, to
+    /// reject a second implementation of the same pair.
+    pub trait_impls: HashSet<(String, Vec<GenericArgKey>, String)>,
+    /// Concrete `impl From<Source> for Target` conversions, used by `?` when
+    /// the propagated error types are not identical.
+    pub from_conversions: HashMap<(TypeId, TypeId), MethodInfo>,
     /// Synthetic record that represents each trait used as a value. It has one
     /// function-pointer field per trait method, named after that method.
     pub trait_values: HashMap<String, TypeId>,
@@ -326,6 +330,7 @@ impl Lowerer {
             instantiation_depth: 0,
             traits: HashMap::new(),
             trait_impls: HashSet::new(),
+            from_conversions: HashMap::new(),
             trait_values: HashMap::new(),
             trait_self_type: None,
             impls: HashMap::new(),

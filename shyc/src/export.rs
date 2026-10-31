@@ -199,6 +199,12 @@ pub fn render_c_header(unit: &TranslationUnit) -> String {
 /// such a trait cannot be a value type, so the header says so instead of
 /// printing a structure with the wrong layout.
 fn trait_value_text(declaration: &TraitDecl) -> String {
+    if !declaration.generics.is_empty() {
+        return format!(
+            "/* trait '{}' cannot be a value type: it has generic parameters */",
+            declaration.name.text
+        );
+    }
     if declaration.methods.is_empty() {
         return format!(
             "/* trait '{}' cannot be a value type: it has no methods */",

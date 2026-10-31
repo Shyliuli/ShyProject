@@ -18,7 +18,7 @@
 use super::{ExprKind, ExprVal, FnLower, Resolved, ResolvedSpecs, TraitInfo};
 use crate::ast;
 use crate::ir;
-use crate::sema::types::{Builtin, QualifiedType, RecordField, RecordKind, TypeId};
+use crate::sema::types::{Builtin, QualifiedType, RecordField, RecordKind, TypeId, TypeKind};
 use crate::source::{Diagnostic, Span};
 
 impl super::Lowerer {
@@ -87,6 +87,7 @@ impl super::Lowerer {
             self.traits.insert(
                 declaration.name.text.clone(),
                 TraitInfo {
+                    params: declaration.generics.clone(),
                     methods: declaration.methods.clone(),
                 },
             );
@@ -125,6 +126,11 @@ impl super::Lowerer {
                 let ast::Item::Trait(declaration) = item else {
                     continue;
                 };
+                // A generic trait's signatures are checked against each
+                // concrete implementation, where its parameters are bound.
+                if !declaration.generics.is_empty() {
+                    continue;
+                }
                 for method in &declaration.methods {
                     self.trait_method_type(method).map_err(|error| {
                         Diagnostic::new(
@@ -157,9 +163,24 @@ impl super::Lowerer {
                         format!("unknown trait '{}'", trait_name.text),
                     ));
                 };
+                if block.trait_args.len() != info.params.len() {
+                    return Err(Diagnostic::new(
+                        block.span,
+                        format!(
+                            "trait '{}' expects {} type argument(s)",
+                            trait_name.text,
+                            info.params.len()
+                        ),
+                    ));
+                }
+                let args = if info.params.is_empty() {
+                    Vec::new()
+                } else {
+                    self.resolve_generic_args(&trait_name.text, &info.params, &block.trait_args)?
+                };
                 if self
                     .trait_impls
-                    .contains(&(trait_name.text.clone(), name.clone()))
+                    .contains(&(trait_name.text.clone(), args.clone(), name.clone()))
                 {
                     return Err(Diagnostic::new(
                         block.span,
@@ -170,29 +191,71 @@ impl super::Lowerer {
                     ));
                 }
                 self.check_impl_method_names(block, trait_name, &info, &name)?;
-                Some((trait_name.clone(), info))
+                Some((trait_name.clone(), info, args))
             }
             None => None,
         };
         let saved = self.impl_context.clone();
         self.impl_context = Some((ty, name.clone()));
+        // The trait's concrete arguments are in scope while its method
+        // signatures are compared with the implementation.
+        self.push_type_scope();
+        if let Some((_, info, args)) = &trait_info {
+            self.bind_generic_args(&info.params, args);
+        }
         let result = (|| {
             for method in &block.methods {
                 self.collect_function(method, Some((ty, name.clone())))?;
             }
-            if let Some((trait_name, info)) = &trait_info {
+            if let Some((trait_name, info, _)) = &trait_info {
                 self.check_impl_signatures(block, trait_name, info, ty)?;
             }
             Ok(())
         })();
+        self.pop_type_scope();
         self.impl_context = saved;
         if result.is_ok()
-            && let Some((trait_name, _)) = &trait_info
+            && let Some((trait_name, _, args)) = &trait_info
         {
             self.trait_impls
-                .insert((trait_name.text.clone(), name.clone()));
+                .insert((trait_name.text.clone(), args.clone(), name.clone()));
+            self.register_from_conversion(trait_name, args, ty);
         }
         result
+    }
+
+    /// Records the concrete `impl From<Source> for Target` method that `?`
+    /// calls when the propagated error types differ.
+    ///
+    /// The conversion is ordinary trait metadata: the implementation is
+    /// checked like any other, and only the resulting symbol and function type
+    /// are kept. There is no compiler-invented method or hidden conversion.
+    fn register_from_conversion(
+        &mut self,
+        trait_name: &ast::Name,
+        args: &[super::GenericArgKey],
+        target: TypeId,
+    ) {
+        if trait_name.text != "From" {
+            return;
+        }
+        let [super::GenericArgKey::Type(source)] = args else {
+            return;
+        };
+        let Some(method) = self
+            .impls
+            .get(&target)
+            .and_then(|info| info.methods.get("from"))
+            .cloned()
+        else {
+            return;
+        };
+        let TypeKind::Function { params, result, .. } = self.types.kind(method.ty) else {
+            return;
+        };
+        if params.len() == 1 && self.types.is_compatible(*result, target) {
+            self.from_conversions.insert((*source, target), method);
+        }
     }
 
     /// Checks that the implementation defines exactly the trait's methods.
@@ -323,6 +386,16 @@ impl super::Lowerer {
                 format!("unknown trait '{}'", trait_name.text),
             ));
         };
+        if !info.params.is_empty() {
+            return Err(Diagnostic::new(
+                trait_name.span,
+                format!(
+                    "generic trait '{}' cannot be used as a value; \
+                     write its type arguments",
+                    trait_name.text
+                ),
+            ));
+        }
         // Publish the incomplete record first: a method signature may mention
         // this same trait through a pointer.
         let ty = self.types.record_forward(RecordKind::Struct);
@@ -425,7 +498,7 @@ impl super::Lowerer {
         let impl_name = impl_info.name.clone();
         if !self
             .trait_impls
-            .contains(&(trait_name.text.clone(), impl_name.clone()))
+            .contains(&(trait_name.text.clone(), Vec::new(), impl_name.clone()))
         {
             return Err(Diagnostic::new(
                 concrete_name.span,

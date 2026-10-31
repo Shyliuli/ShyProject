@@ -710,7 +710,7 @@ impl FnLower<'_> {
         Ok(operand)
     }
 
-    fn emit_call(
+    pub(super) fn emit_call(
         &mut self,
         target: ir::CallTarget,
         function_ty: TypeId,

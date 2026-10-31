@@ -7,7 +7,7 @@
 use crate::ast::Name;
 use crate::ast::expr::Expr;
 use crate::ast::stmt::Block;
-use crate::ast::ty::{DeclSpecs, Declarator, TypeName};
+use crate::ast::ty::{DeclSpecs, Declarator, GenericArg, GenericParam, TypeName};
 use crate::source::Span;
 
 /// A whole source file after preprocessing.
@@ -81,6 +81,9 @@ pub struct ImplBlock {
     pub span: Span,
     /// The trait written before `for`, if this is a trait implementation.
     pub trait_name: Option<Name>,
+    /// The concrete arguments written after the trait name, empty for an
+    /// inherent impl or a trait without parameters.
+    pub trait_args: Vec<GenericArg>,
     pub self_type: TypeName,
     pub methods: Vec<FunctionDecl>,
 }
@@ -94,6 +97,8 @@ pub struct ImplBlock {
 pub struct TraitDecl {
     pub span: Span,
     pub name: Name,
+    /// Generic parameters written after the trait name, empty if none.
+    pub generics: Vec<GenericParam>,
     pub methods: Vec<TraitMethod>,
 }
 

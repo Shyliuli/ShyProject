@@ -318,17 +318,19 @@ impl Parser {
 
     fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {
         let start = self.bump().span;
-        // `impl Trait for Type` is a trait implementation; only the `for`
-        // keyword can follow a trait name here. `impl Type` keeps its old
-        // spelling and meaning.
-        let trait_name = if matches!(&self.peek().kind, TokenKind::Ident(word) if !is_keyword(word))
-            && self.at_ident_ahead(1, "for")
-        {
+        // `impl Trait for Type` and `impl Trait<Args> for Type` are trait
+        // implementations; `impl Type` keeps its old inherent meaning.
+        let (trait_name, trait_args) = if self.at_trait_impl_header() {
             let name = self.expect_ident()?;
+            let args = if self.at_punct("<") {
+                self.generic_args()?
+            } else {
+                Vec::new()
+            };
             self.expect_keyword("for")?;
-            Some(name)
+            (Some(name), args)
         } else {
-            None
+            (None, Vec::new())
         };
         let self_type = self.type_name()?;
         self.expect_punct("{")?;
@@ -367,9 +369,33 @@ impl Parser {
         Ok(ImplBlock {
             span: start.join(close),
             trait_name,
+            trait_args,
             self_type,
             methods,
         })
+    }
+
+    /// Whether the cursor starts `Trait for` or `Trait<Args> for`.
+    ///
+    /// The generic form needs a speculative parse because `impl Name<Args>`
+    /// without `for` is an inherent impl. `probe` restores the cursor after
+    /// deciding.
+    fn at_trait_impl_header(&mut self) -> bool {
+        if !matches!(&self.peek().kind, TokenKind::Ident(word) if !is_keyword(word)) {
+            return false;
+        }
+        if self.at_ident_ahead(1, "for") {
+            return true;
+        }
+        if !self.at_punct_ahead(1, "<") {
+            return false;
+        }
+        self.probe(|parser| {
+            parser.bump();
+            parser.generic_args()?;
+            Ok(parser.at_ident("for"))
+        })
+        .unwrap_or(false)
     }
 
     /// Parses `trait Name { method signatures }`.
@@ -381,16 +407,15 @@ impl Parser {
         let start = self.bump().span;
         let name = self.expect_ident()?;
         self.declare_trait(&name.text);
-        if self.at_punct("<") {
-            return Err(Diagnostic::new(
-                self.here(),
-                "generic traits are not implemented yet",
-            ));
-        }
+        self.push_scope();
+        let generics = if self.at_punct("<") {
+            self.generic_params()?
+        } else {
+            Vec::new()
+        };
         self.expect_punct("{")?;
 
         self.impl_depth += 1;
-        self.push_scope();
         let mut methods = Vec::new();
         while !self.at_punct("}") {
             if self.at_eof() {
@@ -408,6 +433,7 @@ impl Parser {
         Ok(TraitDecl {
             span: start.join(close),
             name,
+            generics,
             methods,
         })
     }
@@ -497,17 +523,23 @@ impl Parser {
             self.bump();
             let name = self.expect_ident()?;
             self.declare_trait(&name.text);
+            self.push_scope();
+            if self.at_punct("<") {
+                self.generic_params()?;
+            }
             self.expect_punct("{")?;
+            self.pop_scope();
             return self.skip_braced_body();
         }
         if self.at_ident("impl") {
             self.bump();
-            // Skip the trait name of `impl Trait for Type` the same way the
-            // real parser recognizes it.
-            if matches!(&self.peek().kind, TokenKind::Ident(word) if !is_keyword(word))
-                && self.at_ident_ahead(1, "for")
-            {
+            // Skip the trait name and its arguments of `impl Trait<Args> for
+            // Type` the same way the real parser recognizes them.
+            if self.at_trait_impl_header() {
                 self.bump();
+                if self.at_punct("<") {
+                    self.generic_args()?;
+                }
                 self.bump();
             }
             self.type_name()?;

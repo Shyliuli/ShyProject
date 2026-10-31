@@ -9,7 +9,7 @@
 //! RAII drops run on that early return.
 
 use super::type_of::TryShape;
-use super::{ExprKind, ExprVal, FnLower};
+use super::{ExprKind, ExprVal, FnLower, MethodInfo};
 use crate::ast;
 use crate::ir;
 use crate::sema::types::{Qualifiers, TypeId};
@@ -55,7 +55,7 @@ impl FnLower<'_> {
         let success_ty = source.success.ok_or_else(|| {
             Diagnostic::new(span, "`?` needs a success payload; this Result has none")
         })?;
-        check_error_payload(&self.l.types, source, target, span)?;
+        let conversion = conversion_method(self.l, source, target, span)?;
 
         let address = self.object_address(value, span)?;
         let Some(underlying) = self.l.types.enum_underlying(source_ty) else {
@@ -88,6 +88,18 @@ impl FnLower<'_> {
         let error_payload = match (source.failure, target.failure) {
             (Some(source_error), Some(target_error)) => {
                 let operand = self.load_value(payload_address.clone(), source_error, qualifiers);
+                let operand = match &conversion {
+                    Some(method) => {
+                        let converted = self.emit_call(
+                            ir::CallTarget::Direct(method.symbol.clone()),
+                            method.ty,
+                            vec![operand],
+                            span,
+                        )?;
+                        self.rvalue_val(converted, span)?.0
+                    }
+                    None => operand,
+                };
                 Some((operand, target_error))
             }
             _ => None,
@@ -117,20 +129,33 @@ impl FnLower<'_> {
     }
 }
 
-/// Require a propagated Result error payload to fit the destination exactly.
+/// Resolve how a propagated Result error payload reaches the destination.
 ///
 /// Success payloads may differ, because `?` yields the source value and the
-/// enclosing expression converts it. The error payload is copied wholesale, so
-/// a missing or incompatible one is diagnosed instead of silently dropped.
-fn check_error_payload(
-    types: &crate::sema::types::TypeStore,
+/// enclosing expression converts it. An error payload whose type already
+/// matches is copied wholesale; a differing one needs a concrete
+/// `impl From<Source> for Target` method, which is called statically. Anything
+/// else keeps the existing incompatible-error diagnostic.
+fn conversion_method(
+    lowerer: &super::Lowerer,
     source: TryShape,
     target: TryShape,
     span: Span,
-) -> Result<(), Diagnostic> {
+) -> Result<Option<MethodInfo>, Diagnostic> {
     match (source.failure, target.failure) {
-        (None, None) => Ok(()),
-        (Some(source), Some(target)) if types.is_compatible(source, target) => Ok(()),
+        (None, None) => Ok(None),
+        (Some(source), Some(target)) if lowerer.types.is_compatible(source, target) => Ok(None),
+        (Some(source), Some(target)) => lowerer
+            .from_conversions
+            .get(&(source, target))
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    span,
+                    "`?` cannot propagate this error payload to the enclosing return type",
+                )
+            }),
         _ => Err(Diagnostic::new(
             span,
             "`?` cannot propagate this error payload to the enclosing return type",
