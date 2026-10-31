@@ -1,20 +1,24 @@
 //! Generic function registration and instantiation.
 //!
 //! `fn name<T>(...)` is a compile-time template. A call that writes concrete
-//! type arguments, `name<int>(x)`, re-resolves the template under a type scope
-//! that binds `T`, producing one ordinary concrete function with a translation
-//! unit internal symbol. Instances are cached by name and argument types, so a
-//! repeated call, and the type-only analysis before lowering it, share the same
-//! function.
+//! arguments, `name<int>(x)`, re-resolves the template under a type scope that
+//! binds `T`, producing one ordinary concrete function with a translation unit
+//! internal symbol. `const` parameters bind an integer value the same way.
+//! Instances are cached by name and concrete arguments, so a repeated call, and
+//! the type-only analysis before lowering it, share the same function.
 //!
-//! `const` parameters, inference, generic methods, and traits are not
-//! implemented; each names its construct in a diagnostic.
+//! Inference, generic methods, and traits are not implemented; each names its
+//! construct in a diagnostic.
 
+use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-use super::{FunctionInstance, GenericEnv, InstanceKey, Lowerer, PendingFunction, ResolvedSpecs};
+use super::{
+    FunctionInstance, GenericArgKey, GenericEnv, InstanceKey, Lowerer, PendingFunction,
+    ResolvedSpecs,
+};
 use crate::ast;
-use crate::sema::types::TypeId;
+use crate::sema::types::{Builtin, TypeId};
 use crate::source::{Diagnostic, Span};
 
 /// How deep generic instantiation may nest before lowering gives up.
@@ -122,36 +126,15 @@ impl Lowerer {
             return Err(Diagnostic::new(
                 name.span,
                 format!(
-                    "generic function '{}' expects {} type argument(s), but {} were given",
+                    "generic function '{}' expects {} argument(s), but {} were given",
                     name.text,
                     template.params.len(),
                     args.len()
                 ),
             ));
         }
-        let mut concrete = Vec::with_capacity(args.len());
-        for (arg, parameter) in args.iter().zip(&template.params) {
-            if parameter.kind != ast::GenericParamKind::Type {
-                return Err(Diagnostic::new(
-                    arg.span,
-                    format!(
-                        "const generic parameters are not supported yet ('{}' of '{}')",
-                        parameter.name.text, name.text
-                    ),
-                ));
-            }
-            let ast::GenericArgKind::Type(type_name) = &arg.kind else {
-                return Err(Diagnostic::new(
-                    arg.span,
-                    format!(
-                        "const generic arguments are not supported yet ('{}' of '{}')",
-                        parameter.name.text, name.text
-                    ),
-                ));
-            };
-            // Arguments resolve in the caller's scope, never the template's.
-            concrete.push(self.resolve_type_name(type_name)?);
-        }
+        // Arguments resolve in the caller's scope, never the template's.
+        let concrete = self.resolve_generic_args(&name.text, &template.params, args)?;
         let key = InstanceKey {
             name: name.text.clone(),
             args: concrete,
@@ -185,14 +168,7 @@ impl Lowerer {
         // the instance, and lowering the body may instantiate more.
         self.function_instances
             .insert(key.clone(), instance.clone());
-        let env = GenericEnv {
-            types: template
-                .params
-                .iter()
-                .map(|parameter| parameter.name.text.clone())
-                .zip(key.args.iter().copied())
-                .collect(),
-        };
+        let env = self.generic_env(&template.params, &key.args);
         self.pending.push(PendingFunction {
             decl,
             symbol,
@@ -204,23 +180,122 @@ impl Lowerer {
         Ok(instance)
     }
 
+    /// Resolves `args` against a template's `params` in the caller's scope.
+    ///
+    /// A type argument becomes a type identity and a `const` argument becomes
+    /// the value of an integer constant expression. The kinds must line up, so
+    /// a type cannot bind a `const` parameter and vice versa.
+    pub(super) fn resolve_generic_args(
+        &mut self,
+        template_name: &str,
+        params: &[ast::GenericParam],
+        args: &[ast::GenericArg],
+    ) -> Result<Vec<GenericArgKey>, Diagnostic> {
+        let mut resolved = Vec::with_capacity(args.len());
+        for (arg, parameter) in args.iter().zip(params) {
+            let key = match (&arg.kind, &parameter.kind) {
+                (ast::GenericArgKind::Type(type_name), ast::GenericParamKind::Type) => {
+                    GenericArgKey::Type(self.resolve_type_name(type_name)?)
+                }
+                (ast::GenericArgKind::Const(value), ast::GenericParamKind::Const) => {
+                    let value = self.eval_const_int(value).map_err(|error| {
+                        Diagnostic::new(
+                            error.span,
+                            format!(
+                                "generic argument for const parameter '{}' of '{}' must be \
+                                 an integer constant expression: {}",
+                                parameter.name.text, template_name, error.message
+                            ),
+                        )
+                    })?;
+                    GenericArgKey::Int(value)
+                }
+                (ast::GenericArgKind::Type(_), ast::GenericParamKind::Const) => {
+                    return Err(Diagnostic::new(
+                        arg.span,
+                        format!(
+                            "generic parameter '{}' of '{}' expects a const argument, not a type",
+                            parameter.name.text, template_name
+                        ),
+                    ));
+                }
+                (ast::GenericArgKind::Const(_), ast::GenericParamKind::Type) => {
+                    return Err(Diagnostic::new(
+                        arg.span,
+                        format!(
+                            "generic parameter '{}' of '{}' expects a type argument, not a \
+                             constant",
+                            parameter.name.text, template_name
+                        ),
+                    ));
+                }
+            };
+            resolved.push(key);
+        }
+        Ok(resolved)
+    }
+
+    /// The concrete bindings a template's arguments install in a scope.
+    pub(super) fn generic_env(
+        &self,
+        params: &[ast::GenericParam],
+        args: &[GenericArgKey],
+    ) -> GenericEnv {
+        let int_ty = self.types.builtin(Builtin::Int);
+        let mut env = GenericEnv {
+            types: HashMap::new(),
+            consts: HashMap::new(),
+        };
+        for (parameter, argument) in params.iter().zip(args) {
+            match argument {
+                GenericArgKey::Type(ty) => {
+                    env.types.insert(parameter.name.text.clone(), *ty);
+                }
+                GenericArgKey::Int(value) => {
+                    env.consts
+                        .insert(parameter.name.text.clone(), (*value, int_ty));
+                }
+            }
+        }
+        env
+    }
+
+    /// Installs concrete bindings into the innermost type scope.
+    pub(super) fn bind_generic_args(
+        &mut self,
+        params: &[ast::GenericParam],
+        args: &[GenericArgKey],
+    ) {
+        let int_ty = self.types.builtin(Builtin::Int);
+        for (parameter, argument) in params.iter().zip(args) {
+            // A direct insert, unlike `declare_typedef`, lets a parameter
+            // shadow an outer name.
+            let scope = self.type_scopes.last_mut().expect("type scope stack");
+            match argument {
+                GenericArgKey::Type(ty) => {
+                    scope.typedefs.insert(parameter.name.text.clone(), *ty);
+                }
+                GenericArgKey::Int(value) => {
+                    scope
+                        .consts
+                        .insert(parameter.name.text.clone(), (*value, int_ty));
+                }
+            }
+        }
+    }
+
     /// Resolves the template's return type and declarator with its parameters
     /// bound, producing the concrete function type.
     fn resolve_generic_function_type(
         &mut self,
         params: &[ast::GenericParam],
-        args: &[TypeId],
+        args: &[GenericArgKey],
         decl: &ast::FunctionDecl,
     ) -> Result<TypeId, Diagnostic> {
         self.instantiation_depth += 1;
         self.push_type_scope();
         let resolved = (|| {
-            let scope = self.type_scopes.last_mut().expect("type scope stack");
-            for (parameter, &arg) in params.iter().zip(args) {
-                // A direct insert, unlike `declare_typedef`, lets a parameter
-                // shadow an outer name.
-                scope.typedefs.insert(parameter.name.text.clone(), arg);
-            }
+            self.bind_generic_args(params, args);
             let ResolvedSpecs { ty, qualifiers } = self.resolve_specs(&decl.specs)?;
             let resolved = self.resolve_declarator(ty, qualifiers, &decl.declarator)?;
             Ok::<TypeId, Diagnostic>(resolved.ty)
@@ -238,7 +313,7 @@ impl Lowerer {
         }
     }
 
-    /// Resolves the callee of a call that writes explicit type arguments.
+    /// Resolves the callee of a call that writes explicit generic arguments.
     ///
     /// Only a plain function name can name a template: a method, a scoped name,
     /// and an arbitrary callee expression have nothing to instantiate.
@@ -256,7 +331,7 @@ impl Lowerer {
             )),
             _ => Err(Diagnostic::new(
                 span,
-                "only a generic function name can take type arguments",
+                "only a generic function name can take generic arguments",
             )),
         }
     }
@@ -265,12 +340,19 @@ impl Lowerer {
     ///
     /// Instances never cross a translation unit, so the mangling only has to be
     /// unique inside the unit: the function name plus the resolved type
-    /// identities.
-    fn generic_function_symbol(&self, name: &str, args: &[TypeId]) -> String {
+    /// identities and const values. A const is spelled with a distinct `n`
+    /// prefix and its fixed-width hex bits, so it can never collide with a type
+    /// index.
+    fn generic_function_symbol(&self, name: &str, args: &[GenericArgKey]) -> String {
         let mut mangled = format!("generic.{}", Self::sanitize_ident(name));
         for arg in args {
             mangled.push('.');
-            mangled.push_str(&arg.index().to_string());
+            match arg {
+                GenericArgKey::Type(ty) => mangled.push_str(&ty.index().to_string()),
+                GenericArgKey::Int(value) => {
+                    mangled.push_str(&format!("n{:016x}", *value as u64));
+                }
+            }
         }
         self.internal_symbol(&mangled)
     }

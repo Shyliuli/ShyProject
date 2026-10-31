@@ -86,6 +86,11 @@ impl Lowerer {
                 Ok(ConstValue::address(ty, Some(symbol), 0))
             }
             ast::Expr::Name(name) => {
+                // A `const` generic parameter in scope is an integer constant
+                // just like an enumerator, and shadows the file-scope name.
+                if let Some((value, ty)) = self.lookup_const(&name.text) {
+                    return Ok(ConstValue::int(ty, value as u64));
+                }
                 if let Some((value, _)) = self.enum_consts.get(&name.text) {
                     let ty = self.types.builtin(crate::sema::types::Builtin::Int);
                     return Ok(ConstValue::int(ty, *value as u64));

@@ -402,6 +402,11 @@ impl FnLower<'_> {
                 }),
             };
         }
+        // A `const` generic parameter in scope is an integer constant, and it
+        // shadows a file-scope enumerator of the same name.
+        if let Some((value, ty)) = self.l.lookup_const(name) {
+            return Ok(Resolved::EnumConstant { value, ty });
+        }
         if let Some((value, _)) = self.l.enum_consts.get(name) {
             return Ok(Resolved::EnumConstant {
                 value: *value,
@@ -431,7 +436,7 @@ impl FnLower<'_> {
                 } else if self.l.generic_functions.contains_key(name) {
                     Err(Diagnostic::new(
                         span,
-                        format!("generic function '{name}' needs explicit type arguments"),
+                        format!("generic function '{name}' needs explicit generic arguments"),
                     ))
                 } else {
                     Err(Diagnostic::new(

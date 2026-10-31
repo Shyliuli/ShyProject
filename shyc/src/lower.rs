@@ -145,6 +145,9 @@ pub(super) struct PendingFunction {
 pub(super) struct TypeScope {
     pub typedefs: HashMap<String, TypeId>,
     pub tags: HashMap<String, TypeId>,
+    /// `const` generic parameter bindings, as the integer value plus the
+    /// `int` type C gives every one of them.
+    pub consts: HashMap<String, (i64, TypeId)>,
 }
 
 /// One generic struct or union definition, kept as the AST template it is.
@@ -171,12 +174,12 @@ pub(super) struct GenericFunction {
     pub decl: Option<ast::FunctionDecl>,
 }
 
-/// Concrete type bindings for one generic function instantiation.
-///
-/// `const` parameters are not supported yet, so only types are bound.
+/// Concrete bindings for one generic function instantiation: the type
+/// arguments and the integer values of its `const` arguments.
 #[derive(Clone)]
 pub(super) struct GenericEnv {
     pub types: HashMap<String, TypeId>,
+    pub consts: HashMap<String, (i64, TypeId)>,
 }
 
 /// The emitted symbol and concrete type of one function instantiation.
@@ -186,14 +189,22 @@ pub(super) struct FunctionInstance {
     pub ty: TypeId,
 }
 
-/// Identity of one instantiation: the generic's name plus its concrete type
+/// One concrete generic argument. Types and `const` integers share one key
+/// type so records and functions can keep a single cache shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum GenericArgKey {
+    Type(TypeId),
+    /// A `const` argument, always implicit `int`.
+    Int(i64),
+}
+
+/// Identity of one instantiation: the generic's name plus its concrete
 /// arguments. Records and functions keep separate caches, so one key type
-/// serves both. Only type arguments are instantiated, so the key has no const
-/// part yet.
+/// serves both.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct InstanceKey {
     pub name: String,
-    pub args: Vec<TypeId>,
+    pub args: Vec<GenericArgKey>,
 }
 
 /// One resolved declaration specifier list.
@@ -570,6 +581,14 @@ impl Lowerer {
             .find_map(|scope| scope.tags.get(name).copied())
     }
 
+    /// The innermost `const` generic binding for a name, if any.
+    pub(super) fn lookup_const(&self, name: &str) -> Option<(i64, TypeId)> {
+        self.type_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.consts.get(name).copied())
+    }
+
     pub(super) fn declare_tag(
         &mut self,
         name: &str,
@@ -797,6 +816,9 @@ impl<'a> FnLower<'a> {
             let scope = lowering.l.type_scopes.last_mut().expect("type scope stack");
             for (name, ty) in env.types {
                 scope.typedefs.insert(name, ty);
+            }
+            for (name, binding) in env.consts {
+                scope.consts.insert(name, binding);
             }
         }
         lowering.l.current_function_name = Some(symbol.clone());

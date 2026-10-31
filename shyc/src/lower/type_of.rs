@@ -30,6 +30,9 @@ impl Lowerer {
                 if let Some(ty) = local(&name.text) {
                     return Ok(ty);
                 }
+                if let Some((_, ty)) = self.lookup_const(&name.text) {
+                    return Ok(ty);
+                }
                 if self.enum_consts.contains_key(&name.text) {
                     return Ok(self.types.builtin(Builtin::Int));
                 }
@@ -56,7 +59,7 @@ impl Lowerer {
                         Err(Diagnostic::new(
                             name.span,
                             format!(
-                                "generic function '{}' needs explicit type arguments",
+                                "generic function '{}' needs explicit generic arguments",
                                 name.text
                             ),
                         ))

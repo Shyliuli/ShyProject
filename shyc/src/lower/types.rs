@@ -92,7 +92,7 @@ impl Lowerer {
                         None if self.generic_records.contains_key(&name.text) => {
                             return Err(Diagnostic::new(
                                 name.span,
-                                format!("generic type '{}' needs type arguments", name.text),
+                                format!("generic type '{}' needs arguments", name.text),
                             ));
                         }
                         None => {
@@ -490,7 +490,7 @@ impl Lowerer {
         {
             return Err(Diagnostic::new(
                 spec.span,
-                format!("generic type '{tag}' needs type arguments"),
+                format!("generic type '{tag}' needs arguments"),
             ));
         }
         let Some(members) = &spec.members else {
@@ -588,36 +588,16 @@ impl Lowerer {
             return Err(Diagnostic::new(
                 generic.span,
                 format!(
-                    "generic type '{}' expects {} type argument(s), but {} were given",
+                    "generic type '{}' expects {} argument(s), but {} were given",
                     generic.name.text,
                     template.params.len(),
                     generic.args.len()
                 ),
             ));
         }
-        let mut args = Vec::with_capacity(generic.args.len());
-        for (arg, parameter) in generic.args.iter().zip(&template.params) {
-            let ast::GenericArgKind::Type(type_name) = &arg.kind else {
-                return Err(Diagnostic::new(
-                    arg.span,
-                    format!(
-                        "const generic arguments are not supported yet ('{}' of '{}')",
-                        parameter.name.text, generic.name.text
-                    ),
-                ));
-            };
-            if parameter.kind != ast::GenericParamKind::Type {
-                return Err(Diagnostic::new(
-                    arg.span,
-                    format!(
-                        "generic parameter '{}' of '{}' expects a const argument, not a type",
-                        parameter.name.text, generic.name.text
-                    ),
-                ));
-            }
-            // Arguments resolve in the caller's scope, never the template's.
-            args.push(self.resolve_type_name(type_name)?);
-        }
+        // Arguments resolve in the caller's scope, never the template's.
+        let args =
+            self.resolve_generic_args(&generic.name.text, &template.params, &generic.args)?;
         let key = InstanceKey {
             name: generic.name.text.clone(),
             args,
@@ -640,15 +620,7 @@ impl Lowerer {
         self.instantiation_depth += 1;
         self.push_type_scope();
         let resolved = (|| {
-            for (parameter, &arg) in template.params.iter().zip(&key.args) {
-                // A direct insert, unlike `declare_typedef`, lets a parameter
-                // shadow an outer name.
-                self.type_scopes
-                    .last_mut()
-                    .expect("type scope stack")
-                    .typedefs
-                    .insert(parameter.name.text.clone(), arg);
-            }
+            self.bind_generic_args(&template.params, &key.args);
             let fields = self.resolve_members(members)?;
             self.types.complete_record(ty, fields).map_err(|error| {
                 Diagnostic::new(

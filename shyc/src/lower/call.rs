@@ -149,9 +149,9 @@ impl FnLower<'_> {
         args: &[ast::Expr],
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
-        // Explicit type arguments name one concrete instance of a template, so
-        // the callee is never lowered as a value: the instance has its own
-        // direct symbol.
+        // Explicit generic arguments name one concrete instance of a
+        // template, so the callee is never lowered as a value: the instance
+        // has its own direct symbol.
         if !type_args.is_empty() {
             let instance = self.l.generic_call_target(callee, type_args, span)?;
             let (params, variadic) = self.function_params(instance.ty, span)?;

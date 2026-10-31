@@ -77,7 +77,7 @@ impl Lowerer {
             if let Some(init) = declaration.declarators.first() {
                 return Err(Diagnostic::new(
                     init.span,
-                    "a generic record needs type arguments before it can be used",
+                    "a generic record needs arguments before it can be used",
                 ));
             }
             return Ok(());
