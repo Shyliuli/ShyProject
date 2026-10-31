@@ -42,6 +42,20 @@ cargo run -q -p shyc -- --dump-ast file.shyc
 cargo run -q -p shyc -- --dump-ir -O1 file.shyc
 ```
 
+Export a C interface for other languages and pre-existing C code:
+
+```sh
+target/bin/shyc --emit=c-header api.shyc -o api.h   # prototypes, types, extern objects
+target/bin/shyc --emit=c       api.shyc -o api.c    # the TU as plain C
+```
+
+`--emit=c-header` walks the parsed translation unit and prints an include-guarded
+header: file-scope typedefs, record and enum definitions, prototypes for every
+non-`static` function, and `extern` declarations for objects (initializers are
+dropped). `static` declarations and `impl` blocks are not exported; methods need
+generic instantiation to name a concrete symbol first. `--emit=c` prints the
+preprocessed unit as plain C and drops the `#![...]` attribute lines.
+
 Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `-O0`..`-O3`
 (`-O1` promotes slots and cleans up, `-O2` repeats that to a fixed point, and
 `-O3` adds block-local common subexpression elimination),

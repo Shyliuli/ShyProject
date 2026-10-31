@@ -25,9 +25,10 @@ enum InputKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Backend {
-    /// The local chibicc fork, which is the default.
+    /// The local chibicc fork, still the default while the ShyOS regression
+    /// under `shyc` is open.
     Chibicc,
-    /// The independent `shyc` compiler.
+    /// The independent `shyc` compiler: the main implementation.
     Shyc,
 }
 
@@ -126,11 +127,10 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                 let Some(value) = args.get(i) else {
                     bail!("option `--backend` requires an argument");
                 };
-                opts.backend = match value.as_str() {
-                    "chibicc" => Backend::Chibicc,
-                    "shyc" => Backend::Shyc,
-                    other => bail!("unknown backend: {other}"),
-                };
+                opts.backend = parse_backend(value)?;
+            }
+            flag if flag.starts_with("--backend=") => {
+                opts.backend = parse_backend(&flag["--backend=".len()..])?;
             }
             "-nostdlib" | "-nodefaultlibs" | "-nolibc" => opts.no_default_libs = true,
             "--target" => {
@@ -236,6 +236,14 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
     }
 
     Ok(opts)
+}
+
+fn parse_backend(name: &str) -> Result<Backend> {
+    match name {
+        "chibicc" => Ok(Backend::Chibicc),
+        "shyc" => Ok(Backend::Shyc),
+        other => bail!("unknown backend: {other}"),
+    }
 }
 
 fn is_compile_option(arg: &str) -> bool {
@@ -717,7 +725,7 @@ fn build_libshy(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result<Pa
     };
 
     let input = src.to_string_lossy().into_owned();
-    run_chibicc(repo, opts, &input, Some(&asm), false, true)?;
+    run_compiler(repo, opts, &input, Some(&asm), false, true)?;
     run_asm(repo, opts, &asm, &obj)?;
     Ok(obj)
 }
@@ -875,7 +883,7 @@ fn print_usage() {
          outputs: -o <file>, --sym <file>, -save-temps, -###\n\
          debug: --shy-emit-source-lines, --shy-emit-debug-info\n\
          inputs: .shyc/.c, .shy, .sobj\n\
-         backend: --backend chibicc|shyc (default chibicc)\n\
+         backend: --backend shyc|chibicc (default chibicc)\n\
          libraries: libshy and the soft-float runtime are linked by default;\n\
          \x20 -nostdlib/-nodefaultlibs disables that, -llibshy and -lfloat\n\
          \x20 are accepted and never duplicated"

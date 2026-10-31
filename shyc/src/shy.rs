@@ -20,6 +20,11 @@
 //! unique within the module, and no directive other than `.section`,
 //! `.symbol`, labels, data records, and instructions is emitted.
 //!
+//! Section names double as symbols, so the Shy linker requires them to be
+//! unique across a whole link. Entities with internal linkage - `static`
+//! functions and objects, string literals, static locals - are therefore named
+//! with a module-scoped prefix by the frontend, not renamed here.
+//!
 //! # Supported IR
 //!
 //! - globals: raw big-endian bytes plus 32-bit symbol relocations;

@@ -166,6 +166,8 @@ pub(super) struct Lowerer {
     pub pending: Vec<PendingFunction>,
     string_counter: u32,
     static_counter: u32,
+    /// Sanitised module name used to scope internal-linkage symbols.
+    module_prefix: String,
 }
 
 impl Lowerer {
@@ -180,6 +182,7 @@ impl Lowerer {
             StartupMode::Manual => ir::Startup::Manual,
         };
         Lowerer {
+            module_prefix: Self::sanitize_ident(&options.module_name),
             types,
             layout: options.layout,
             abi: options.abi,
@@ -313,18 +316,30 @@ impl Lowerer {
             .collect()
     }
 
+    /// The emitted name of a file-scope entity with internal linkage.
+    ///
+    /// Both backends emit one section (Shy) or one symbol (LLVM) per global and
+    /// per function, and the Shy linker requires section names to be unique
+    /// across a whole link. A `static` object or function is therefore scoped by
+    /// its translation unit, which is exactly what internal linkage means; the
+    /// scope key is the module name the driver derives from the input file.
+    pub(super) fn internal_symbol(&self, name: &str) -> String {
+        format!(".L.{}.{}", self.module_prefix, name)
+    }
+
     /// Unique symbol for an anonymous object such as a string literal.
     pub(super) fn fresh_symbol(&mut self, prefix: &str) -> String {
         let index = self.string_counter;
         self.string_counter += 1;
-        format!(".L.{prefix}.{index}")
+        format!(".L.{}.{prefix}.{index}", self.module_prefix)
     }
 
     pub(super) fn fresh_static_symbol(&mut self, function: &str, name: &str) -> String {
         let index = self.static_counter;
         self.static_counter += 1;
         format!(
-            ".L.static.{}.{}.{}",
+            ".L.{}.static.{}.{}.{}",
+            self.module_prefix,
             Self::sanitize_ident(function),
             Self::sanitize_ident(name),
             index

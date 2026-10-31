@@ -71,7 +71,8 @@ impl Lowerer {
                         "a function cannot have an initializer",
                     ));
                 }
-                self.declare_function_symbol(&name, resolved.ty, false, init.span)?;
+                let symbol = self.declared_function_symbol(&name, storage);
+                self.declare_function_symbol(&name, &symbol, resolved.ty, false, init.span)?;
             } else {
                 self.collect_object(
                     &name,
@@ -105,17 +106,25 @@ impl Lowerer {
                 "declarator is not a function",
             ));
         };
-        let symbol = match &impl_context {
+        // An `impl` method lives in its own namespace, so the mangled symbol is
+        // also its name-table key. A file-scope function is keyed by its C name
+        // so that later declarations resolve to it; only the emitted symbol
+        // differs for `static`.
+        let (key, symbol) = match &impl_context {
             Some((_, type_name)) => {
-                format!(
+                let symbol = format!(
                     "____{}__{}",
                     Self::sanitize_ident(type_name),
                     Self::sanitize_ident(&name)
-                )
+                );
+                (symbol.clone(), symbol)
             }
-            None => name.clone(),
+            None => {
+                let symbol = self.declared_function_symbol(&name, declaration.specs.storage);
+                (name.clone(), symbol)
+            }
         };
-        self.declare_function_symbol(&symbol, resolved.ty, true, declaration.span)?;
+        self.declare_function_symbol(&key, &symbol, resolved.ty, true, declaration.span)?;
         if let Some((implemented, _)) = &impl_context {
             let info = self
                 .impls
@@ -150,15 +159,38 @@ impl Lowerer {
         Ok(())
     }
 
-    /// Register a function symbol, checking redeclaration compatibility.
+    /// The emitted symbol a declaration of `name` would use.
+    ///
+    /// An existing function keeps the symbol its first declaration chose, so a
+    /// prototype and a later definition always agree.
+    pub(super) fn declared_function_symbol(
+        &self,
+        name: &str,
+        storage: Option<ast::StorageClass>,
+    ) -> String {
+        if let Some(GlobalRef::Function(index)) = self.global_ref(name) {
+            return self.function(index).symbol.clone();
+        }
+        match storage {
+            Some(ast::StorageClass::Static) => self.internal_symbol(name),
+            _ => name.to_string(),
+        }
+    }
+
+    /// Register a function, checking redeclaration compatibility.
+    ///
+    /// `name` is the C identifier and the key of the file-scope name table;
+    /// `symbol` is the name the backend emits, which differs for a `static`
+    /// function. The first declaration fixes the emitted symbol.
     pub(super) fn declare_function_symbol(
         &mut self,
+        name: &str,
         symbol: &str,
         ty: TypeId,
         defined: bool,
         span: Span,
     ) -> Result<usize, Diagnostic> {
-        match self.global_ref(symbol) {
+        match self.global_ref(name) {
             Some(GlobalRef::Function(index)) => {
                 let (previous_ty, previous_defined) = {
                     let function = self.function(index);
@@ -167,13 +199,13 @@ impl Lowerer {
                 if !self.types.is_compatible(previous_ty, ty) {
                     return Err(Diagnostic::new(
                         span,
-                        format!("conflicting declaration of function '{symbol}'"),
+                        format!("conflicting declaration of function '{name}'"),
                     ));
                 }
                 if defined && previous_defined {
                     return Err(Diagnostic::new(
                         span,
-                        format!("redefinition of function '{symbol}'"),
+                        format!("redefinition of function '{name}'"),
                     ));
                 }
                 self.functions[index].defined = previous_defined || defined;
@@ -181,7 +213,7 @@ impl Lowerer {
             }
             Some(GlobalRef::Object(_)) => Err(Diagnostic::new(
                 span,
-                format!("'{symbol}' is redeclared as a function"),
+                format!("'{name}' is redeclared as a function"),
             )),
             None => {
                 let index = self.functions.len();
@@ -191,7 +223,7 @@ impl Lowerer {
                     defined,
                 });
                 self.globals
-                    .insert(symbol.to_string(), GlobalRef::Function(index));
+                    .insert(name.to_string(), GlobalRef::Function(index));
                 Ok(index)
             }
         }
@@ -207,6 +239,11 @@ impl Lowerer {
         span: Span,
     ) -> Result<(), Diagnostic> {
         let is_extern = storage == Some(ast::StorageClass::Extern);
+        let symbol = if storage == Some(ast::StorageClass::Static) {
+            self.internal_symbol(name)
+        } else {
+            name.to_string()
+        };
         let defined = init.is_some() || !is_extern;
         let index = match self.global_ref(name) {
             Some(GlobalRef::Function(_)) => {
@@ -255,7 +292,7 @@ impl Lowerer {
             None => {
                 let index = self.objects.len();
                 self.objects.push(ObjectInfo {
-                    symbol: name.to_string(),
+                    symbol: symbol.clone(),
                     ty,
                     qualifiers,
                     has_init: init.is_some(),
@@ -283,7 +320,8 @@ impl Lowerer {
         if init.is_some() || self.objects[index].data.is_none() {
             let object_ty = self.objects[index].ty;
             let object_qualifiers = self.objects[index].qualifiers;
-            let global = self.build_global_data(name, object_ty, object_qualifiers, init, span)?;
+            let global =
+                self.build_global_data(&symbol, object_ty, object_qualifiers, init, span)?;
             let data = self.module.globals.len();
             self.module.add_global(global);
             self.objects[index].data = Some(data);
@@ -825,12 +863,13 @@ impl FnLower<'_> {
                         "a function cannot have an initializer",
                     ));
                 }
+                let symbol = self.l.declared_function_symbol(&name, storage);
                 self.l
-                    .declare_function_symbol(&name, resolved.ty, false, init.span)?;
+                    .declare_function_symbol(&name, &symbol, resolved.ty, false, init.span)?;
                 self.bind(
                     name.clone(),
                     super::LocalBinding::Function {
-                        symbol: name,
+                        symbol,
                         ty: resolved.ty,
                     },
                 );

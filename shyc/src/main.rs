@@ -10,16 +10,18 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use shyc::ir::Layout;
-use shyc::lexer::{self, Token, TokenKind};
+use shyc::lexer::{self, Token};
 use shyc::lower::{self, StartupMode};
 use shyc::preprocess::{self, Attributes};
 use shyc::source::SourceMap;
-use shyc::{llvm, parser, passes, shy};
+use shyc::{export, llvm, parser, passes, shy};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
     Tokens,
     Preprocess,
+    CSource,
+    CHeader,
     Ast,
     Ir,
     Emit(Backend),
@@ -68,6 +70,18 @@ fn run() -> Result<(), String> {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
             render_preprocessed(&preprocessed.tokens, &preprocessed.attributes)
+        }
+        Stage::CSource => {
+            let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
+                .map_err(|error| sources.render(&error))?;
+            export::render_c_source(&preprocessed.tokens)
+        }
+        Stage::CHeader => {
+            let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
+                .map_err(|error| sources.render(&error))?;
+            let unit =
+                parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
+            export::render_c_header(&unit)
         }
         Stage::Ast => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
@@ -233,30 +247,18 @@ fn arguments() -> Result<Option<Options>, String> {
     let mut opt_level = 0;
     let mut freestanding = false;
     let mut preprocess = preprocess::Options::default();
-    // Hosted targets use the system C library, so the preprocessor searches the
-    // same directories gcc and clang do. The target's own directory comes
-    // first, as with gcc.
+    // The bundled headers describe the Shy target, so they are searched before
+    // any `-I` directory and before the host C library.
     preprocess
         .include_dirs
         .push(Path::new(env!("CARGO_MANIFEST_DIR")).join("include"));
-    for directory in [
-        "/usr/lib/clang/23/include",
-        "/usr/local/include",
-        "/usr/include/x86_64-linux-gnu",
-        "/usr/include",
-    ] {
-        let path = Path::new(directory);
-        if path.is_dir() {
-            preprocess.include_dirs.push(path.to_path_buf());
-        }
-    }
     while let Some(arg) = args.next() {
         let selected = match arg.as_str() {
             "--help" | "-h" => {
                 println!(
                     "usage: shyc [options] file\n\
-                     output: -S / --emit=shy (default), --emit=llvm, -E, --dump-tokens, \
-                     --dump-ast, --dump-ir\n\
+                     output: -S / --emit=shy (default), --emit=llvm, --emit=c, \
+                     --emit=c-header, -E, --dump-tokens, --dump-ast, --dump-ir\n\
                      options: -O0..-O3, --target <triple>, -ffreestanding, -fhosted, \
                      -I dir, -D name[=value], -U name, -o file\n\
                      --emit=llvm requires a 64-bit --target triple; \
@@ -312,11 +314,13 @@ fn arguments() -> Result<Option<Options>, String> {
                 preprocess_option(&mut preprocess, &arg, &value)?;
                 None
             }
-            _ if arg.starts_with("--emit=") => Some(Stage::Emit(match &arg[7..] {
-                "shy" => Backend::Shy,
-                "llvm" => Backend::Llvm,
+            _ if arg.starts_with("--emit=") => Some(match &arg[7..] {
+                "shy" => Stage::Emit(Backend::Shy),
+                "llvm" => Stage::Emit(Backend::Llvm),
+                "c" => Stage::CSource,
+                "c-header" => Stage::CHeader,
                 other => return Err(format!("unknown --emit value: {other}")),
-            })),
+            }),
             _ if arg.starts_with("--target=") => {
                 target = Some(arg[9..].to_string());
                 None
@@ -348,6 +352,21 @@ fn arguments() -> Result<Option<Options>, String> {
     }
     // Target facts that a hosted C library needs before it includes anything.
     if target.as_deref().is_some_and(|target| target != "shy") && !freestanding {
+        // The host C library only applies to a hosted target, and these
+        // directories come after the bundled and `-I` headers, as with gcc.
+        // The Shy target has no host library, and its headers must not win
+        // over the bundled ones.
+        for directory in [
+            "/usr/lib/clang/23/include",
+            "/usr/local/include",
+            "/usr/include/x86_64-linux-gnu",
+            "/usr/include",
+        ] {
+            let path = Path::new(directory);
+            if path.is_dir() {
+                preprocess.include_dirs.push(path.to_path_buf());
+            }
+        }
         // `__shy__` is predefined for the Shy target; a hosted build must not
         // see it, or headers pick the Shy variant.
         preprocess.undefines.push("__shy__".to_string());
@@ -449,22 +468,6 @@ fn render_preprocessed(tokens: &[Token], attributes: &Attributes) -> String {
     if let Some(bytes) = attributes.stack {
         output.push_str(&format!("#![stack({bytes})]\n"));
     }
-    for token in tokens {
-        let spelling = match &token.kind {
-            TokenKind::Ident(text) | TokenKind::Number(text) | TokenKind::Punct(text) => {
-                text.clone()
-            }
-            TokenKind::StringLiteral { prefix, raw } => format!("{prefix}\"{raw}\""),
-            TokenKind::CharLiteral { prefix, raw } => format!("{prefix}'{raw}'"),
-            TokenKind::Newline | TokenKind::Eof => continue,
-        };
-        if token.at_line_start && !output.is_empty() && !output.ends_with('\n') {
-            output.push('\n');
-        }
-        output.push_str(&spelling);
-        // A separator prevents adjacent expanded tokens from fusing on re-lexing.
-        output.push(' ');
-    }
-    output.push('\n');
+    output.push_str(&export::render_c_source(tokens));
     output
 }
