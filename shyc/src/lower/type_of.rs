@@ -115,7 +115,15 @@ impl Lowerer {
                 let ty = self.type_of(right, local)?;
                 Ok(self.decay_type(ty))
             }
-            ast::Expr::Call { callee, .. } => {
+            ast::Expr::Call {
+                callee, type_args, ..
+            } => {
+                if !type_args.is_empty() {
+                    return Err(Diagnostic::new(
+                        type_args[0].span,
+                        "generic calls are not supported by lowering yet",
+                    ));
+                }
                 let function_ty = self.callee_function_type(callee, local)?;
                 match self.types.kind(function_ty) {
                     TypeKind::Function { result, .. } => Ok(*result),

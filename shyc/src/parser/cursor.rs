@@ -116,9 +116,8 @@ impl Parser {
     /// Consumes one closing `>`.
     ///
     /// A `>>` token is split into two `>` tokens whose spans meet at the token
-    /// midpoint, so a future nested generic argument list can close one angle
-    /// bracket at a time.
-    #[allow(dead_code)] // No generic argument list parses yet.
+    /// midpoint, so nested generic argument lists close one angle bracket at a
+    /// time.
     pub(crate) fn close_angle(&mut self) -> Result<Span, Diagnostic> {
         if self.at_punct(">>") {
             let index = self.index_ahead(0);
@@ -177,6 +176,49 @@ impl Parser {
     pub(crate) fn describe_here(&self) -> String {
         describe(self.peek())
     }
+
+    /// Runs `parse`, undoing every cursor and token change if it fails.
+    ///
+    /// Used to decide whether `name<...>(` is a generic call or an ordinary
+    /// comparison. The token vector is copied because a failed attempt may
+    /// have split a `>>` token; restoring the copy puts it back exactly.
+    pub(crate) fn try_parse<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> Result<T, Diagnostic>,
+    ) -> Option<T> {
+        let checkpoint = self.checkpoint();
+        match parse(self) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                self.restore(checkpoint);
+                None
+            }
+        }
+    }
+
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            tokens: self.tokens.clone(),
+            pos: self.pos,
+            last: self.last,
+            angle_depth: self.angle_depth,
+        }
+    }
+
+    fn restore(&mut self, checkpoint: Checkpoint) {
+        self.tokens = checkpoint.tokens;
+        self.pos = checkpoint.pos;
+        self.last = checkpoint.last;
+        self.angle_depth = checkpoint.angle_depth;
+    }
+}
+
+/// Cursor state saved before a speculative parse.
+struct Checkpoint {
+    tokens: Vec<Token>,
+    pos: usize,
+    last: Span,
+    angle_depth: usize,
 }
 
 fn describe(token: &Token) -> String {

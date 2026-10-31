@@ -50,8 +50,9 @@
 use crate::ast::{
     ArrayDeclarator, ArrayLength, AssignOp, BinaryOp, BuiltinType, DeclSpecs, Declaration,
     Declarator, DerivedDeclarator, Designator, EnumSpec, Expr, FunctionDecl, FunctionDeclarator,
-    Initializer, InitializerKind, Item, MemberDecl, MemberOp, ParamDecl, PostfixOp, Qualifier,
-    RecordKind, RecordSpec, StorageClass, TranslationUnit, TypeName, TypeSpecifier, UnaryOp,
+    GenericArg, GenericArgKind, GenericParam, GenericParamKind, GenericSpec, Initializer,
+    InitializerKind, Item, MemberDecl, MemberOp, ParamDecl, PostfixOp, Qualifier, RecordKind,
+    RecordSpec, StorageClass, TranslationUnit, TypeName, TypeSpecifier, UnaryOp,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -196,6 +197,7 @@ fn specifier_text(specifier: &TypeSpecifier) -> String {
     match specifier {
         TypeSpecifier::Builtin(builtin) => builtin_text(*builtin).to_string(),
         TypeSpecifier::TypedefName(name) => name.text.clone(),
+        TypeSpecifier::Generic(generic) => generic_spec_text(generic),
         TypeSpecifier::Record(record) => record_text(record),
         TypeSpecifier::Enum(enumeration) => enum_text(enumeration),
         TypeSpecifier::Atomic(type_name) => format!("_Atomic({})", type_name_text(type_name)),
@@ -203,6 +205,40 @@ fn specifier_text(specifier: &TypeSpecifier) -> String {
         // exported; refusing to print it keeps the output honest.
         TypeSpecifier::SelfType => UNSUPPORTED.to_string(),
     }
+}
+
+fn generic_spec_text(generic: &GenericSpec) -> String {
+    format!("{}{}", generic.name.text, generic_args_text(&generic.args))
+}
+
+fn generic_params_text(params: &[GenericParam]) -> String {
+    if params.is_empty() {
+        return String::new();
+    }
+    let params = params
+        .iter()
+        .map(|param| match param.kind {
+            GenericParamKind::Type => param.name.text.clone(),
+            GenericParamKind::Const => format!("const {}", param.name.text),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("<{params}>")
+}
+
+fn generic_args_text(args: &[GenericArg]) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+    let args = args
+        .iter()
+        .map(|arg| match &arg.kind {
+            GenericArgKind::Type(type_name) => type_name_text(type_name),
+            GenericArgKind::Const(value) => expr_text(value),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("<{args}>")
 }
 
 fn builtin_text(builtin: BuiltinType) -> &'static str {
@@ -233,10 +269,11 @@ fn record_text(record: &RecordSpec) -> String {
         Some(tag) => format!(" {}", tag.text),
         None => String::new(),
     };
+    let generics = generic_params_text(&record.generics);
     let Some(members) = &record.members else {
-        return format!("{keyword}{tag}");
+        return format!("{keyword}{tag}{generics}");
     };
-    let mut text = format!("{keyword}{tag} {{");
+    let mut text = format!("{keyword}{tag}{generics} {{");
     for member in members {
         text.push('\n');
         text.push_str(&indented(&member_text(member)));
@@ -350,7 +387,11 @@ fn function_text(function: &FunctionDeclarator) -> String {
     if function.variadic {
         params.push("...".to_string());
     }
-    format!("({})", params.join(", "))
+    format!(
+        "{}({})",
+        generic_params_text(&function.generics),
+        params.join(", ")
+    )
 }
 
 fn parameter_text(param: &ParamDecl) -> String {
@@ -441,9 +482,18 @@ fn expr_text(expression: &Expr) -> String {
         Expr::Comma { left, right, .. } => {
             format!("({}, {})", expr_text(left), expr_text(right))
         }
-        Expr::Call { callee, args, .. } => {
+        Expr::Call {
+            callee,
+            type_args,
+            args,
+            ..
+        } => {
             let args = args.iter().map(expr_text).collect::<Vec<_>>().join(", ");
-            format!("{}({args})", expr_text(callee))
+            format!(
+                "{}{}({args})",
+                expr_text(callee),
+                generic_args_text(type_args)
+            )
         }
         Expr::Index { array, index, .. } => {
             format!("{}[{}]", expr_text(array), expr_text(index))

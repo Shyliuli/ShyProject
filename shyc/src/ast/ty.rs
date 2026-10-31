@@ -69,6 +69,8 @@ pub enum TypeSpecifier {
     /// An identifier used as a type name. This may name a typedef, or in ShyC
     /// also a struct, union, or enum tag (`Counter c;`). Resolution is later.
     TypedefName(Name),
+    /// A generic type use such as `Vec<int>`, with its arguments spelled out.
+    Generic(GenericSpec),
     /// `struct ...` or `union ...`, with an optional definition.
     Record(RecordSpec),
     /// `enum ...`, with an optional definition.
@@ -80,6 +82,46 @@ pub enum TypeSpecifier {
     Atomic(TypeName),
     /// Shy's `self` type, valid only inside an `impl` block.
     SelfType,
+}
+
+/// What kind of generic parameter a name introduces.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GenericParamKind {
+    /// A type parameter, written `T`.
+    Type,
+    /// A compile-time integer parameter, written `const N`.
+    Const,
+}
+
+/// One generic parameter in a declaration, for example `T` or `const N`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenericParam {
+    pub span: Span,
+    pub name: Name,
+    pub kind: GenericParamKind,
+}
+
+/// One generic argument at a use site or call site.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenericArg {
+    pub span: Span,
+    pub kind: GenericArgKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GenericArgKind {
+    /// A type argument, for example `int` or `Vec<T>`.
+    Type(TypeName),
+    /// A compile-time value argument, for example `4` or `N + 1`.
+    Const(Expr),
+}
+
+/// A generic type use such as `Vec<int>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenericSpec {
+    pub span: Span,
+    pub name: Name,
+    pub args: Vec<GenericArg>,
 }
 
 /// The specifiers in front of one declaration.
@@ -122,6 +164,8 @@ pub struct RecordSpec {
     pub span: Span,
     pub kind: RecordKind,
     pub tag: Option<Name>,
+    /// Generic parameters of a record definition (`Vec<T>`), empty if none.
+    pub generics: Vec<GenericParam>,
     pub members: Option<Vec<MemberDecl>>,
 }
 
@@ -253,6 +297,8 @@ pub enum ArrayLength {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FunctionDeclarator {
     pub span: Span,
+    /// Generic parameters written between the name and `(`, as in `fn f<T>(...)`.
+    pub generics: Vec<GenericParam>,
     pub params: Vec<ParamDecl>,
     pub variadic: bool,
 }

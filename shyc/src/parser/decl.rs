@@ -3,13 +3,14 @@
 use std::collections::HashSet;
 
 use crate::ast::{
-    DeclSpecs, Declaration, Declarator, DerivedDeclarator, FunctionDecl, ImplBlock, InitDeclarator,
-    Item, StorageClass,
+    BuiltinType, DeclSpecs, Declaration, Declarator, DerivedDeclarator, FunctionDecl, ImplBlock,
+    InitDeclarator, Item, StorageClass, TypeName, TypeSpecifier,
 };
 use crate::lexer::{Token, TokenKind};
-use crate::source::Diagnostic;
+use crate::source::{Diagnostic, Span};
 
 use super::Parser;
+use super::cursor::is_keyword;
 
 /// File-scope type names collected before the real parse.
 pub(crate) struct GlobalNames {
@@ -40,6 +41,9 @@ impl Parser {
     pub(crate) fn item(&mut self) -> Result<Item, Diagnostic> {
         if self.at_ident("impl") {
             return Ok(Item::Impl(self.impl_block()?));
+        }
+        if self.at_fn_declaration() {
+            return self.fn_item();
         }
         if self.at_ident("asm") || self.at_punct("asm!") {
             return Err(Diagnostic::new(
@@ -195,6 +199,112 @@ impl Parser {
         })
     }
 
+    // -- Shy `fn` declarations --------------------------------------------
+
+    /// Whether the cursor starts `fn name(...)` or `fn name<...>(...)`.
+    ///
+    /// `fn` is a soft keyword: `int fn;` and calls to a function named `fn`
+    /// remain ordinary C.
+    pub(crate) fn at_fn_declaration(&self) -> bool {
+        self.at_ident("fn")
+            && matches!(&self.peek_ahead(1).kind, TokenKind::Ident(name) if !is_keyword(name))
+            && (self.at_punct_ahead(2, "(") || self.at_punct_ahead(2, "<"))
+    }
+
+    /// Parses `fn name [<generics>] (params) [-> return-type]` and leaves the
+    /// generic-parameter scope open for the caller's body or prototype.
+    fn fn_signature(&mut self) -> Result<(Span, DeclSpecs, Declarator), Diagnostic> {
+        let start = self.bump().span;
+        self.push_scope();
+        let name = self.expect_ident()?;
+        let generics = if self.at_punct("<") {
+            self.generic_params()?
+        } else {
+            Vec::new()
+        };
+        let mut function = self.parameter_list()?;
+        function.span = name.span.join(self.last_span());
+        function.generics = generics;
+
+        let (specs, return_derived) = if self.eat_punct("->") {
+            let TypeName {
+                specs, declarator, ..
+            } = self.type_name()?;
+            (
+                specs,
+                declarator
+                    .map(|declarator| declarator.derived)
+                    .unwrap_or_default(),
+            )
+        } else {
+            (
+                DeclSpecs {
+                    span: name.span,
+                    storage: None,
+                    is_inline: false,
+                    is_noreturn: false,
+                    qualifiers: Vec::new(),
+                    type_specs: vec![TypeSpecifier::Builtin(BuiltinType::Void)],
+                },
+                Vec::new(),
+            )
+        };
+
+        let mut derived = vec![DerivedDeclarator::Function(function)];
+        derived.extend(return_derived);
+        let declarator = Declarator {
+            span: start.join(self.last_span()),
+            name: Some(name),
+            derived,
+        };
+        Ok((start, specs, declarator))
+    }
+
+    fn fn_item(&mut self) -> Result<Item, Diagnostic> {
+        let (start, specs, declarator) = self.fn_signature()?;
+        let declarator_span = declarator.span;
+        let item = if self.at_punct("{") {
+            let body = self.block_with_params(Some(&declarator))?;
+            Item::Function(FunctionDecl {
+                span: start.join(body.span),
+                specs,
+                declarator,
+                body,
+            })
+        } else {
+            let semicolon = self.expect_punct(";")?;
+            Item::Decl(Declaration {
+                span: start.join(semicolon),
+                specs,
+                declarators: vec![InitDeclarator {
+                    span: declarator_span,
+                    declarator,
+                    init: None,
+                }],
+            })
+        };
+        self.pop_scope();
+        Ok(item)
+    }
+
+    fn fn_method(&mut self) -> Result<FunctionDecl, Diagnostic> {
+        let (start, specs, declarator) = self.fn_signature()?;
+        if !self.at_punct("{") {
+            return Err(Diagnostic::new(
+                self.here(),
+                "method declarations inside impl must have a body",
+            ));
+        }
+        let body = self.block_with_params(Some(&declarator))?;
+        self.pop_scope();
+        Ok(FunctionDecl {
+            span: start.join(body.span),
+            specs,
+            declarator,
+            body,
+        })
+    }
+
     fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {
         let start = self.bump().span;
         let self_type = self.type_name()?;
@@ -206,6 +316,10 @@ impl Parser {
         while !self.at_punct("}") {
             if self.at_eof() {
                 return Err(Diagnostic::new(self.here(), "unterminated impl block"));
+            }
+            if self.at_fn_declaration() {
+                methods.push(self.fn_method()?);
+                continue;
             }
             let specs = self.decl_specs()?;
             if self.at_punct(";") {
@@ -279,6 +393,9 @@ impl Parser {
             self.expect_punct("{")?;
             return self.skip_braced_body();
         }
+        if self.at_fn_declaration() {
+            return self.prescan_fn();
+        }
 
         let specs = self.decl_specs()?;
         if self.eat_punct(";") {
@@ -307,6 +424,24 @@ impl Parser {
         Ok(())
     }
 
+    /// Skips a `fn` item during prescan. The signature goes through the real
+    /// parser so generic names and return types are consumed the same way;
+    /// only the body is skipped.
+    fn prescan_fn(&mut self) -> Result<(), Diagnostic> {
+        let parsed = (|| {
+            self.fn_signature()?;
+            if self.at_punct("{") {
+                self.bump();
+                self.skip_braced_body()?;
+            } else {
+                self.expect_punct(";")?;
+            }
+            Ok(())
+        })();
+        self.pop_scope();
+        parsed
+    }
+
     /// Skips the rest of a declaration, including initializer braces, up to and
     /// including its `;`.
     fn skip_to_semicolon(&mut self) {
@@ -328,6 +463,10 @@ impl Parser {
                 self.bump();
                 if self.skip_balanced_group("[", "]").is_err() {
                     return;
+                }
+            } else if self.at_punct("<") {
+                if !self.skip_angle_group() {
+                    self.bump();
                 }
             } else {
                 self.bump();
@@ -355,6 +494,7 @@ impl Parser {
                 || self.at_ident("union")
                 || self.at_ident("enum")
                 || self.at_ident("impl")
+                || self.at_fn_declaration()
             {
                 return;
             }
@@ -362,6 +502,12 @@ impl Parser {
                 self.bump();
                 if self.skip_balanced_group("(", ")").is_err() {
                     return;
+                }
+                continue;
+            }
+            if self.at_punct("<") {
+                if !self.skip_angle_group() {
+                    self.bump();
                 }
                 continue;
             }
@@ -373,6 +519,39 @@ impl Parser {
 
     pub(crate) fn skip_braced_body(&mut self) -> Result<(), Diagnostic> {
         self.skip_balanced_group("{", "}")
+    }
+
+    /// Skips one `<...>` group while prescanning, if it is really a group.
+    ///
+    /// A `<` in an initializer is an ordinary comparison. The attempt is
+    /// speculative and rolls back when the group does not close before the end
+    /// of the declaration, so ordinary C prescan is unaffected.
+    fn skip_angle_group(&mut self) -> bool {
+        self.try_parse(|parser| {
+            parser.expect_punct("<")?;
+            let mut depth = 1usize;
+            while depth > 0 {
+                if parser.at_eof() {
+                    return Err(Diagnostic::new(parser.here(), "unbalanced '<'"));
+                }
+                if parser.at_punct("<") {
+                    depth += 1;
+                    parser.bump();
+                } else if parser.at_punct(">>") {
+                    parser.close_angle()?;
+                    depth -= 1;
+                } else if parser.at_punct(">") {
+                    depth -= 1;
+                    parser.bump();
+                } else if parser.at_punct(";") || parser.at_punct("{") || parser.at_punct("}") {
+                    return Err(Diagnostic::new(parser.here(), "not an angle group"));
+                } else {
+                    parser.bump();
+                }
+            }
+            Ok(())
+        })
+        .is_some()
     }
 
     /// Skips to the matching `close`, assuming `open` was already consumed.

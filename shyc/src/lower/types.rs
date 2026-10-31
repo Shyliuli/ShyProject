@@ -91,6 +91,12 @@ impl Lowerer {
                         Diagnostic::new(name.span, format!("unknown type name '{}'", name.text))
                     })?);
                 }
+                ast::TypeSpecifier::Generic(generic) => {
+                    return Err(Diagnostic::new(
+                        generic.span,
+                        "generic type arguments are not supported by lowering yet",
+                    ));
+                }
                 ast::TypeSpecifier::Record(record) => {
                     if base.is_some() {
                         return Err(Diagnostic::new(
@@ -283,12 +289,32 @@ impl Lowerer {
         base_qualifiers: Qualifiers,
         declarator: &ast::Declarator,
     ) -> Result<ResolvedSpecsWithName, Diagnostic> {
+        self.reject_generic_declarator(declarator)?;
         let (ty, qualifiers) = self.apply_derived(base, base_qualifiers, &declarator.derived)?;
         Ok(ResolvedSpecsWithName {
             ty,
             qualifiers,
             name: declarator.name.as_ref().map(|name| name.text.clone()),
         })
+    }
+
+    /// Rejects a generic function before its return type is resolved, so the
+    /// diagnostic names generics instead of the unknown type parameter.
+    pub(super) fn reject_generic_declarator(
+        &self,
+        declarator: &ast::Declarator,
+    ) -> Result<(), Diagnostic> {
+        for derived in &declarator.derived {
+            if let ast::DerivedDeclarator::Function(function) = derived
+                && let Some(parameter) = function.generics.first()
+            {
+                return Err(Diagnostic::new(
+                    parameter.span,
+                    "generic functions are not supported by lowering yet",
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn apply_derived(
@@ -315,6 +341,12 @@ impl Lowerer {
                     })?;
                 }
                 ast::DerivedDeclarator::Function(function) => {
+                    if !function.generics.is_empty() {
+                        return Err(Diagnostic::new(
+                            function.generics[0].span,
+                            "generic functions are not supported by lowering yet",
+                        ));
+                    }
                     if self.types.is_array(ty) || self.types.is_function(ty) {
                         return Err(Diagnostic::new(
                             function.span,
@@ -423,6 +455,12 @@ impl Lowerer {
     // -----------------------------------------------------------------------
 
     fn resolve_record(&mut self, spec: &ast::RecordSpec) -> Result<TypeId, Diagnostic> {
+        if !spec.generics.is_empty() {
+            return Err(Diagnostic::new(
+                spec.generics[0].span,
+                "generic struct or union declarations are not supported by lowering yet",
+            ));
+        }
         let kind = match spec.kind {
             ast::RecordKind::Struct => RecordKind::Struct,
             ast::RecordKind::Union => RecordKind::Union,

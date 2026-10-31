@@ -50,19 +50,22 @@ use crate::source::{Diagnostic, FileId, Span};
 /// skips them. Exactly one [`crate::lexer::TokenKind::Eof`] is expected at the end.
 pub fn parse(tokens: &[Token]) -> Result<ast::TranslationUnit, Diagnostic> {
     let global = decl::prescan(tokens);
-    let mut parser = Parser::new(tokens, false);
+    let mut parser = Parser::new(tokens.to_vec(), false);
     parser.scopes[0].typedefs = global.typedefs;
     parser.scopes[0].tags = global.tags;
     parser.translation_unit()
 }
 
 /// Parser state shared by every grammar file.
-pub(crate) struct Parser<'a> {
-    tokens: &'a [Token],
+pub(crate) struct Parser {
+    tokens: Vec<Token>,
     /// Index of the next token; may point at a `Newline` the cursor skips.
     pos: usize,
     /// Span of the most recently consumed token.
     last: Span,
+    /// Nesting depth of a generic argument list being parsed. Inside one, `>`
+    /// and `>=` are closers, not comparison operators.
+    angle_depth: usize,
     /// Name scopes, innermost last. `scopes[0]` is file scope.
     pub(crate) scopes: Vec<Scope>,
     /// Nesting depth of `impl` bodies; `self` is a type only inside one.
@@ -80,8 +83,8 @@ pub(crate) struct Scope {
     pub(crate) tags: HashSet<String>,
 }
 
-impl<'a> Parser<'a> {
-    fn new(tokens: &'a [Token], prescan: bool) -> Self {
+impl Parser {
+    fn new(tokens: Vec<Token>, prescan: bool) -> Self {
         let last = tokens.first().map_or(
             Span {
                 file: FileId(0),
@@ -94,6 +97,7 @@ impl<'a> Parser<'a> {
             tokens,
             pos: 0,
             last,
+            angle_depth: 0,
             scopes: vec![Scope::default()],
             impl_depth: 0,
             prescan,

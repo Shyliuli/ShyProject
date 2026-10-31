@@ -14,7 +14,7 @@
 use crate::ast::Name;
 use crate::ast::decl::Initializer;
 use crate::ast::stmt::Block;
-use crate::ast::ty::TypeName;
+use crate::ast::ty::{GenericArg, TypeName};
 use crate::source::Span;
 
 // ---------------------------------------------------------------------------
@@ -203,9 +203,11 @@ pub enum Expr {
         right: Box<Expr>,
         span: Span,
     },
-    /// Function or method call: `f(a, b)`.
+    /// Function or method call: `f(a, b)` or a generic call `f<int>(a)`.
     Call {
         callee: Box<Expr>,
+        /// Type and `const` arguments written before the call parentheses.
+        type_args: Vec<GenericArg>,
         args: Vec<Expr>,
         span: Span,
     },

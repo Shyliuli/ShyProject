@@ -25,6 +25,9 @@ impl Lowerer {
     }
 
     fn collect_declaration(&mut self, declaration: &ast::Declaration) -> Result<(), Diagnostic> {
+        for init in &declaration.declarators {
+            self.reject_generic_declarator(&init.declarator)?;
+        }
         let ResolvedSpecs { ty, qualifiers } = self.resolve_specs(&declaration.specs)?;
         let storage = declaration.specs.storage;
         if storage == Some(ast::StorageClass::Typedef) {
@@ -92,6 +95,7 @@ impl Lowerer {
         declaration: &ast::FunctionDecl,
         impl_context: Option<(TypeId, String)>,
     ) -> Result<(), Diagnostic> {
+        self.reject_generic_declarator(&declaration.declarator)?;
         let ResolvedSpecs { ty, qualifiers } = self.resolve_specs(&declaration.specs)?;
         let resolved = self.resolve_declarator(ty, qualifiers, &declaration.declarator)?;
         let Some(name) = resolved.name else {

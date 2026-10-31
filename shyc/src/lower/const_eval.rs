@@ -60,6 +60,14 @@ impl Lowerer {
     }
 
     pub(super) fn eval_const(&mut self, expr: &ast::Expr) -> Result<ConstValue, Diagnostic> {
+        if let ast::Expr::Call { type_args, .. } = expr
+            && let Some(argument) = type_args.first()
+        {
+            return Err(Diagnostic::new(
+                argument.span,
+                "generic calls are not supported by lowering yet",
+            ));
+        }
         match expr {
             ast::Expr::Number(literal) => match self.number_literal(literal)? {
                 NumericLiteral::Integer { bits, ty } => Ok(ConstValue::int(ty, bits)),

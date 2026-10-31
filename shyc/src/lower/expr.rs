@@ -261,7 +261,11 @@ impl FnLower<'_> {
                 ));
             }
             let bits = self.l.layout.pointer_bytes * 8;
-            let ir_ty = if bits == 64 { ir::Type::I64 } else { ir::Type::I32 };
+            let ir_ty = if bits == 64 {
+                ir::Type::I64
+            } else {
+                ir::Type::I32
+            };
             let integer = self.emit_value(ir::InstKind::Cast {
                 op: ir::CastOp::PtrToInt,
                 value: operand,
@@ -592,7 +596,20 @@ impl FnLower<'_> {
                         kind: ExprKind::Value(operand),
                     })
             }
-            ast::Expr::Call { callee, args, span } => self.lower_call(callee, args, *span),
+            ast::Expr::Call {
+                callee,
+                type_args,
+                args,
+                span,
+            } => {
+                if !type_args.is_empty() {
+                    return Err(Diagnostic::new(
+                        type_args[0].span,
+                        "generic calls are not supported by lowering yet",
+                    ));
+                }
+                self.lower_call(callee, args, *span)
+            }
             ast::Expr::Index { array, index, span } => self.lower_index(array, index, *span),
             ast::Expr::Member {
                 object,

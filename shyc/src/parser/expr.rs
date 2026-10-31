@@ -6,7 +6,7 @@
 //! semantic work.
 
 use crate::ast::{
-    AssignOp, BinaryOp, CharLit, Expr, MemberOp, Name, NumberLit, PostfixOp, StringLit,
+    AssignOp, BinaryOp, CharLit, Expr, GenericArg, MemberOp, Name, NumberLit, PostfixOp, StringLit,
     StringLitGroup, UnaryOp,
 };
 use crate::lexer::TokenKind;
@@ -114,6 +114,10 @@ impl Parser {
         let TokenKind::Punct(punct) = &self.peek().kind else {
             return None;
         };
+        // Inside `<...>`, `>` closes the argument list instead of comparing.
+        if self.angle_depth > 0 && matches!(punct.as_str(), ">" | ">=" | ">>") {
+            return None;
+        }
         Some(match punct.as_str() {
             "||" => (1, BinaryOp::LogicalOr),
             "&&" => (2, BinaryOp::LogicalAnd),
@@ -297,21 +301,27 @@ impl Parser {
                     index: Box::new(index),
                     span,
                 };
-            } else if self.at_punct("(") {
-                self.bump();
-                let mut args = Vec::new();
-                if !self.at_punct(")") {
-                    loop {
-                        args.push(self.assignment()?);
-                        if !self.eat_punct(",") {
-                            break;
-                        }
-                    }
-                }
-                let close = self.expect_punct(")")?;
+            } else if self.at_punct("<") {
+                // `f<int>(x)` is a generic call, but `a < b > (c)` is an
+                // ordinary comparison. Parse speculatively and fall back to
+                // the expression grammar when the shape does not fit.
+                let Some(type_args) = self.try_call_type_args() else {
+                    break;
+                };
+                let (args, close) = self.call_arguments()?;
                 let span = expr.span().join(close);
                 expr = Expr::Call {
                     callee: Box::new(expr),
+                    type_args,
+                    args,
+                    span,
+                };
+            } else if self.at_punct("(") {
+                let (args, close) = self.call_arguments()?;
+                let span = expr.span().join(close);
+                expr = Expr::Call {
+                    callee: Box::new(expr),
+                    type_args: Vec::new(),
                     args,
                     span,
                 };
@@ -349,6 +359,34 @@ impl Parser {
             }
         }
         Ok(expr)
+    }
+
+    /// Speculatively parses `<...>` only when a call's `(` follows it.
+    fn try_call_type_args(&mut self) -> Option<Vec<GenericArg>> {
+        self.try_parse(|parser| {
+            let type_args = parser.generic_args()?;
+            if !parser.at_punct("(") {
+                return Err(Diagnostic::new(parser.here(), "not a generic call"));
+            }
+            Ok(type_args)
+        })
+    }
+
+    /// Parses `( expression, ... )` after a callee and returns its arguments
+    /// plus the closing parenthesis span.
+    fn call_arguments(&mut self) -> Result<(Vec<Expr>, Span), Diagnostic> {
+        self.expect_punct("(")?;
+        let mut args = Vec::new();
+        if !self.at_punct(")") {
+            loop {
+                args.push(self.assignment()?);
+                if !self.eat_punct(",") {
+                    break;
+                }
+            }
+        }
+        let close = self.expect_punct(")")?;
+        Ok((args, close))
     }
 
     fn primary(&mut self) -> Result<Expr, Diagnostic> {

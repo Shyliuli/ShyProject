@@ -7,8 +7,9 @@
 
 use crate::ast::{
     ArrayDeclarator, ArrayLength, BuiltinType, DeclSpecs, Declarator, DerivedDeclarator, EnumSpec,
-    Enumerator, FunctionDeclarator, MemberDecl, MemberDeclarator, ParamDecl, PointerDeclarator,
-    Qualifier, RecordKind, RecordSpec, StorageClass, TypeName, TypeSpecifier,
+    Enumerator, FunctionDeclarator, GenericArg, GenericArgKind, GenericParam, GenericParamKind,
+    GenericSpec, MemberDecl, MemberDeclarator, ParamDecl, PointerDeclarator, Qualifier, RecordKind,
+    RecordSpec, StorageClass, TypeName, TypeSpecifier,
 };
 use crate::lexer::TokenKind;
 use crate::source::Diagnostic;
@@ -122,7 +123,17 @@ impl Parser {
                         break;
                     }
                     let name = self.expect_ident()?;
-                    specs.type_specs.push(TypeSpecifier::TypedefName(name));
+                    if self.at_punct("<") {
+                        let args = self.generic_args()?;
+                        let span = name.span.join(self.last_span());
+                        specs.type_specs.push(TypeSpecifier::Generic(GenericSpec {
+                            span,
+                            name,
+                            args,
+                        }));
+                    } else {
+                        specs.type_specs.push(TypeSpecifier::TypedefName(name));
+                    }
                 }
             }
         }
@@ -201,23 +212,42 @@ impl Parser {
             self.declare_tag(&tag.text);
         }
 
-        let members = if self.eat_punct("{") {
-            if self.prescan {
-                self.skip_braced_body()?;
-                None
+        // `struct Vec<T>` puts `T` in scope for the member declarations. The
+        // scope is only for the definition; a later `Vec<int>` resolves its
+        // arguments at the use site.
+        let generic_scope = self.at_punct("<");
+        if generic_scope {
+            self.push_scope();
+        }
+        let parsed = (|| {
+            let generics = if generic_scope {
+                self.generic_params()?
             } else {
-                let members = self.record_members()?;
-                self.expect_punct("}")?;
-                Some(members)
-            }
-        } else {
-            None
-        };
-
+                Vec::new()
+            };
+            let members = if self.eat_punct("{") {
+                if self.prescan {
+                    self.skip_braced_body()?;
+                    None
+                } else {
+                    let members = self.record_members()?;
+                    self.expect_punct("}")?;
+                    Some(members)
+                }
+            } else {
+                None
+            };
+            Ok((generics, members))
+        })();
+        if generic_scope {
+            self.pop_scope();
+        }
+        let (generics, members) = parsed?;
         Ok(RecordSpec {
             span: self.finish(start),
             kind,
             tag,
+            generics,
             members,
         })
     }
@@ -479,7 +509,7 @@ impl Parser {
         })
     }
 
-    fn parameter_list(&mut self) -> Result<FunctionDeclarator, Diagnostic> {
+    pub(crate) fn parameter_list(&mut self) -> Result<FunctionDeclarator, Diagnostic> {
         let start = self.expect_punct("(")?;
         let mut params = Vec::new();
         let mut variadic = false;
@@ -538,9 +568,78 @@ impl Parser {
         let close = self.expect_punct(")")?;
         Ok(FunctionDeclarator {
             span: start.join(close),
+            generics: Vec::new(),
             params,
             variadic,
         })
+    }
+
+    // -- generic parameters and arguments --------------------------------
+
+    /// Parses `<T, const N>` and declares the names in the current scope.
+    ///
+    /// The caller opens the scope that should contain the parameters.
+    pub(crate) fn generic_params(&mut self) -> Result<Vec<GenericParam>, Diagnostic> {
+        self.expect_punct("<")?;
+        let mut params = Vec::new();
+        loop {
+            let start = self.here();
+            let kind = if self.eat_ident("const") {
+                GenericParamKind::Const
+            } else {
+                GenericParamKind::Type
+            };
+            let name = self.expect_ident()?;
+            match kind {
+                GenericParamKind::Type => self.declare_typedef(&name.text),
+                GenericParamKind::Const => self.declare_value(&name.text),
+            }
+            params.push(GenericParam {
+                span: start.join(name.span),
+                name,
+                kind,
+            });
+            if !self.eat_punct(",") {
+                break;
+            }
+        }
+        self.close_angle()?;
+        Ok(params)
+    }
+
+    /// Parses `<int, 4>` at a use site.
+    ///
+    /// The argument may be a type name or a constant expression. A name in
+    /// scope as a value (including a `const` generic parameter) is a value
+    /// argument; everything that starts a type name is a type argument.
+    pub(crate) fn generic_args(&mut self) -> Result<Vec<GenericArg>, Diagnostic> {
+        self.expect_punct("<")?;
+        self.angle_depth += 1;
+        let parsed = (|| {
+            let mut args = Vec::new();
+            loop {
+                let kind = if self.starts_type_name(0) {
+                    let type_name = self.type_name()?;
+                    GenericArgKind::Type(type_name)
+                } else {
+                    let value = self.assignment()?;
+                    GenericArgKind::Const(value)
+                };
+                let span = match &kind {
+                    GenericArgKind::Type(type_name) => type_name.span,
+                    GenericArgKind::Const(value) => value.span(),
+                };
+                args.push(GenericArg { span, kind });
+                if !self.eat_punct(",") {
+                    break;
+                }
+            }
+            Ok(args)
+        })();
+        self.angle_depth -= 1;
+        let args = parsed?;
+        self.close_angle()?;
+        Ok(args)
     }
 
     /// Parses a type name: cast types, `sizeof`, `_Alignof`, compound
