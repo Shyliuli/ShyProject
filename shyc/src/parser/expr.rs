@@ -70,9 +70,31 @@ impl Parser {
     }
 
     /// Conditional expression: `condition ? then : else`.
+    ///
+    /// `?` is also the postfix propagation operator. The postfix loop leaves a
+    /// ternary `?` alone when a middle expression and `:` follow it; if it did
+    /// consume one anyway, an exact `Try` condition is re-associated back into
+    /// an ordinary C conditional here.
     pub(crate) fn conditional(&mut self) -> Result<Expr, Diagnostic> {
         let condition = self.binary(1)?;
         if !self.eat_punct("?") {
+            if let Expr::Try { value, span } = &condition
+                && self.at_expression_start(0)
+                && let Some(then_expr) = self.try_parse(|parser| {
+                    let then_expr = parser.expression()?;
+                    parser.expect_punct(":")?;
+                    Ok(then_expr)
+                })
+            {
+                let else_expr = self.conditional()?;
+                let span = span.join(else_expr.span());
+                return Ok(Expr::Conditional {
+                    condition: value.clone(),
+                    then_expr: Box::new(then_expr),
+                    else_expr: Box::new(else_expr),
+                    span,
+                });
+            }
             return Ok(condition);
         }
         // The middle operand is a full expression; the else operand is
@@ -290,7 +312,21 @@ impl Parser {
     }
 
     fn postfix_suffixes(&mut self, mut expr: Expr) -> Result<Expr, Diagnostic> {
+        // A `?` binds to the expression it follows. Do not let the suffixes
+        // that would re-read the result as a call, an increment, or another
+        // ternary be stolen immediately after it: `(f()?)(x)` opts into a
+        // call, while `f()?(x)` stays a parse error.
+        let mut fresh_try = false;
         loop {
+            if fresh_try
+                && (self.at_punct("(")
+                    || self.at_punct("<")
+                    || self.at_punct("++")
+                    || self.at_punct("--")
+                    || self.at_punct("?"))
+            {
+                break;
+            }
             if self.at_punct("[") {
                 self.bump();
                 let index = self.expression()?;
@@ -301,6 +337,7 @@ impl Parser {
                     index: Box::new(index),
                     span,
                 };
+                fresh_try = false;
             } else if self.at_punct("<") {
                 // `f<int>(x)` is a generic call, but `a < b > (c)` is an
                 // ordinary comparison. Parse speculatively and fall back to
@@ -316,6 +353,7 @@ impl Parser {
                     args,
                     span,
                 };
+                fresh_try = false;
             } else if self.at_punct("(") {
                 let (args, close) = self.call_arguments()?;
                 let span = expr.span().join(close);
@@ -325,6 +363,7 @@ impl Parser {
                     args,
                     span,
                 };
+                fresh_try = false;
             } else if self.at_punct(".") || self.at_punct("->") {
                 let op = if self.at_punct(".") {
                     self.bump();
@@ -341,6 +380,7 @@ impl Parser {
                     op,
                     span,
                 };
+                fresh_try = false;
             } else if self.at_punct("++") || self.at_punct("--") {
                 let op = if self.at_punct("++") {
                     PostfixOp::Increment
@@ -354,11 +394,45 @@ impl Parser {
                     operand: Box::new(expr),
                     span,
                 };
+                fresh_try = false;
+            } else if self.at_punct("?") {
+                // `a ? b : c` keeps its C meaning: the postfix operator only
+                // applies when no middle expression and `:` follow the `?`.
+                if self.question_starts_conditional() {
+                    break;
+                }
+                self.bump();
+                let span = expr.span().join(self.last_span());
+                expr = Expr::Try {
+                    value: Box::new(expr),
+                    span,
+                };
+                fresh_try = true;
             } else {
                 break;
             }
         }
         Ok(expr)
+    }
+
+    /// Whether the `?` at the cursor is the C conditional operator.
+    ///
+    /// The middle operand is a full expression, so a speculative parse that
+    /// reaches a matching `:` settles the question. The cursor is restored
+    /// either way; the conditional grammar then consumes the `?` itself.
+    fn question_starts_conditional(&mut self) -> bool {
+        if !self.at_expression_start(1) {
+            return false;
+        }
+        self.probe(|parser| {
+            // `probe` restores the cursor, so consuming the `?` here only lets
+            // the middle expression be parsed from the token after it.
+            parser.bump();
+            let _ = parser.expression()?;
+            parser.expect_punct(":")?;
+            Ok(())
+        })
+        .is_some()
     }
 
     /// Speculatively parses `<...>` only when a call's `(` follows it.

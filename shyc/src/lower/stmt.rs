@@ -609,7 +609,7 @@ impl FnLower<'_> {
     /// the enclosing `if` still run on the other path, where those locals are
     /// still live, so the linear "already dropped" marks must not leak past
     /// the jump.
-    fn emit_drops_on_exit(&mut self, depth: usize) {
+    pub(super) fn emit_drops_on_exit(&mut self, depth: usize) {
         let saved: Vec<bool> = self.locals.iter().map(|local| local.drop_active).collect();
         self.emit_drops_from(depth);
         for (local, active) in self.locals.iter_mut().zip(saved) {

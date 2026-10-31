@@ -590,6 +590,9 @@ fn expr_text(expression: &Expr) -> String {
         Expr::Postfix { op, operand, .. } => {
             format!("({}{})", expr_text(operand), postfix_text(*op))
         }
+        // A C header has no spelling for propagation, and it never appears in
+        // the constant expressions a header needs.
+        Expr::Try { .. } => UNSUPPORTED.to_string(),
         Expr::Binary {
             op, left, right, ..
         } => format!(

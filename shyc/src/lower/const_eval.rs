@@ -286,6 +286,10 @@ impl Lowerer {
                 let result = self.types.builtin(crate::sema::types::Builtin::UnsignedInt);
                 Ok(ConstValue::int(result, align as u64))
             }
+            ast::Expr::Try { span, .. } => Err(Diagnostic::new(
+                *span,
+                "`?` propagation is not a constant expression",
+            )),
             _ => Err(Diagnostic::new(
                 expr.span(),
                 "expression is not a constant expression",
@@ -786,6 +790,10 @@ impl Lowerer {
                 self.const_address(value)
             }
             ast::Expr::Comma { right, .. } => self.const_address(right),
+            ast::Expr::Try { span, .. } => Err(Diagnostic::new(
+                *span,
+                "`?` propagation does not have a constant address",
+            )),
             ast::Expr::Conditional {
                 condition,
                 then_expr,

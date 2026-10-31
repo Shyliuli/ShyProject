@@ -23,6 +23,38 @@ pub(super) struct ScopedVariant {
     pub payload: Option<TypeId>,
 }
 
+/// Which built-in payload enum shape a `?` operand has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TryFamily {
+    Option,
+    Result,
+}
+
+impl TryFamily {
+    pub(super) fn article(self) -> &'static str {
+        match self {
+            TryFamily::Option => "an Option",
+            TryFamily::Result => "a Result",
+        }
+    }
+}
+
+/// The structural `Option`/`Result` shape of one payload enum.
+///
+/// The shape is read from the enum's variants, not from its name: `None` plus
+/// `Some(payload)` is an Option, and `Err(error)` plus `Ok(payload)` is a
+/// Result. A generic instance such as `Option<int>` is an ordinary concrete
+/// payload enum by the time it reaches here, so both families work the same.
+#[derive(Clone, Copy)]
+pub(super) struct TryShape {
+    pub family: TryFamily,
+    /// The payload type `?` yields. `None` for a payload-free `Ok`.
+    pub success: Option<TypeId>,
+    /// The error payload stored by the failure variant, if it has one.
+    pub failure: Option<TypeId>,
+    pub failure_tag: i64,
+}
+
 impl Lowerer {
     pub(super) fn type_of(
         &mut self,
@@ -127,6 +159,18 @@ impl Lowerer {
                 }
             }
             ast::Expr::Postfix { operand, .. } => self.type_of(operand, local),
+            ast::Expr::Try { value, span } => {
+                let value_ty = self.type_of(value, local)?;
+                let shape = self.try_shape(value_ty).ok_or_else(|| {
+                    Diagnostic::new(
+                        *span,
+                        "`?` needs an Option (`None`/`Some`) or Result (`Err`/`Ok`) payload enum",
+                    )
+                })?;
+                shape.success.ok_or_else(|| {
+                    Diagnostic::new(*span, "`?` needs a success payload; this Result has none")
+                })
+            }
             ast::Expr::Binary {
                 op,
                 left,
@@ -502,6 +546,44 @@ impl Lowerer {
             ty,
             tag: variant.value,
             payload: variant.payload,
+        })
+    }
+
+    /// Read the structural `Option` or `Result` shape of a payload enum.
+    ///
+    /// Exactly two variants are required, so an unrelated enum that happens to
+    /// use one of the names is not misread as a propagation shape.
+    pub(super) fn try_shape(&self, ty: TypeId) -> Option<TryShape> {
+        if !self.types.is_payload_enum(ty) {
+            return None;
+        }
+        let info = self.types.enum_info(ty)?;
+        if info.variants.len() != 2 {
+            return None;
+        }
+        if let Some(none) = info
+            .variants
+            .iter()
+            .find(|variant| variant.name == "None" && variant.payload.is_none())
+            && let Some(some) = info
+                .variants
+                .iter()
+                .find(|variant| variant.name == "Some" && variant.payload.is_some())
+        {
+            return Some(TryShape {
+                family: TryFamily::Option,
+                success: some.payload,
+                failure: none.payload,
+                failure_tag: none.value,
+            });
+        }
+        let error = info.variants.iter().find(|variant| variant.name == "Err")?;
+        let ok = info.variants.iter().find(|variant| variant.name == "Ok")?;
+        Some(TryShape {
+            family: TryFamily::Result,
+            success: ok.payload,
+            failure: error.payload,
+            failure_tag: error.value,
         })
     }
 

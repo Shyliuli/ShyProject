@@ -600,6 +600,7 @@ impl FnLower<'_> {
                 };
                 self.lower_incdec(operand, delta, true, *span)
             }
+            ast::Expr::Try { value, span } => self.lower_try(value, *span),
             ast::Expr::Binary {
                 op,
                 left,

@@ -26,6 +26,7 @@ mod const_eval;
 mod decl;
 mod expr;
 mod generics;
+mod propagate;
 mod shyc;
 mod stmt;
 mod type_of;

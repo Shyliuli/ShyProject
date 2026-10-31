@@ -221,6 +221,43 @@ impl FnLower<'_> {
             }
         }
 
+        let payload = match payload {
+            Some(payload_ty) => {
+                let (operand, argument_ty) = self.rvalue(&args[0])?;
+                if self.l.types.is_aggregate(payload_ty) {
+                    if !self.l.types.is_compatible(payload_ty, argument_ty) {
+                        return Err(Diagnostic::new(
+                            args[0].span(),
+                            format!(
+                                "payload of variant '{}::{}' has an incompatible type",
+                                qualifier.text, variant_name.text
+                            ),
+                        ));
+                    }
+                    Some((operand, payload_ty))
+                } else {
+                    let operand =
+                        self.convert(operand, argument_ty, payload_ty, args[0].span(), false)?;
+                    Some((operand, payload_ty))
+                }
+            }
+            None => None,
+        };
+        self.build_payload_enum(ty, tag, payload, span)
+    }
+
+    /// Emit a payload enum object from an already lowered payload operand.
+    ///
+    /// The payload type must be the variant's own; constructors convert the
+    /// source value first, and propagation only reaches here when the source
+    /// and destination error payloads are compatible.
+    pub(super) fn build_payload_enum(
+        &mut self,
+        ty: TypeId,
+        tag: i64,
+        payload: Option<(ir::Operand, TypeId)>,
+        span: Span,
+    ) -> Result<ExprVal, Diagnostic> {
         let size = self.l.size_of(ty, span)?;
         let slot = self.temp_slot(ty, "");
         self.emit_statement(ir::InstKind::MemSet {
@@ -238,7 +275,7 @@ impl FnLower<'_> {
             underlying,
             Qualifiers::NONE,
         );
-        if let Some(payload_ty) = payload {
+        if let Some((operand, payload_ty)) = payload {
             let payload_offset = self
                 .l
                 .types
@@ -246,23 +283,7 @@ impl FnLower<'_> {
                 .map(|info| info.payload_offset)
                 .unwrap_or(0);
             let address = ir::Address::slot(slot).with_offset(i64::from(payload_offset));
-            let (operand, argument_ty) = self.rvalue(&args[0])?;
-            if self.l.types.is_aggregate(payload_ty) {
-                if !self.l.types.is_compatible(payload_ty, argument_ty) {
-                    return Err(Diagnostic::new(
-                        args[0].span(),
-                        format!(
-                            "payload of variant '{}::{}' has an incompatible type",
-                            qualifier.text, variant_name.text
-                        ),
-                    ));
-                }
-                self.store_value(address, operand, payload_ty, Qualifiers::NONE);
-            } else {
-                let operand =
-                    self.convert(operand, argument_ty, payload_ty, args[0].span(), false)?;
-                self.store_value(address, operand, payload_ty, Qualifiers::NONE);
-            }
+            self.store_value(address, operand, payload_ty, Qualifiers::NONE);
         }
         Ok(ExprVal {
             ty,

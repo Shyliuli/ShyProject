@@ -87,6 +87,22 @@ impl Parser {
         self.ident_here().map(str::to_string)
     }
 
+    /// Whether the token `ahead` positions from the cursor can begin an
+    /// expression. Used to tell a postfix `?` from the C conditional operator.
+    pub(crate) fn at_expression_start(&self, ahead: usize) -> bool {
+        match &self.peek_ahead(ahead).kind {
+            TokenKind::Number(_)
+            | TokenKind::CharLiteral { .. }
+            | TokenKind::StringLiteral { .. }
+            | TokenKind::Ident(_) => true,
+            TokenKind::Punct(punct) => matches!(
+                punct.as_str(),
+                "(" | "+" | "-" | "!" | "~" | "*" | "&" | "++" | "--"
+            ),
+            TokenKind::Newline | TokenKind::Eof => false,
+        }
+    }
+
     pub(crate) fn eat_punct(&mut self, punct: &str) -> bool {
         if self.at_punct(punct) {
             self.bump();
@@ -194,6 +210,19 @@ impl Parser {
                 None
             }
         }
+    }
+
+    /// Runs `parse` and always restores the cursor, whether it succeeded or
+    /// failed. The value decides a question the grammar cannot answer locally,
+    /// such as whether `?` is a ternary operator or a postfix try.
+    pub(crate) fn probe<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> Result<T, Diagnostic>,
+    ) -> Option<T> {
+        let checkpoint = self.checkpoint();
+        let value = parse(self).ok();
+        self.restore(checkpoint);
+        value
     }
 
     fn checkpoint(&self) -> Checkpoint {

@@ -184,6 +184,10 @@ pub enum Expr {
         operand: Box<Expr>,
         span: Span,
     },
+    /// Postfix propagation: `value?`. The operand is an `Option` or `Result`
+    /// payload enum; lowering returns its success payload or returns the
+    /// failure variant from the enclosing function.
+    Try { value: Box<Expr>, span: Span },
     /// Binary operation: `a + b`, `a && b`.
     Binary {
         op: BinaryOp,
@@ -274,6 +278,7 @@ impl Expr {
             | Expr::BuiltinTypeCall { span, .. }
             | Expr::Unary { span, .. }
             | Expr::Postfix { span, .. }
+            | Expr::Try { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Assignment { span, .. }
             | Expr::Conditional { span, .. }
