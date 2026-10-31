@@ -66,6 +66,10 @@ pub struct Options {
     /// Target ABI the module is lowered for. The plan is computed here, while
     /// the field layout is still known, and stored in the IR.
     pub abi: abi_plan::AbiKind,
+    /// `#![disable_nonexhaustive_switch]`: do not diagnose a `switch` on a
+    /// plain C enum that has no `default` label. Payload enums are closed and
+    /// keep their exhaustiveness check either way.
+    pub disable_nonexhaustive_switch: bool,
 }
 
 impl Default for Options {
@@ -75,6 +79,7 @@ impl Default for Options {
             layout: ir::Layout::SHY,
             startup: StartupMode::Main,
             abi: abi_plan::AbiKind::ShyV1,
+            disable_nonexhaustive_switch: false,
         }
     }
 }
@@ -241,6 +246,7 @@ pub(super) struct Lowerer {
     pub impls: HashMap<TypeId, ImplInfo>,
     pub impl_context: Option<(TypeId, String)>,
     pub current_function_name: Option<String>,
+    pub disable_nonexhaustive_switch: bool,
     pub pending: Vec<PendingFunction>,
     string_counter: u32,
     static_counter: u32,
@@ -278,6 +284,7 @@ impl Lowerer {
             impls: HashMap::new(),
             impl_context: None,
             current_function_name: None,
+            disable_nonexhaustive_switch: options.disable_nonexhaustive_switch,
             pending: Vec::new(),
             string_counter: 0,
             static_counter: 0,
@@ -675,6 +682,9 @@ pub(super) struct SwitchContext {
     pub value: ir::Operand,
     pub value_ty: TypeId,
     pub ir_ty: ir::Type,
+    /// The scrutinee's type before integer promotion. Exhaustiveness needs the
+    /// original type to tell a closed payload enum from an open C enum.
+    pub scrutinee: TypeId,
     pub terminator_block: ir::BlockId,
     pub default: Option<ir::BlockId>,
     pub cases: Vec<ir::SwitchCase>,

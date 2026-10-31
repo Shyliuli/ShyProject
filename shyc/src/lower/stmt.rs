@@ -8,7 +8,7 @@
 use super::{BreakContext, ExprKind, FnLower, LabelInfo, LoopContext, PendingGoto, SwitchContext};
 use crate::ast;
 use crate::ir;
-use crate::sema::types::TypeId;
+use crate::sema::types::{TypeId, TypeKind};
 use crate::source::{Diagnostic, Span};
 
 impl FnLower<'_> {
@@ -310,7 +310,20 @@ impl FnLower<'_> {
         body: &ast::Stmt,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        let (operand, ty) = self.rvalue(condition)?;
+        let value = self.lower_expr(condition)?;
+        let scrutinee = value.ty;
+        // A payload enum is an aggregate. Switch on its tag at offset 0; every
+        // other scrutinee keeps the ordinary integer rvalue path.
+        let (operand, ty) = if self.l.types.is_payload_enum(scrutinee) {
+            let qualifiers = value.qualifiers;
+            let address = self.object_address(value, span)?;
+            let Some(tag_ty) = self.l.types.enum_underlying(scrutinee) else {
+                return Err(Diagnostic::new(span, "payload enum has no underlying type"));
+            };
+            (self.load_value(address, tag_ty, qualifiers), tag_ty)
+        } else {
+            self.rvalue_val(value, span)?
+        };
         if !self.l.types.is_integer(ty) {
             return Err(Diagnostic::new(
                 span,
@@ -333,6 +346,7 @@ impl FnLower<'_> {
             value: operand,
             value_ty: promoted,
             ir_ty,
+            scrutinee,
             terminator_block,
             default: None,
             cases: Vec::new(),
@@ -342,6 +356,7 @@ impl FnLower<'_> {
         self.lower_stmt(body)?;
         self.breaks.pop();
         let context = self.switches.pop().expect("switch context");
+        self.check_switch_exhaustiveness(&context)?;
         if !self.terminated {
             self.jump_to(end_block);
         }
@@ -355,6 +370,57 @@ impl FnLower<'_> {
         };
         self.f.block_mut(context.terminator_block).terminator = terminator;
         self.set_current(end_block);
+        Ok(())
+    }
+
+    /// Closed payload enums need a case for every variant; ordinary C enums
+    /// are open and need a `default` unless the file attribute disables the
+    /// check. A `default` or `_` label suppresses either check.
+    fn check_switch_exhaustiveness(&self, context: &SwitchContext) -> Result<(), Diagnostic> {
+        if context.default.is_some() {
+            return Ok(());
+        }
+        if self.l.types.is_payload_enum(context.scrutinee) {
+            let Some(info) = self.l.types.enum_info(context.scrutinee) else {
+                return Ok(());
+            };
+            let missing: Vec<&str> = info
+                .variants
+                .iter()
+                .filter(|variant| {
+                    let tag = ir::Constant::int(context.ir_ty, variant.value);
+                    !context.cases.iter().any(|case| case.value == tag)
+                })
+                .map(|variant| variant.name.as_str())
+                .collect();
+            if !missing.is_empty() {
+                let names = missing
+                    .iter()
+                    .map(|name| format!("'{name}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let missing = if missing.len() == 1 {
+                    format!("is missing a case for variant {names}")
+                } else {
+                    format!("is missing cases for variants {names}")
+                };
+                return Err(Diagnostic::new(
+                    context.span,
+                    format!(
+                        "switch on a payload enum {missing}; add the missing `case` or a `default`/`_` label"
+                    ),
+                ));
+            }
+            return Ok(());
+        }
+        if matches!(self.l.types.kind(context.scrutinee), TypeKind::Enum(_))
+            && !self.l.disable_nonexhaustive_switch
+        {
+            return Err(Diagnostic::new(
+                context.span,
+                "switch on a plain C enum needs a `default` or `_` label; add one, or put `#![disable_nonexhaustive_switch]` in the main input file",
+            ));
+        }
         Ok(())
     }
 
@@ -386,7 +452,7 @@ impl FnLower<'_> {
 
     fn lower_default(&mut self, statement: &ast::Stmt, span: Span) -> Result<(), Diagnostic> {
         if self.switches.last().is_none() {
-            return Err(Diagnostic::new(span, "`default` outside a switch"));
+            return Err(Diagnostic::new(span, "`default` or `_` outside a switch"));
         }
         let block = self.f.alloc_block();
         if !self.terminated {
@@ -395,7 +461,7 @@ impl FnLower<'_> {
         self.set_current(block);
         let context = self.switches.last_mut().expect("switch context");
         if context.default.is_some() {
-            return Err(Diagnostic::new(span, "duplicate `default` label"));
+            return Err(Diagnostic::new(span, "duplicate `default`/`_` label"));
         }
         context.default = Some(block);
         self.lower_stmt(statement)

@@ -1,4 +1,5 @@
-//! Shy metadata attributes: `#![no_main]`, `#![mem(N)]`, `#![stack(N)]`.
+//! Shy metadata attributes: `#![no_main]`, `#![mem(N)]`, `#![stack(N)]`,
+//! `#![disable_nonexhaustive_switch]`.
 //!
 //! Only the main input file may contain them. The size suffixes `k`, `K`,
 //! `m`, and `M` are binary multiples, as documented in `ShyC.md`.
@@ -53,6 +54,21 @@ impl Preprocessor<'_> {
                     ));
                 }
                 self.attributes.no_main = true;
+            }
+            "disable_nonexhaustive_switch" => {
+                if inside.len() != 1 {
+                    return Err(Diagnostic::new(
+                        *span,
+                        "expected #![disable_nonexhaustive_switch]",
+                    ));
+                }
+                if self.attributes.disable_nonexhaustive_switch {
+                    return Err(Diagnostic::new(
+                        *span,
+                        "duplicate Shy #![disable_nonexhaustive_switch] attribute",
+                    ));
+                }
+                self.attributes.disable_nonexhaustive_switch = true;
             }
             "mem" | "stack" => {
                 let value = parse_size_attribute(inside, *span, name)?;

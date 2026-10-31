@@ -59,8 +59,10 @@ preprocessed unit as plain C and drops the `#![...]` attribute lines.
 Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `-O0`..`-O3`
 (`-O1` promotes slots and cleans up, `-O2` repeats that to a fixed point, and
 `-O3` adds block-local common subexpression elimination),
-`--target <triple>`. `#![no_main]`, `#![mem(...)]`, and `#![stack(...)]` are
-honoured, and the resource hints reach the linked image.
+`--target <triple>`. `#![no_main]`, `#![mem(...)]`, `#![stack(...)]`, and
+`#![disable_nonexhaustive_switch]` are honoured, and the resource hints reach
+the linked image. The switch attribute is file-level: there is no local
+attribute form yet.
 
 ## Linking
 
@@ -102,12 +104,19 @@ aggregates: the tag at offset 0 and one union of payloads at the aligned
 payload offset. The tag uses the enum's underlying type, which is `int` when no
 `enum(type)` is written. Construct with `Msg::Text(value)` or `Msg::Ping` and
 read `.tag` and `.payload.<Variant>`. A payload enum is not an integer: it does
-not take part in arithmetic, integer conversion, or `switch`, and switch
-exhaustiveness is not checked. Global payload enum initialisers are not
-supported. `--emit=c-header` prints the equivalent `struct` with a `tag`
-member and a union `payload` member. The payload union keeps abi-plan's union
-classification, so a float-only payload does not necessarily use the same
-registers as an equivalent C struct.
+not take part in arithmetic or integer conversion. `switch` is the exception:
+it loads the tag at offset 0 and compares it under C integer promotion.
+
+`default:` and its `_:` spelling are the same switch arm. A payload enum is
+closed, so a switch needs a `case Msg::Variant:` for every variant unless it
+has a `default`/`_` arm; missing variants are diagnosed by name. Plain C enums
+stay open: a switch without `default`/`_` is diagnosed, and
+`#![disable_nonexhaustive_switch]` in the main input file disables that check.
+Duplicate case values are always rejected. Global payload enum initialisers
+are not supported. `--emit=c-header` prints the equivalent `struct` with a
+`tag` member and a union `payload` member. The payload union keeps abi-plan's
+union classification, so a float-only payload does not necessarily use the
+same registers as an equivalent C struct.
 
 Floating point on the Shy target needs the runtime object linked in; build it
 once with the existing toolchain:

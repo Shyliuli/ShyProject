@@ -110,7 +110,7 @@ pub enum Stmt {
         stmt: Box<Stmt>,
         span: Span,
     },
-    /// `default: stmt`.
+    /// `default: stmt` or its `_:` spelling.
     Default { stmt: Box<Stmt>, span: Span },
     /// A named label: `name: stmt`.
     Label {

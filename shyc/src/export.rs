@@ -13,8 +13,9 @@
 //! the preprocessor's token stream: every token keeps the text the lexer gave
 //! it and a space separates all of them, so adjacent macro expansions cannot
 //! fuse into one token when the output is lexed again. Shy's metadata
-//! attributes (`#![no_main]`, `#![mem]`, `#![stack]`) belong to the Shy front
-//! end, not to C, and are never written here.
+//! attributes (`#![no_main]`, `#![mem]`, `#![stack]`,
+//! `#![disable_nonexhaustive_switch]`) belong to the Shy front end, not to C,
+//! and are never written here.
 //!
 //! The scope is ordinary C. ShyC extensions have no C spelling yet and are
 //! copied verbatim, so a file that uses them does not compile as C:

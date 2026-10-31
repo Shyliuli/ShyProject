@@ -70,10 +70,11 @@ chosen as narrowly as possible unless an underlying type is explicitly given.
 
 `switch` remains the control-flow construct. It supports the existing `default`
 and `_` forms. Closed payload enums can be checked for exhaustive coverage;
-ordinary C enums are open and missing `default` is a diagnostic. The diagnostic
-can be disabled with a file-level or local `disable_nonexhaustive_switch`
-attribute. Integer conversion follows the C-compatible enum rules and may be
-warned about; it is never a hidden runtime operation.
+ordinary C enums are open and missing `default` is a diagnostic. The implemented
+`#![disable_nonexhaustive_switch]` file attribute disables the ordinary-enum
+diagnostic; a local attribute form is not available yet. Integer conversion
+follows the C-compatible enum rules and may be warned about; it is never a
+hidden runtime operation.
 
 ## Result, Option, and `?`
 

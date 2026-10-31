@@ -108,6 +108,9 @@ fn run() -> Result<(), String> {
                     layout: target.layout,
                     startup,
                     abi: target.abi,
+                    disable_nonexhaustive_switch: preprocessed
+                        .attributes
+                        .disable_nonexhaustive_switch,
                 },
             )
             .map_err(|error| sources.render(&error))?;
@@ -467,6 +470,9 @@ fn render_preprocessed(tokens: &[Token], attributes: &Attributes) -> String {
     }
     if let Some(bytes) = attributes.stack {
         output.push_str(&format!("#![stack({bytes})]\n"));
+    }
+    if attributes.disable_nonexhaustive_switch {
+        output.push_str("#![disable_nonexhaustive_switch]\n");
     }
     output.push_str(&export::render_c_source(tokens));
     output

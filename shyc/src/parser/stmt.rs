@@ -41,6 +41,12 @@ impl Parser {
         if self.at_ident("default") {
             return self.default_statement();
         }
+        // `_:` is the second spelling of `default:`. It has to be recognised
+        // before the generic `label:` path below, which would otherwise claim
+        // `_` as a label name.
+        if self.at_ident("_") && self.at_punct_ahead(1, ":") {
+            return self.default_statement();
+        }
         if self.at_ident("break") {
             let start = self.bump().span;
             let semicolon = self.expect_punct(";")?;
@@ -245,6 +251,8 @@ impl Parser {
         })
     }
 
+    /// `default:` or its `_:` spelling; the caller has checked which one is
+    /// present.
     fn default_statement(&mut self) -> Result<Stmt, Diagnostic> {
         let start = self.bump().span;
         self.expect_punct(":")?;

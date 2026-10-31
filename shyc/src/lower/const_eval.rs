@@ -164,6 +164,18 @@ impl Lowerer {
                         format!("unknown type name '{}'", qualifier.text),
                     )
                 })?;
+                // A `case Enum::Variant:` label names the tag constant, not a
+                // constructed payload value.
+                if let Some(value) = self
+                    .types
+                    .enum_variant(record, &name.text)
+                    .map(|variant| variant.value)
+                {
+                    let underlying = self.types.enum_underlying(record).ok_or_else(|| {
+                        Diagnostic::new(*span, "payload enum has no underlying type")
+                    })?;
+                    return Ok(ConstValue::int(underlying, value as u64));
+                }
                 let method = self.method_of(record, &name.text).ok_or_else(|| {
                     Diagnostic::new(name.span, format!("no method '{}' on this type", name.text))
                 })?;

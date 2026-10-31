@@ -8,8 +8,9 @@
 //! [`TokenKind::Eof`] ends it.
 //!
 //! Shy's metadata attributes (`#![no_main]`, `#![mem(10M)]`,
-//! `#![stack(4K)]`) are consumed from the main input file and returned in
-//! [`Output::attributes`]. They are only recognised at the start of a line.
+//! `#![stack(4K)]`, `#![disable_nonexhaustive_switch]`) are consumed from the
+//! main input file and returned in [`Output::attributes`]. They are only
+//! recognised at the start of a line.
 //!
 //! Supported directives:
 //!
@@ -92,6 +93,9 @@ pub struct Attributes {
     pub memory: Option<u32>,
     /// `#![stack(...)]`, in bytes.
     pub stack: Option<u32>,
+    /// `#![disable_nonexhaustive_switch]`: allow a `switch` on a plain C enum
+    /// without a `default` label. Payload enums stay closed.
+    pub disable_nonexhaustive_switch: bool,
 }
 
 /// The result of preprocessing one translation unit.
