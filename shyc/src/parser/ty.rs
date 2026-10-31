@@ -642,6 +642,14 @@ impl Parser {
                 GenericParamKind::Type
             };
             let name = self.expect_ident()?;
+            if self.at_punct(":") {
+                // Parse the bound would only feed unused metadata today, so
+                // say so rather than accepting a constraint that does nothing.
+                return Err(Diagnostic::new(
+                    self.here(),
+                    "trait bounds on generic parameters are not implemented yet",
+                ));
+            }
             match kind {
                 GenericParamKind::Type => self.declare_typedef(&name.text),
                 GenericParamKind::Const => self.declare_value(&name.text),

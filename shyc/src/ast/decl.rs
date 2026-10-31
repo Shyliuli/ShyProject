@@ -1,4 +1,4 @@
-//! Top-level declarations, initializers, and Shy `impl` blocks.
+//! Top-level declarations, initializers, and Shy `impl` and `trait` blocks.
 //!
 //! One [`TranslationUnit`] is one preprocessed source file. The parser fills
 //! [`TranslationUnit::items`] in source order; semantic analysis later decides
@@ -25,8 +25,11 @@ pub enum Item {
     /// A function definition. The body is always present, so prototypes never
     /// appear here; they are ordinary [`Item::Decl`] declarations.
     Function(FunctionDecl),
-    /// Shy's `impl Type { ... }` block containing method definitions.
+    /// Shy's `impl Type { ... }` or `impl Trait for Type { ... }` block
+    /// containing method definitions.
     Impl(ImplBlock),
+    /// Shy's `trait Name { ... }` declaration containing method signatures.
+    Trait(TraitDecl),
 }
 
 /// A declaration with its specifiers and declarators.
@@ -66,17 +69,45 @@ pub struct FunctionDecl {
     pub body: Block,
 }
 
-/// Shy's `impl Type { methods }` block.
+/// Shy's `impl Type { methods }` or `impl Trait for Type { methods }` block.
 ///
 /// `self_type` is a type name, normally the single typedef-style name written
 /// after `impl`. Each method is a [`FunctionDecl`] because its syntax is an
 /// ordinary function definition; the parser does not resolve the implemented
-/// type or the method names.
+/// type, the trait, or the method names. `trait_name` is `Some` only for the
+/// two-name form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImplBlock {
     pub span: Span,
+    /// The trait written before `for`, if this is a trait implementation.
+    pub trait_name: Option<Name>,
     pub self_type: TypeName,
     pub methods: Vec<FunctionDecl>,
+}
+
+/// Shy's `trait Name { method signatures }` declaration.
+///
+/// A trait is checked entirely at compile time. Its methods are signatures
+/// only: no body, no storage class, and no runtime object. An `impl Trait for
+/// Type` must define every one of them with a matching signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraitDecl {
+    pub span: Span,
+    pub name: Name,
+    pub methods: Vec<TraitMethod>,
+}
+
+/// One method signature in a [`TraitDecl`].
+///
+/// The declarator is kept exactly as the matching implementation will write
+/// it, so `self` can be resolved against the implementing type when the
+/// implementation is checked. There is no [`Block`] because a trait method is
+/// never defined here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraitMethod {
+    pub span: Span,
+    pub specs: DeclSpecs,
+    pub declarator: Declarator,
 }
 
 // ---------------------------------------------------------------------------

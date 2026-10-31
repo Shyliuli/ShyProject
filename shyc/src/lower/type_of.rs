@@ -512,10 +512,20 @@ impl Lowerer {
         name: &ast::Name,
     ) -> Result<MethodInfo, Diagnostic> {
         let record = self.lookup_named_type(&qualifier.text).ok_or_else(|| {
-            Diagnostic::new(
-                qualifier.span,
-                format!("unknown type name '{}'", qualifier.text),
-            )
+            if self.traits.contains_key(&qualifier.text) {
+                Diagnostic::new(
+                    qualifier.span,
+                    format!(
+                        "trait '{}' has no static methods; call a method on a concrete type",
+                        qualifier.text
+                    ),
+                )
+            } else {
+                Diagnostic::new(
+                    qualifier.span,
+                    format!("unknown type name '{}'", qualifier.text),
+                )
+            }
         })?;
         self.method_on(record, name)
     }

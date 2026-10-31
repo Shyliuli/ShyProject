@@ -53,6 +53,7 @@ pub fn parse(tokens: &[Token]) -> Result<ast::TranslationUnit, Diagnostic> {
     let mut parser = Parser::new(tokens.to_vec(), false);
     parser.scopes[0].typedefs = global.typedefs;
     parser.scopes[0].tags = global.tags;
+    parser.scopes[0].traits = global.traits;
     parser.translation_unit()
 }
 
@@ -68,7 +69,8 @@ pub(crate) struct Parser {
     angle_depth: usize,
     /// Name scopes, innermost last. `scopes[0]` is file scope.
     pub(crate) scopes: Vec<Scope>,
-    /// Nesting depth of `impl` bodies; `self` is a type only inside one.
+    /// Nesting depth of `impl` and `trait` bodies; `self` is a type only
+    /// inside one.
     impl_depth: usize,
     /// Prescan mode: unknown identifiers count as type names, and function
     /// bodies, aggregate bodies, and initializers are skipped.
@@ -81,6 +83,11 @@ pub(crate) struct Scope {
     pub(crate) typedefs: HashSet<String>,
     pub(crate) values: HashSet<String>,
     pub(crate) tags: HashSet<String>,
+    /// Trait names. The parser only needs them to accept a trait name where a
+    /// type name would appear, so that semantic analysis can reject a trait
+    /// value with its own diagnostic instead of the parser reporting an
+    /// unknown type.
+    pub(crate) traits: HashSet<String>,
 }
 
 impl Parser {
@@ -112,16 +119,19 @@ impl Parser {
         Ok(ast::TranslationUnit { items })
     }
 
-    /// Whether `name` currently spells a type (typedef name or Shy tag).
+    /// Whether `name` currently spells a type (typedef name, trait, or Shy
+    /// tag).
     ///
     /// Typedefs and ordinary identifiers share one namespace in C, so the
     /// innermost ordinary declaration of a name shadows an outer typedef: that
     /// is what makes a parameter or block local named `T` turn `T *p;` back
     /// into an expression. Tags have their own namespace, so a variable with
     /// the same spelling does not hide `struct T` used as Shy's `T` type name.
+    /// A trait is a compile-time name, but it is parsed like a typedef so its
+    /// misuse reaches semantic analysis with a precise message.
     pub(crate) fn is_type_name(&self, name: &str) -> bool {
         for scope in self.scopes.iter().rev() {
-            if scope.typedefs.contains(name) {
+            if scope.typedefs.contains(name) || scope.traits.contains(name) {
                 return true;
             }
             if scope.values.contains(name) {
@@ -144,6 +154,11 @@ impl Parser {
     pub(crate) fn declare_tag(&mut self, name: &str) {
         let innermost = self.scopes.len() - 1;
         self.scopes[innermost].tags.insert(name.to_string());
+    }
+
+    pub(crate) fn declare_trait(&mut self, name: &str) {
+        let innermost = self.scopes.len() - 1;
+        self.scopes[innermost].traits.insert(name.to_string());
     }
 
     pub(crate) fn push_scope(&mut self) {

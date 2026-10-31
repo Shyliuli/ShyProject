@@ -23,6 +23,12 @@ impl Parser {
         if self.at_let_declaration() {
             return self.let_statement();
         }
+        if self.at_ident("trait") {
+            return Err(Diagnostic::new(
+                self.here(),
+                "trait declarations are only allowed at file scope",
+            ));
+        }
 
         if self.at_ident("if") {
             return self.if_statement();

@@ -8,8 +8,8 @@
 //! - type spellings such as `unsigned long` stay as the list of keywords the
 //!   user wrote; semantic analysis combines them into one type;
 //! - `int` and `MyType` are both just declaration specifiers here;
-//! - Shy's `Type::method`, `self`, and `impl` are stored as written; automatic
-//!   dot dereference and method dispatch belong to semantic analysis;
+//! - Shy's `Type::method`, `self`, `impl`, and `trait` are stored as written;
+//!   automatic dot dereference and method dispatch belong to semantic analysis;
 //! - number, string, and character literals keep the lexer's raw spelling.
 //!
 //! Every node that can appear in a diagnostic carries a [`Span`]. The tree is
@@ -38,6 +38,10 @@
 //!   lists, and file-scope `asm` declarations;
 //! - labels as values (`&&label`) and nested function definitions;
 //! - prototypes inside an `impl` block (methods always have a body here);
+//! - runtime trait objects: a `trait` declares compile-time method signatures
+//!   only, and using a trait name as a value type is rejected by semantic
+//!   analysis;
+//! - generic trait bounds (`<T: Drawable>`) and generic traits;
 //! - scoped names with more than two segments (`A::B::m`).
 //!
 //! `_Atomic` is represented in both of its spellings: a qualifier

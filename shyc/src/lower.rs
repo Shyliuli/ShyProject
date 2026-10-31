@@ -32,7 +32,7 @@ mod stmt;
 mod type_of;
 mod types;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast;
 use crate::ir;
@@ -135,6 +135,14 @@ pub(super) struct MethodInfo {
 pub(super) struct ImplInfo {
     pub name: String,
     pub methods: HashMap<String, MethodInfo>,
+}
+
+/// One `trait` declaration: the method signatures an implementation must
+/// match. The AST is kept because `self` can only be resolved against the
+/// implementing type, which is known when an `impl ... for ...` is checked.
+#[derive(Clone)]
+pub(super) struct TraitInfo {
+    pub methods: Vec<ast::TraitMethod>,
 }
 
 /// One function definition waiting for the body-lowering pass.
@@ -263,6 +271,15 @@ pub(super) struct Lowerer {
     pub function_instances: HashMap<InstanceKey, FunctionInstance>,
     /// Nesting level of the generic instantiation currently being resolved.
     pub instantiation_depth: u32,
+    /// Every trait declaration, by name. Registered before any `impl` is
+    /// checked.
+    pub traits: HashMap<String, TraitInfo>,
+    /// `(trait, type)` pairs already implemented, to reject a second
+    /// implementation of the same pair.
+    pub trait_impls: HashSet<(String, String)>,
+    /// Placeholder record used as `self` when a trait signature is checked
+    /// without an implementation. It is never emitted.
+    trait_self_type: Option<TypeId>,
     pub impls: HashMap<TypeId, ImplInfo>,
     pub impl_context: Option<(TypeId, String)>,
     pub current_function_name: Option<String>,
@@ -304,6 +321,9 @@ impl Lowerer {
             generic_functions: HashMap::new(),
             function_instances: HashMap::new(),
             instantiation_depth: 0,
+            traits: HashMap::new(),
+            trait_impls: HashSet::new(),
+            trait_self_type: None,
             impls: HashMap::new(),
             impl_context: None,
             current_function_name: None,

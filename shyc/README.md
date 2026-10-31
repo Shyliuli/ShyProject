@@ -52,11 +52,11 @@ target/bin/shyc --emit=c       api.shyc -o api.c    # the TU as plain C
 `--emit=c-header` walks the parsed translation unit and prints an include-guarded
 header: file-scope typedefs, record and enum definitions, prototypes for every
 non-`static` function, and `extern` declarations for objects (initializers are
-dropped). `static` declarations and `impl` blocks are not exported; methods need
-generic instantiation to name a concrete symbol first. `--emit=c` prints the
-preprocessed unit as plain C and drops the `#![...]` attribute lines. A `let`
-declaration has no C spelling, so a unit that uses one is rejected with a
-diagnostic instead of being printed as invalid C.
+dropped). `static` declarations, `impl` blocks, and `trait` declarations are not
+exported; methods need a concrete symbol before they can be declared. `--emit=c`
+prints the preprocessed unit as plain C and drops the `#![...]` attribute lines.
+A `let` declaration has no C spelling, so a unit that uses one is rejected with
+a diagnostic instead of being printed as invalid C.
 
 Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `-O0`..`-O3`
 (`-O1` promotes slots and cleans up, `-O2` repeats that to a fixed point, and
@@ -98,8 +98,19 @@ Checked against clang for x86-64, aarch64, riscv64, and loongarch64.
 
 Working: integers, pointers, arrays, structs and unions, enums, control flow,
 direct and indirect calls, recursion, global initialisers with symbol
-relocations, ShyC's `impl`/`self`/`drop`, and floating point through the
-soft-float runtime.
+relocations, ShyC's `impl`/`self`/`drop`, compile-time traits, and floating
+point through the soft-float runtime.
+
+Traits are compile-time only. `trait Drawable { void draw(self *value); }`
+declares method signatures, and `impl Drawable for Circle { ... }` checks that
+the implementation defines exactly those methods with matching signatures. The
+methods are then lowered exactly like an ordinary `impl`: they become plain
+`____Circle__draw` functions and every call stays statically dispatched, with
+no vtable and no hidden allocation. A trait name cannot be used as a value type
+yet; that use, a second implementation of the same trait for one type, a
+duplicate method name across two traits on one type, generic trait methods, and
+`<T: Drawable>` bounds all get an explicit diagnostic. There is no dynamic
+dispatch.
 
 `let name = expression;` infers its type from the initializer as an rvalue:
 arrays and functions decay, and top-level qualifiers do not carry over. The

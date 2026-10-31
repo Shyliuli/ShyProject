@@ -268,8 +268,8 @@ fn describe(token: &Token) -> String {
 
 /// Reserved words of the C grammar and of the Shy extension.
 ///
-/// `self` is deliberately absent: it is a type name only inside `impl`, and a
-/// normal identifier everywhere else.
+/// `self` is deliberately absent: it is a type name only inside `impl` or a
+/// `trait` signature, and a normal identifier everywhere else.
 pub(crate) fn is_keyword(word: &str) -> bool {
     matches!(
         word,
@@ -322,6 +322,7 @@ pub(crate) fn is_keyword(word: &str) -> bool {
             | "__alignof__"
             | "asm"
             | "impl"
+            | "trait"
             | "typeof"
             | "__typeof"
             | "__typeof__"

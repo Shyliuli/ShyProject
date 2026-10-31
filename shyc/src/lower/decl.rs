@@ -17,6 +17,9 @@ use crate::source::{Diagnostic, Span};
 
 impl Lowerer {
     pub(super) fn collect(&mut self, unit: &ast::TranslationUnit) -> Result<(), Diagnostic> {
+        // Traits only describe compile-time signatures, so they are known
+        // before any implementation is resolved.
+        self.register_traits(unit)?;
         self.register_generic_records(unit)?;
         self.register_generic_enums(unit)?;
         self.register_generic_functions(unit)?;
@@ -25,8 +28,13 @@ impl Lowerer {
                 ast::Item::Decl(declaration) => self.collect_declaration(declaration)?,
                 ast::Item::Function(function) => self.collect_function(function, None)?,
                 ast::Item::Impl(block) => self.collect_impl(block)?,
+                // Registered by `register_traits`; nothing to emit.
+                ast::Item::Trait(_) => {}
             }
         }
+        // Every file-scope type is known now, so trait signatures that never
+        // met an implementation still get their types checked.
+        self.check_trait_signatures(unit)?;
         Ok(())
     }
 

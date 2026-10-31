@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::ast::{
     BuiltinType, DeclSpecs, Declaration, Declarator, DerivedDeclarator, FunctionDecl, ImplBlock,
-    InitDeclarator, Item, StorageClass, TypeName, TypeSpecifier,
+    InitDeclarator, Item, StorageClass, TraitDecl, TraitMethod, TypeName, TypeSpecifier,
 };
 use crate::lexer::{Token, TokenKind};
 use crate::source::{Diagnostic, Span};
@@ -16,9 +16,10 @@ use super::cursor::is_keyword;
 pub(crate) struct GlobalNames {
     pub(crate) typedefs: HashSet<String>,
     pub(crate) tags: HashSet<String>,
+    pub(crate) traits: HashSet<String>,
 }
 
-/// Collects file-scope typedef names and tags in one cheap pass.
+/// Collects file-scope typedef names, tags, and trait names in one cheap pass.
 ///
 /// Bodies are skipped by brace matching, so function-local typedefs and tags
 /// never leak. Unknown identifiers are accepted as type names, which makes the
@@ -30,15 +31,19 @@ pub(crate) fn prescan(tokens: &[Token]) -> GlobalNames {
     GlobalNames {
         typedefs: std::mem::take(&mut parser.scopes[0].typedefs),
         tags: std::mem::take(&mut parser.scopes[0].tags),
+        traits: std::mem::take(&mut parser.scopes[0].traits),
     }
 }
 
 impl Parser {
     // -- top-level items --------------------------------------------------
 
-    /// Parses one file-scope item: a declaration, a function definition, or an
-    /// `impl` block.
+    /// Parses one file-scope item: a declaration, a function definition, an
+    /// `impl` block, or a `trait` declaration.
     pub(crate) fn item(&mut self) -> Result<Item, Diagnostic> {
+        if self.at_ident("trait") {
+            return Ok(Item::Trait(self.trait_decl()?));
+        }
         if self.at_ident("impl") {
             return Ok(Item::Impl(self.impl_block()?));
         }
@@ -313,6 +318,18 @@ impl Parser {
 
     fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {
         let start = self.bump().span;
+        // `impl Trait for Type` is a trait implementation; only the `for`
+        // keyword can follow a trait name here. `impl Type` keeps its old
+        // spelling and meaning.
+        let trait_name = if matches!(&self.peek().kind, TokenKind::Ident(word) if !is_keyword(word))
+            && self.at_ident_ahead(1, "for")
+        {
+            let name = self.expect_ident()?;
+            self.expect_keyword("for")?;
+            Some(name)
+        } else {
+            None
+        };
         let self_type = self.type_name()?;
         self.expect_punct("{")?;
 
@@ -349,8 +366,91 @@ impl Parser {
 
         Ok(ImplBlock {
             span: start.join(close),
+            trait_name,
             self_type,
             methods,
+        })
+    }
+
+    /// Parses `trait Name { method signatures }`.
+    ///
+    /// A method is written like a function declaration and ends with `;`, or
+    /// with the `fn` spelling and no body. `self` is allowed in those
+    /// signatures, so the trait can be checked against each implementing type.
+    fn trait_decl(&mut self) -> Result<TraitDecl, Diagnostic> {
+        let start = self.bump().span;
+        let name = self.expect_ident()?;
+        self.declare_trait(&name.text);
+        if self.at_punct("<") {
+            return Err(Diagnostic::new(
+                self.here(),
+                "generic traits are not implemented yet",
+            ));
+        }
+        self.expect_punct("{")?;
+
+        self.impl_depth += 1;
+        self.push_scope();
+        let mut methods = Vec::new();
+        while !self.at_punct("}") {
+            if self.at_eof() {
+                return Err(Diagnostic::new(
+                    self.here(),
+                    "unterminated trait declaration",
+                ));
+            }
+            methods.push(self.trait_method()?);
+        }
+        let close = self.expect_punct("}")?;
+        self.pop_scope();
+        self.impl_depth -= 1;
+
+        Ok(TraitDecl {
+            span: start.join(close),
+            name,
+            methods,
+        })
+    }
+
+    /// One method declaration inside a trait. A body is rejected here; the
+    /// declarator's shape and storage class are checked by semantic analysis.
+    fn trait_method(&mut self) -> Result<TraitMethod, Diagnostic> {
+        if self.at_fn_declaration() {
+            let (start, specs, declarator) = self.fn_signature()?;
+            if self.at_punct("{") {
+                return Err(Diagnostic::new(
+                    self.here(),
+                    "trait method declarations cannot have a body",
+                ));
+            }
+            let semicolon = self.expect_punct(";")?;
+            self.pop_scope();
+            return Ok(TraitMethod {
+                span: start.join(semicolon),
+                specs,
+                declarator,
+            });
+        }
+
+        let specs = self.decl_specs()?;
+        if self.at_punct(";") {
+            return Err(Diagnostic::new(
+                self.here(),
+                "a trait member must declare a method",
+            ));
+        }
+        let declarator = self.declarator(false)?;
+        if self.at_punct("{") {
+            return Err(Diagnostic::new(
+                self.here(),
+                "trait method declarations cannot have a body",
+            ));
+        }
+        let semicolon = self.expect_punct(";")?;
+        Ok(TraitMethod {
+            span: specs.span.join(semicolon),
+            specs,
+            declarator,
         })
     }
 
@@ -393,8 +493,23 @@ impl Parser {
     }
 
     fn prescan_item(&mut self) -> Result<(), Diagnostic> {
+        if self.at_ident("trait") {
+            self.bump();
+            let name = self.expect_ident()?;
+            self.declare_trait(&name.text);
+            self.expect_punct("{")?;
+            return self.skip_braced_body();
+        }
         if self.at_ident("impl") {
             self.bump();
+            // Skip the trait name of `impl Trait for Type` the same way the
+            // real parser recognizes it.
+            if matches!(&self.peek().kind, TokenKind::Ident(word) if !is_keyword(word))
+                && self.at_ident_ahead(1, "for")
+            {
+                self.bump();
+                self.bump();
+            }
             self.type_name()?;
             self.expect_punct("{")?;
             return self.skip_braced_body();
@@ -500,6 +615,7 @@ impl Parser {
                 || self.at_ident("union")
                 || self.at_ident("enum")
                 || self.at_ident("impl")
+                || self.at_ident("trait")
                 || self.at_fn_declaration()
             {
                 return;

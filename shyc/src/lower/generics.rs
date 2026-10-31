@@ -50,8 +50,9 @@ impl Lowerer {
                         }
                     }
                 }
-                // A generic method has no file-scope template yet.
-                ast::Item::Impl(_) => {}
+                // A generic method has no file-scope template yet, and a trait
+                // method is only a signature.
+                ast::Item::Impl(_) | ast::Item::Trait(_) => {}
             }
         }
         Ok(())

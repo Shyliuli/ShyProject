@@ -147,8 +147,9 @@ pub fn render_c_header(unit: &TranslationUnit) -> String {
         let text = match item {
             Item::Decl(declaration) => declaration_text(declaration),
             Item::Function(function) => prototype_text(function),
-            // Methods need a symbol of their own before they can be declared.
-            Item::Impl(_) => String::new(),
+            // Methods need a symbol of their own before they can be declared,
+            // and a trait has no C spelling at all.
+            Item::Impl(_) | Item::Trait(_) => String::new(),
         };
         if text.is_empty() {
             continue;

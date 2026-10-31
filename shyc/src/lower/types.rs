@@ -97,6 +97,16 @@ impl Lowerer {
                                 format!("generic type '{}' needs arguments", name.text),
                             ));
                         }
+                        None if self.traits.contains_key(&name.text) => {
+                            return Err(Diagnostic::new(
+                                name.span,
+                                format!(
+                                    "trait '{}' has no runtime value type; traits are \
+                                     compile-time only",
+                                    name.text
+                                ),
+                            ));
+                        }
                         None => {
                             return Err(Diagnostic::new(
                                 name.span,
@@ -158,7 +168,7 @@ impl Lowerer {
                     let Some((implemented, _)) = &self.impl_context else {
                         return Err(Diagnostic::new(
                             specs.span,
-                            "`self` is only valid inside an impl block",
+                            "`self` is only valid inside an impl or trait declaration",
                         ));
                     };
                     base = Some(*implemented);
