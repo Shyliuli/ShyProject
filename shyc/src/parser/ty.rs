@@ -328,66 +328,86 @@ impl Parser {
             self.declare_tag(&tag.text);
         }
 
-        let enumerators = if self.eat_punct("{") {
-            if self.prescan {
-                self.skip_braced_body()?;
-                None
+        // `enum Option<T>` puts `T` in scope for the variant payload types. The
+        // scope is only for the definition; a later `Option<int>` resolves its
+        // arguments at the use site.
+        let generic_scope = self.at_punct("<");
+        if generic_scope {
+            self.push_scope();
+        }
+        let parsed = (|| {
+            let generics = if generic_scope {
+                self.generic_params()?
             } else {
-                let mut list = Vec::new();
-                while !self.at_punct("}") {
-                    let name = self.expect_ident()?;
-                    // Enumerators are ordinary identifiers and may shadow a
-                    // typedef name from an outer scope.
-                    self.declare_value(&name.text);
-                    let payload = if self.eat_punct("(") {
-                        let type_name = self.type_name()?;
-                        self.expect_punct(")")?;
-                        Some(type_name)
-                    } else {
-                        None
-                    };
-                    if payload.is_some() && self.at_punct("=") {
-                        return Err(Diagnostic::new(
-                            self.here(),
-                            format!(
-                                "payload variant '{}' cannot have an explicit value",
-                                name.text
-                            ),
-                        ));
+                Vec::new()
+            };
+            let enumerators = if self.eat_punct("{") {
+                if self.prescan {
+                    self.skip_braced_body()?;
+                    None
+                } else {
+                    let mut list = Vec::new();
+                    while !self.at_punct("}") {
+                        let name = self.expect_ident()?;
+                        // Enumerators are ordinary identifiers and may shadow a
+                        // typedef name from an outer scope.
+                        self.declare_value(&name.text);
+                        let payload = if self.eat_punct("(") {
+                            let type_name = self.type_name()?;
+                            self.expect_punct(")")?;
+                            Some(type_name)
+                        } else {
+                            None
+                        };
+                        if payload.is_some() && self.at_punct("=") {
+                            return Err(Diagnostic::new(
+                                self.here(),
+                                format!(
+                                    "payload variant '{}' cannot have an explicit value",
+                                    name.text
+                                ),
+                            ));
+                        }
+                        let value = if self.eat_punct("=") {
+                            Some(self.conditional()?)
+                        } else {
+                            None
+                        };
+                        let mut span = match &value {
+                            Some(value) => name.span.join(value.span()),
+                            None => name.span,
+                        };
+                        if let Some(payload) = &payload {
+                            span = span.join(payload.span);
+                        }
+                        list.push(Enumerator {
+                            span,
+                            name,
+                            value,
+                            payload,
+                        });
+                        if !self.eat_punct(",") {
+                            break;
+                        }
                     }
-                    let value = if self.eat_punct("=") {
-                        Some(self.conditional()?)
-                    } else {
-                        None
-                    };
-                    let mut span = match &value {
-                        Some(value) => name.span.join(value.span()),
-                        None => name.span,
-                    };
-                    if let Some(payload) = &payload {
-                        span = span.join(payload.span);
-                    }
-                    list.push(Enumerator {
-                        span,
-                        name,
-                        value,
-                        payload,
-                    });
-                    if !self.eat_punct(",") {
-                        break;
-                    }
+                    self.expect_punct("}")?;
+                    Some(list)
                 }
-                self.expect_punct("}")?;
-                Some(list)
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
+            Ok((generics, enumerators))
+        })();
+        if generic_scope {
+            self.pop_scope();
+        }
+        let (generics, enumerators) = parsed?;
 
         Ok(EnumSpec {
             span: self.finish(start),
             underlying,
             tag,
+            generics,
             enumerators,
         })
     }

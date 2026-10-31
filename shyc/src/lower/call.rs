@@ -406,6 +406,27 @@ impl FnLower<'_> {
                 *call_span,
             );
         }
+        if let ast::Expr::GenericScopedName {
+            qualifier,
+            args: generic_args,
+            name,
+            span: call_span,
+        } = callee
+        {
+            let ty = self.l.generic_qualifier_type(qualifier, generic_args)?;
+            if let Some(variant) = self.l.variant_of(ty, name) {
+                return self.construct_payload_enum(qualifier, name, variant, args, *call_span);
+            }
+            let method = self.l.method_on(ty, name)?;
+            let (params, variadic) = self.function_params(method.ty, span)?;
+            let operands = self.lower_arguments(args, &params, variadic, span)?;
+            return self.emit_call(
+                ir::CallTarget::Direct(method.symbol),
+                method.ty,
+                operands,
+                *call_span,
+            );
+        }
 
         let value = self.lower_expr(callee)?;
         let function_ty = if self.l.types.is_function(value.ty) {

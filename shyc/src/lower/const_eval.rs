@@ -185,6 +185,29 @@ impl Lowerer {
                 let _ = span;
                 Ok(ConstValue::address(ty, Some(method.symbol), 0))
             }
+            ast::Expr::GenericScopedName {
+                qualifier,
+                args,
+                name,
+                span,
+            } => {
+                let enum_ty = self.generic_qualifier_type(qualifier, args)?;
+                if let Some(value) = self
+                    .types
+                    .enum_variant(enum_ty, &name.text)
+                    .map(|variant| variant.value)
+                {
+                    let underlying = self.types.enum_underlying(enum_ty).ok_or_else(|| {
+                        Diagnostic::new(*span, "payload enum has no underlying type")
+                    })?;
+                    return Ok(ConstValue::int(underlying, value as u64));
+                }
+                let method = self.method_on(enum_ty, name)?;
+                let ty = self
+                    .types
+                    .pointer_to(crate::sema::types::QualifiedType::unqualified(method.ty));
+                Ok(ConstValue::address(ty, Some(method.symbol), 0))
+            }
             ast::Expr::BuiltinTypeCall {
                 name,
                 type_args,

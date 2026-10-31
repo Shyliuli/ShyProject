@@ -166,6 +166,17 @@ pub(super) struct GenericRecord {
     pub spec: ast::RecordSpec,
 }
 
+/// One generic enum definition, kept as the AST template it is.
+///
+/// Instantiating it re-resolves the same enumerator payload type names under a
+/// pushed type scope that binds the parameters, so a payload enum instance is
+/// an ordinary concrete payload enum.
+#[derive(Clone)]
+pub(super) struct GenericEnum {
+    pub params: Vec<ast::GenericParam>,
+    pub spec: ast::EnumSpec,
+}
+
 /// One generic function definition or prototype, kept as the AST template it
 /// is.
 ///
@@ -236,6 +247,10 @@ pub(super) struct Lowerer {
     pub generic_records: HashMap<String, GenericRecord>,
     /// Instantiated generic records, keyed by tag and concrete arguments.
     pub record_instances: HashMap<InstanceKey, TypeId>,
+    /// Every generic enum definition, registered before anything resolves.
+    pub generic_enums: HashMap<String, GenericEnum>,
+    /// Instantiated generic enums, keyed by tag and concrete arguments.
+    pub enum_instances: HashMap<InstanceKey, TypeId>,
     /// Every generic function definition or prototype, registered before
     /// anything resolves.
     pub generic_functions: HashMap<String, GenericFunction>,
@@ -278,6 +293,8 @@ impl Lowerer {
             enum_consts: HashMap::new(),
             generic_records: HashMap::new(),
             record_instances: HashMap::new(),
+            generic_enums: HashMap::new(),
+            enum_instances: HashMap::new(),
             generic_functions: HashMap::new(),
             function_instances: HashMap::new(),
             instantiation_depth: 0,

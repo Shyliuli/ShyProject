@@ -152,6 +152,14 @@ pub enum Expr {
         name: Name,
         span: Span,
     },
+    /// `Type<args>::member`, a scoped name whose qualifier is a generic type
+    /// use such as `Option<int>::Some`.
+    GenericScopedName {
+        qualifier: Name,
+        args: Vec<GenericArg>,
+        name: Name,
+        span: Span,
+    },
     /// A builtin call whose arguments are type names, not expressions.
     ///
     /// `__builtin_reg_class(ty)` has one type argument and
@@ -262,6 +270,7 @@ impl Expr {
             Expr::String(lit) => lit.span,
             Expr::Name(name) => name.span,
             Expr::ScopedName { span, .. }
+            | Expr::GenericScopedName { span, .. }
             | Expr::BuiltinTypeCall { span, .. }
             | Expr::Unary { span, .. }
             | Expr::Postfix { span, .. }

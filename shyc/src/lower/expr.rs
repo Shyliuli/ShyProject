@@ -557,6 +557,23 @@ impl FnLower<'_> {
                     kind: ExprKind::Place(ir::Address::symbol(method.symbol)),
                 })
             }
+            ast::Expr::GenericScopedName {
+                qualifier,
+                args,
+                name,
+                span,
+            } => {
+                let ty = self.l.generic_qualifier_type(qualifier, args)?;
+                if let Some(variant) = self.l.variant_of(ty, name) {
+                    return self.construct_payload_enum(qualifier, name, variant, &[], *span);
+                }
+                let method = self.l.method_on(ty, name)?;
+                Ok(ExprVal {
+                    ty: method.ty,
+                    qualifiers: Qualifiers::NONE,
+                    kind: ExprKind::Place(ir::Address::symbol(method.symbol)),
+                })
+            }
             ast::Expr::BuiltinTypeCall {
                 name,
                 type_args,

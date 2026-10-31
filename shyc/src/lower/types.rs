@@ -89,7 +89,9 @@ impl Lowerer {
                     }
                     base = Some(match self.lookup_named_type(&name.text) {
                         Some(ty) => ty,
-                        None if self.generic_records.contains_key(&name.text) => {
+                        None if self.generic_records.contains_key(&name.text)
+                            || self.generic_enums.contains_key(&name.text) =>
+                        {
                             return Err(Diagnostic::new(
                                 name.span,
                                 format!("generic type '{}' needs arguments", name.text),
@@ -110,7 +112,11 @@ impl Lowerer {
                             "more than one type specifier in one declaration",
                         ));
                     }
-                    base = Some(self.instantiate_generic(generic)?);
+                    base = Some(self.instantiate_generic(
+                        &generic.name,
+                        &generic.args,
+                        generic.span,
+                    )?);
                 }
                 ast::TypeSpecifier::Record(record) => {
                     if base.is_some() {
@@ -556,50 +562,81 @@ impl Lowerer {
         Ok(ty)
     }
 
-    /// Instantiate `Name<args>`: validate the arguments, then re-resolve the
-    /// generic record's member declarations with its parameters bound.
+    /// Resolve the qualifier of `Name<args>::member` to its concrete type.
     ///
-    /// The forward record is cached before its members resolve, so a member may
-    /// mention its own instantiation (`Node<T> *next`) and every use of the
-    /// same arguments gets the same record identity back.
-    fn instantiate_generic(&mut self, generic: &ast::GenericSpec) -> Result<TypeId, Diagnostic> {
+    /// Both generic records and generic enums instantiate through the same
+    /// cache the type-specifier path uses, so a qualifier and a spelled type
+    /// share one identity.
+    pub(super) fn generic_qualifier_type(
+        &mut self,
+        qualifier: &ast::Name,
+        args: &[ast::GenericArg],
+    ) -> Result<TypeId, Diagnostic> {
+        self.instantiate_generic(qualifier, args, qualifier.span)
+    }
+
+    /// Instantiate `Name<args>`: validate the arguments, then re-resolve the
+    /// generic record or enum template with its parameters bound.
+    fn instantiate_generic(
+        &mut self,
+        name: &ast::Name,
+        args: &[ast::GenericArg],
+        span: Span,
+    ) -> Result<TypeId, Diagnostic> {
         /// How deep `Pair<Pair<...>>` may nest before instantiation gives up.
         const MAX_DEPTH: u32 = 64;
 
         if self.instantiation_depth >= MAX_DEPTH {
             return Err(Diagnostic::new(
-                generic.span,
+                span,
                 format!("generic type instantiation is nested more than {MAX_DEPTH} levels deep"),
             ));
         }
-        let Some(template) = self.generic_records.get(&generic.name.text).cloned() else {
-            if self.lookup_named_type(&generic.name.text).is_some() {
-                return Err(Diagnostic::new(
-                    generic.name.span,
-                    format!("type '{}' is not generic", generic.name.text),
-                ));
-            }
+        if let Some(template) = self.generic_records.get(&name.text).cloned() {
+            return self.instantiate_generic_record(name, args, span, &template);
+        }
+        if let Some(template) = self.generic_enums.get(&name.text).cloned() {
+            return self.instantiate_generic_enum(name, args, &template);
+        }
+        if self.lookup_named_type(&name.text).is_some() {
             return Err(Diagnostic::new(
-                generic.name.span,
-                format!("unknown generic type '{}'", generic.name.text),
+                name.span,
+                format!("type '{}' is not generic", name.text),
             ));
-        };
-        if generic.args.len() != template.params.len() {
+        }
+        Err(Diagnostic::new(
+            name.span,
+            format!("unknown generic type '{}'", name.text),
+        ))
+    }
+
+    /// Instantiate a generic record template into a concrete record.
+    ///
+    /// The forward record is cached before its members resolve, so a member may
+    /// mention its own instantiation (`Node<T> *next`) and every use of the
+    /// same arguments gets the same record identity back.
+    fn instantiate_generic_record(
+        &mut self,
+        name: &ast::Name,
+        args: &[ast::GenericArg],
+        span: Span,
+        template: &super::GenericRecord,
+    ) -> Result<TypeId, Diagnostic> {
+        if args.len() != template.params.len() {
             return Err(Diagnostic::new(
-                generic.span,
+                span,
                 format!(
                     "generic type '{}' expects {} argument(s), but {} were given",
-                    generic.name.text,
+                    name.text,
                     template.params.len(),
-                    generic.args.len()
+                    args.len()
                 ),
             ));
         }
         // Arguments resolve in the caller's scope, never the template's.
-        let args =
-            self.resolve_generic_args(&generic.name.text, &template.params, &generic.args)?;
+        let args = self.resolve_generic_args(&name.text, &template.params, args)?;
         let key = InstanceKey {
-            name: generic.name.text.clone(),
+            name: name.text.clone(),
             args,
         };
         if let Some(&ty) = self.record_instances.get(&key) {
@@ -612,7 +649,7 @@ impl Lowerer {
         let Some(members) = &template.spec.members else {
             return Err(Diagnostic::new(
                 template.spec.span,
-                format!("generic record '{}' has no definition", generic.name.text),
+                format!("generic record '{}' has no definition", name.text),
             ));
         };
         let ty = self.types.record_forward(kind);
@@ -632,6 +669,71 @@ impl Lowerer {
         self.pop_type_scope();
         self.instantiation_depth -= 1;
         resolved.map(|_| ty)
+    }
+
+    /// Instantiate a generic enum template into a concrete payload enum.
+    ///
+    /// The instance is cached as soon as its type exists, before the payload
+    /// type names resolve, so a payload may mention the enum's own
+    /// instantiation behind a pointer and repeated uses share one identity.
+    /// Enum constants stay scoped to `Name<args>::Variant`, so an instance
+    /// registers none of them in the file-scope constant table.
+    fn instantiate_generic_enum(
+        &mut self,
+        name: &ast::Name,
+        args: &[ast::GenericArg],
+        template: &super::GenericEnum,
+    ) -> Result<TypeId, Diagnostic> {
+        if args.len() != template.params.len() {
+            return Err(Diagnostic::new(
+                name.span,
+                format!(
+                    "generic enum '{}' expects {} argument(s), but {} were given",
+                    name.text,
+                    template.params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        // Arguments resolve in the caller's scope, never the template's.
+        let args = self.resolve_generic_args(&name.text, &template.params, args)?;
+        let key = InstanceKey {
+            name: name.text.clone(),
+            args,
+        };
+        if let Some(&ty) = self.enum_instances.get(&key) {
+            return Ok(ty);
+        }
+        let Some(enumerators) = &template.spec.enumerators else {
+            return Err(Diagnostic::new(
+                template.spec.span,
+                format!("generic enum '{}' has no definition", name.text),
+            ));
+        };
+        self.instantiation_depth += 1;
+        self.push_type_scope();
+        let resolved = (|| {
+            self.bind_generic_args(&template.params, &key.args);
+            let underlying = match &template.spec.underlying {
+                Some(type_name) => self.resolve_enum_underlying(type_name)?,
+                None => self.types.builtin(Builtin::Int),
+            };
+            let has_payload = enumerators.iter().any(|e| e.payload.is_some());
+            let ty = if has_payload {
+                self.types.new_payload_enum(underlying)
+            } else {
+                self.types.new_enum(underlying)
+            }
+            .map_err(|error| {
+                Diagnostic::new(template.spec.span, format!("invalid enum layout: {error}"))
+            })?;
+            self.enum_instances.insert(key.clone(), ty);
+            self.define_enum(ty, underlying, enumerators, template.spec.span, false)?;
+            Ok::<TypeId, Diagnostic>(ty)
+        })();
+        self.pop_type_scope();
+        self.instantiation_depth -= 1;
+        resolved
     }
 
     fn resolve_members(
@@ -691,6 +793,14 @@ impl Lowerer {
     }
 
     fn resolve_enum(&mut self, spec: &ast::EnumSpec) -> Result<TypeId, Diagnostic> {
+        // File-scope generic definitions were registered by `collect`, so a
+        // generic specifier that reaches here was reached another way.
+        if let Some(parameter) = spec.generics.first() {
+            return Err(Diagnostic::new(
+                parameter.span,
+                "generic enum definitions are only supported at file scope",
+            ));
+        }
         let explicit = match &spec.underlying {
             Some(type_name) => Some(self.resolve_enum_underlying(type_name)?),
             None => None,
@@ -702,6 +812,12 @@ impl Lowerer {
                     "enum specifier needs a tag or a definition",
                 ));
             };
+            if self.generic_enums.contains_key(&tag.text) {
+                return Err(Diagnostic::new(
+                    spec.span,
+                    format!("generic enum '{}' needs arguments", tag.text),
+                ));
+            }
             let Some(existing) = self.lookup_tag(&tag.text) else {
                 return Err(Diagnostic::new(
                     spec.span,
@@ -761,15 +877,23 @@ impl Lowerer {
             }
             self.declare_tag(&tag.text, ty, spec.span)?;
         }
-        self.define_enum(ty, underlying, enumerators, spec.span)
+        self.define_enum(ty, underlying, enumerators, spec.span, true)
     }
 
+    /// Defines an enum's variants and constants.
+    ///
+    /// `constants` controls whether payload-free variants also become
+    /// file-scope constants under their bare name. A plain enum and a direct
+    /// payload enum keep that behaviour; an instantiated generic enum does
+    /// not, because two instances would otherwise collide on the same variant
+    /// names. Every generic variant is reached as `Name<args>::Variant`.
     fn define_enum(
         &mut self,
         ty: TypeId,
         underlying: TypeId,
         enumerators: &[ast::Enumerator],
         span: Span,
+        constants: bool,
     ) -> Result<TypeId, Diagnostic> {
         let (min, max, bits, unsigned) = self.enum_value_range(underlying);
         let payload_enum = self.types.is_payload_enum(ty);
@@ -840,7 +964,7 @@ impl Lowerer {
             }
             // A payload variant has no integer value of its own; it is only
             // constructible as `Enum::Variant(value)`.
-            if payload.is_some() {
+            if payload.is_some() || !constants {
                 continue;
             }
             if self.enum_consts.contains_key(&enumerator.name.text) {

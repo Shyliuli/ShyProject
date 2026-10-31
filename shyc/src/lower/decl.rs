@@ -16,6 +16,7 @@ use crate::source::{Diagnostic, Span};
 impl Lowerer {
     pub(super) fn collect(&mut self, unit: &ast::TranslationUnit) -> Result<(), Diagnostic> {
         self.register_generic_records(unit)?;
+        self.register_generic_enums(unit)?;
         self.register_generic_functions(unit)?;
         for item in &unit.items {
             match item {
@@ -69,15 +70,63 @@ impl Lowerer {
         Ok(())
     }
 
+    /// Registers every generic enum definition before anything is resolved.
+    ///
+    /// Like a generic record, a generic enum never enters the plain tag table:
+    /// only an instantiation creates an enum type.
+    fn register_generic_enums(&mut self, unit: &ast::TranslationUnit) -> Result<(), Diagnostic> {
+        for item in &unit.items {
+            let ast::Item::Decl(declaration) = item else {
+                continue;
+            };
+            let Some(enumeration) = generic_enum_definition(&declaration.specs) else {
+                continue;
+            };
+            let Some(tag) = &enumeration.tag else {
+                return Err(Diagnostic::new(
+                    enumeration.span,
+                    "a generic enum definition needs a tag",
+                ));
+            };
+            if enumeration.enumerators.is_none() {
+                return Err(Diagnostic::new(
+                    enumeration.span,
+                    format!("generic enum '{}' needs a definition", tag.text),
+                ));
+            }
+            if self.generic_enums.contains_key(&tag.text) {
+                return Err(Diagnostic::new(
+                    enumeration.span,
+                    format!("redefinition of generic enum '{}'", tag.text),
+                ));
+            }
+            self.generic_enums.insert(
+                tag.text.clone(),
+                super::GenericEnum {
+                    params: enumeration.generics.clone(),
+                    spec: enumeration.clone(),
+                },
+            );
+        }
+        Ok(())
+    }
+
     fn collect_declaration(&mut self, declaration: &ast::Declaration) -> Result<(), Diagnostic> {
-        // The registration pass already holds the member declarations, so a
-        // generic definition has nothing left to resolve. Declarators next to
-        // one would use the generic record without its arguments.
-        if generic_definition(&declaration.specs).is_some() {
+        // The registration pass already holds the definition, so a generic
+        // definition has nothing left to resolve. Declarators next to one would
+        // use the generic type without its arguments.
+        let generic_record = generic_definition(&declaration.specs);
+        let generic_enum = generic_enum_definition(&declaration.specs);
+        if generic_record.is_some() || generic_enum.is_some() {
             if let Some(init) = declaration.declarators.first() {
+                let kind = if generic_enum.is_some() {
+                    "enum"
+                } else {
+                    "record"
+                };
                 return Err(Diagnostic::new(
                     init.span,
-                    "a generic record needs arguments before it can be used",
+                    format!("a generic {kind} needs arguments before it can be used"),
                 ));
             }
             return Ok(());
@@ -1372,6 +1421,16 @@ fn target_bytes(value: u64, width: usize, endian: crate::ir::Endian) -> Vec<u8> 
 fn generic_definition(specs: &ast::DeclSpecs) -> Option<&ast::RecordSpec> {
     specs.type_specs.iter().find_map(|spec| match spec {
         ast::TypeSpecifier::Record(record) if !record.generics.is_empty() => Some(record),
+        _ => None,
+    })
+}
+
+/// The generic enum specifier in a declaration, if it declares or uses one.
+fn generic_enum_definition(specs: &ast::DeclSpecs) -> Option<&ast::EnumSpec> {
+    specs.type_specs.iter().find_map(|spec| match spec {
+        ast::TypeSpecifier::Enum(enumeration) if !enumeration.generics.is_empty() => {
+            Some(enumeration)
+        }
         _ => None,
     })
 }

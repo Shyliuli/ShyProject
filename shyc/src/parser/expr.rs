@@ -460,6 +460,34 @@ impl Parser {
 
         self.bump();
         let name = Name::new(text, span);
+        // `Option<int>::Some` is a scoped name whose qualifier takes generic
+        // arguments. Parse the arguments speculatively and keep them only when
+        // `::` really follows, so `a < b > c` stays an ordinary comparison.
+        if self.at_punct("<")
+            && let Some(args) = self.try_parse(|parser| {
+                let args = parser.generic_args()?;
+                if !parser.at_punct("::") {
+                    return Err(Diagnostic::new(parser.here(), "not a generic scoped name"));
+                }
+                Ok(args)
+            })
+        {
+            self.expect_punct("::")?;
+            let member = self.expect_ident()?;
+            if self.at_punct("::") {
+                return Err(Diagnostic::new(
+                    self.here(),
+                    "scoped names with more than two segments are not supported",
+                ));
+            }
+            let span = name.span.join(member.span);
+            return Ok(Expr::GenericScopedName {
+                qualifier: name,
+                args,
+                name: member,
+                span,
+            });
+        }
         if self.eat_punct("::") {
             let method = self.expect_ident()?;
             if self.at_punct("::") {

@@ -86,6 +86,18 @@ impl Lowerer {
                 Some(variant) => Ok(variant.ty),
                 None => Ok(self.scoped_method(qualifier, name)?.ty),
             },
+            ast::Expr::GenericScopedName {
+                qualifier,
+                args,
+                name,
+                ..
+            } => {
+                let ty = self.generic_qualifier_type(qualifier, args)?;
+                match self.variant_of(ty, name) {
+                    Some(variant) => Ok(variant.ty),
+                    None => Ok(self.method_on(ty, name)?.ty),
+                }
+            }
             ast::Expr::BuiltinTypeCall { .. } => Ok(self.types.builtin(Builtin::Int)),
             ast::Expr::Unary { op, operand, span } => {
                 let operand_ty = self.type_of(operand, local)?;
@@ -153,6 +165,22 @@ impl Lowerer {
                         qualifier, name, ..
                     } = callee.as_ref()
                     && let Some(variant) = self.scoped_variant(qualifier, name)
+                {
+                    return Ok(variant.ty);
+                }
+                // `Option<int>::Some(value)` without call-site type arguments
+                // is a payload construction, not a call.
+                if type_args.is_empty()
+                    && let ast::Expr::GenericScopedName {
+                        qualifier,
+                        args,
+                        name,
+                        ..
+                    } = callee.as_ref()
+                    && let Some(variant) = {
+                        let ty = self.generic_qualifier_type(qualifier, args)?;
+                        self.variant_of(ty, name)
+                    }
                 {
                     return Ok(variant.ty);
                 }
@@ -445,7 +473,12 @@ impl Lowerer {
                 format!("unknown type name '{}'", qualifier.text),
             )
         })?;
-        self.method_of(record, &name.text).ok_or_else(|| {
+        self.method_on(record, name)
+    }
+
+    /// The method `name` of an already resolved type.
+    pub(super) fn method_on(&self, ty: TypeId, name: &ast::Name) -> Result<MethodInfo, Diagnostic> {
+        self.method_of(ty, &name.text).ok_or_else(|| {
             Diagnostic::new(name.span, format!("no method '{}' on this type", name.text))
         })
     }
@@ -459,6 +492,11 @@ impl Lowerer {
         name: &ast::Name,
     ) -> Option<ScopedVariant> {
         let ty = self.lookup_named_type(&qualifier.text)?;
+        self.variant_of(ty, name)
+    }
+
+    /// The payload enum variant called `name`, for an already resolved type.
+    pub(super) fn variant_of(&self, ty: TypeId, name: &ast::Name) -> Option<ScopedVariant> {
         let variant = self.types.enum_variant(ty, &name.text)?;
         Some(ScopedVariant {
             ty,
@@ -505,6 +543,16 @@ impl Lowerer {
         } = callee
         {
             return Ok(self.scoped_method(qualifier, name)?.ty);
+        }
+        if let ast::Expr::GenericScopedName {
+            qualifier,
+            args,
+            name,
+            ..
+        } = callee
+        {
+            let ty = self.generic_qualifier_type(qualifier, args)?;
+            return Ok(self.method_on(ty, name)?.ty);
         }
         let ty = self.type_of(callee, local)?;
         if self.types.is_function(ty) {

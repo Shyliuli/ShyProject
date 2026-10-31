@@ -186,6 +186,7 @@ fn specs_use_generics(specs: &DeclSpecs) -> bool {
     specs.type_specs.iter().any(|specifier| match specifier {
         TypeSpecifier::Generic(_) => true,
         TypeSpecifier::Record(record) => record_uses_generics(record),
+        TypeSpecifier::Enum(enumeration) => enum_uses_generics(enumeration),
         _ => false,
     })
 }
@@ -197,6 +198,26 @@ fn record_uses_generics(record: &RecordSpec) -> bool {
                 .iter()
                 .any(|member| specs_use_generics(&member.specs))
         })
+}
+
+fn enum_uses_generics(enumeration: &EnumSpec) -> bool {
+    !enumeration.generics.is_empty()
+        || enumeration.enumerators.as_ref().is_some_and(|enumerators| {
+            enumerators.iter().any(|enumerator| {
+                enumerator
+                    .payload
+                    .as_ref()
+                    .is_some_and(type_name_uses_generics)
+            })
+        })
+}
+
+fn type_name_uses_generics(type_name: &TypeName) -> bool {
+    specs_use_generics(&type_name.specs)
+        || type_name
+            .declarator
+            .as_ref()
+            .is_some_and(declarator_uses_generics)
 }
 
 fn declarator_uses_generics(declarator: &Declarator) -> bool {
@@ -354,8 +375,9 @@ fn enum_text(enumeration: &EnumSpec) -> String {
         Some(tag) => format!(" {}", tag.text),
         None => String::new(),
     };
+    let generics = generic_params_text(&enumeration.generics);
     let Some(enumerators) = &enumeration.enumerators else {
-        return format!("enum{underlying}{tag}");
+        return format!("enum{underlying}{tag}{generics}");
     };
     if enumerators
         .iter()
@@ -370,7 +392,7 @@ fn enum_text(enumeration: &EnumSpec) -> String {
             None => enumerator.name.text.clone(),
         });
     }
-    format!("enum{underlying}{tag} {{ {} }}", items.join(", "))
+    format!("enum{underlying}{tag}{generics} {{ {} }}", items.join(", "))
 }
 
 /// The visible C form of a payload enum: `struct Tag { tag; union {...} payload; }`.
@@ -387,6 +409,7 @@ fn payload_enum_text(enumeration: &EnumSpec, enumerators: &[Enumerator]) -> Stri
         Some(tag) => format!(" {}", tag.text),
         None => String::new(),
     };
+    let generics = generic_params_text(&enumeration.generics);
     let mut members = Vec::new();
     for enumerator in enumerators {
         if let Some(payload) = &enumerator.payload {
@@ -398,7 +421,7 @@ fn payload_enum_text(enumeration: &EnumSpec, enumerators: &[Enumerator]) -> Stri
         }
     }
     format!(
-        "struct{tag} {{ {tag_type} tag; union {{ {} }} payload; }}",
+        "struct{tag}{generics} {{ {tag_type} tag; union {{ {} }} payload; }}",
         members.join(" ")
     )
 }
@@ -537,6 +560,19 @@ fn expr_text(expression: &Expr) -> String {
             qualifier, name, ..
         } => {
             format!("{}::{}", qualifier.text, name.text)
+        }
+        Expr::GenericScopedName {
+            qualifier,
+            args,
+            name,
+            ..
+        } => {
+            format!(
+                "{}{}::{}",
+                qualifier.text,
+                generic_args_text(args),
+                name.text
+            )
         }
         Expr::BuiltinTypeCall {
             name, type_args, ..

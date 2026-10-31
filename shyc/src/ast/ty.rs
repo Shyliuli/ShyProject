@@ -195,13 +195,17 @@ pub struct MemberDeclarator {
 /// `enum Tag`.
 ///
 /// `underlying` is the optional storage type written in parentheses directly
-/// after `enum`. `enumerators` is `None` for a reference and `Some` for a
-/// definition, following the same rule as [`RecordSpec::members`].
+/// after `enum`. `generics` holds the parameters of a definition
+/// (`enum Option<T> { ... }`) and is empty otherwise. `enumerators` is `None`
+/// for a reference and `Some` for a definition, following the same rule as
+/// [`RecordSpec::members`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumSpec {
     pub span: Span,
     pub underlying: Option<TypeName>,
     pub tag: Option<Name>,
+    /// Generic parameters of an enum definition, empty if none.
+    pub generics: Vec<GenericParam>,
     pub enumerators: Option<Vec<Enumerator>>,
 }
 
