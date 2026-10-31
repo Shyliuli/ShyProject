@@ -97,6 +97,18 @@ direct and indirect calls, recursion, global initialisers with symbol
 relocations, ShyC's `impl`/`self`/`drop`, and floating point through the
 soft-float runtime.
 
+Payload enums (`enum(u8) Msg { Ping, Text(Str), Num(int) };`) are transparent
+aggregates: the tag at offset 0 and one union of payloads at the aligned
+payload offset. The tag uses the enum's underlying type, which is `int` when no
+`enum(type)` is written. Construct with `Msg::Text(value)` or `Msg::Ping` and
+read `.tag` and `.payload.<Variant>`. A payload enum is not an integer: it does
+not take part in arithmetic, integer conversion, or `switch`, and switch
+exhaustiveness is not checked. Global payload enum initialisers are not
+supported. `--emit=c-header` prints the equivalent `struct` with a `tag`
+member and a union `payload` member. The payload union keeps abi-plan's union
+classification, so a float-only payload does not necessarily use the same
+registers as an equivalent C struct.
+
 Floating point on the Shy target needs the runtime object linked in; build it
 once with the existing toolchain:
 

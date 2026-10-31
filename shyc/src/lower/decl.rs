@@ -441,6 +441,12 @@ impl Lowerer {
         offset: u32,
         init: &ast::Initializer,
     ) -> Result<(), Diagnostic> {
+        if self.types.is_payload_enum(ty) {
+            return Err(Diagnostic::new(
+                init.span,
+                "a global payload enum initializer is not supported yet",
+            ));
+        }
         match &init.kind {
             ast::InitializerKind::Expr(expr) => {
                 if self.types.is_array(ty) {
@@ -1052,9 +1058,6 @@ impl FnLower<'_> {
                     return self.copy_string_to(address, ty, group);
                 }
                 if self.l.types.is_aggregate(ty) && !self.l.types.is_array(ty) {
-                    if !self.l.types.is_record(ty) {
-                        return Err(Diagnostic::new(span, "invalid aggregate initializer"));
-                    }
                     let value = self.lower_expr(expr)?;
                     let source_ty = value.ty;
                     if !self.l.types.is_compatible(source_ty, ty) {
@@ -1091,6 +1094,12 @@ impl FnLower<'_> {
                         ));
                     }
                     return self.init_local_at(address, ty, &entry.value);
+                }
+                if self.l.types.is_payload_enum(ty) {
+                    return Err(Diagnostic::new(
+                        span,
+                        "a payload enum is initialized with Enum::Variant(value), not a brace list",
+                    ));
                 }
                 let size = self.l.size_of(ty, span)?;
                 if size > 0 {

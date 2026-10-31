@@ -132,6 +132,8 @@ pub enum TypeError {
     FlexibleArrayInUnion,
     NotARecord,
     RecordAlreadyComplete,
+    NotAnEnum,
+    EnumAlreadyComplete,
 }
 
 impl fmt::Display for TypeError {
@@ -153,6 +155,8 @@ impl fmt::Display for TypeError {
             TypeError::FlexibleArrayInUnion => "a union cannot have a flexible array member",
             TypeError::NotARecord => "type is not a struct or union",
             TypeError::RecordAlreadyComplete => "record is already complete",
+            TypeError::NotAnEnum => "type is not a payload enum",
+            TypeError::EnumAlreadyComplete => "enum is already complete",
         };
         f.write_str(message)
     }
@@ -461,7 +465,7 @@ impl TypeStore {
     }
 }
 
-fn align_up(value: u32, align: u32) -> Option<u32> {
+pub(super) fn align_up(value: u32, align: u32) -> Option<u32> {
     let remainder = value % align;
     if remainder == 0 {
         Some(value)
@@ -555,6 +559,7 @@ impl TypeStore {
             ),
             (TypeKind::Record { id: a, .. }, TypeKind::Record { id: b, .. }) => a == b,
             (TypeKind::Enum(a), TypeKind::Enum(b)) => a == b,
+            (TypeKind::PayloadEnum(a), TypeKind::PayloadEnum(b)) => a == b,
             _ => false,
         }
     }

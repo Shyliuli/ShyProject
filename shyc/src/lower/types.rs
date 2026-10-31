@@ -5,7 +5,7 @@
 use super::{InstanceKey, Lowerer, ResolvedSpecs};
 use crate::ast;
 use crate::sema::types::{
-    Builtin, QualifiedType, Qualifiers, RecordField, RecordKind, TypeId, TypeKind,
+    Builtin, EnumVariant, QualifiedType, Qualifiers, RecordField, RecordKind, TypeId, TypeKind,
 };
 use crate::source::{Diagnostic, Span};
 
@@ -728,11 +728,18 @@ impl Lowerer {
             return Ok(existing);
         };
 
+        // Without an explicit storage type the tag keeps a plain enum's `int`
+        // default; choosing the narrowest tag that fits is future work.
         let underlying = explicit.unwrap_or_else(|| self.types.builtin(Builtin::Int));
-        let ty = self
-            .types
-            .new_enum(underlying)
-            .map_err(|error| Diagnostic::new(spec.span, format!("invalid enum layout: {error}")))?;
+        // A variant with a payload makes the whole enum an aggregate object;
+        // a payload-free enum keeps the existing integer representation.
+        let has_payload = enumerators.iter().any(|e| e.payload.is_some());
+        let ty = if has_payload {
+            self.types.new_payload_enum(underlying)
+        } else {
+            self.types.new_enum(underlying)
+        }
+        .map_err(|error| Diagnostic::new(spec.span, format!("invalid enum layout: {error}")))?;
         if let Some(tag) = &spec.tag {
             if let Some(existing) = self.tag_in_current_scope(&tag.text) {
                 if let Some(explicit) = explicit
@@ -754,7 +761,7 @@ impl Lowerer {
             }
             self.declare_tag(&tag.text, ty, spec.span)?;
         }
-        self.define_enum(ty, underlying, enumerators)
+        self.define_enum(ty, underlying, enumerators, spec.span)
     }
 
     fn define_enum(
@@ -762,8 +769,11 @@ impl Lowerer {
         ty: TypeId,
         underlying: TypeId,
         enumerators: &[ast::Enumerator],
+        span: Span,
     ) -> Result<TypeId, Diagnostic> {
         let (min, max, bits, unsigned) = self.enum_value_range(underlying);
+        let payload_enum = self.types.is_payload_enum(ty);
+        let mut variants = Vec::new();
         let mut next: i128 = 0;
         for enumerator in enumerators {
             let value = match &enumerator.value {
@@ -796,6 +806,43 @@ impl Lowerer {
                 ));
             }
             next = value + 1;
+            let payload = match &enumerator.payload {
+                Some(type_name) => {
+                    let payload = self.resolve_type_name(type_name)?;
+                    if self.types.is_void(payload)
+                        || self.types.is_function(payload)
+                        || !self.types.is_complete(payload)
+                    {
+                        return Err(Diagnostic::new(
+                            type_name.span,
+                            "a variant payload must be a complete object type",
+                        ));
+                    }
+                    Some(payload)
+                }
+                None => None,
+            };
+            if payload_enum {
+                if variants
+                    .iter()
+                    .any(|variant: &EnumVariant| variant.name == enumerator.name.text)
+                {
+                    return Err(Diagnostic::new(
+                        enumerator.name.span,
+                        format!("duplicate variant '{}'", enumerator.name.text),
+                    ));
+                }
+                variants.push(EnumVariant {
+                    name: enumerator.name.text.clone(),
+                    value: value as i64,
+                    payload,
+                });
+            }
+            // A payload variant has no integer value of its own; it is only
+            // constructible as `Enum::Variant(value)`.
+            if payload.is_some() {
+                continue;
+            }
             if self.enum_consts.contains_key(&enumerator.name.text) {
                 return Err(Diagnostic::new(
                     enumerator.name.span,
@@ -808,6 +855,13 @@ impl Lowerer {
             let int = self.types.builtin(Builtin::Int);
             self.enum_consts
                 .insert(enumerator.name.text.clone(), (value as i64, int));
+        }
+        if payload_enum {
+            self.types
+                .complete_payload_enum(ty, variants)
+                .map_err(|error| {
+                    Diagnostic::new(span, format!("invalid payload enum layout: {error}"))
+                })?;
         }
         Ok(ty)
     }
@@ -824,7 +878,9 @@ impl Lowerer {
                 Ok(ty)
             }
             TypeKind::Bool => Err(invalid("enum underlying type cannot be `_Bool`")),
-            TypeKind::Enum(_) => Err(invalid("enum underlying type cannot be another enum")),
+            TypeKind::Enum(_) | TypeKind::PayloadEnum(_) => {
+                Err(invalid("enum underlying type cannot be another enum"))
+            }
             TypeKind::Float32 | TypeKind::Float64 => {
                 Err(invalid("enum underlying type cannot be floating point"))
             }

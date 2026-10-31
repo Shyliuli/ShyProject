@@ -52,10 +52,10 @@
 
 use crate::ast::{
     ArrayDeclarator, ArrayLength, AssignOp, BinaryOp, BuiltinType, DeclSpecs, Declaration,
-    Declarator, DerivedDeclarator, Designator, EnumSpec, Expr, FunctionDecl, FunctionDeclarator,
-    GenericArg, GenericArgKind, GenericParam, GenericParamKind, GenericSpec, Initializer,
-    InitializerKind, Item, MemberDecl, MemberOp, ParamDecl, PostfixOp, Qualifier, RecordKind,
-    RecordSpec, StorageClass, TranslationUnit, TypeName, TypeSpecifier, UnaryOp,
+    Declarator, DerivedDeclarator, Designator, EnumSpec, Enumerator, Expr, FunctionDecl,
+    FunctionDeclarator, GenericArg, GenericArgKind, GenericParam, GenericParamKind, GenericSpec,
+    Initializer, InitializerKind, Item, MemberDecl, MemberOp, ParamDecl, PostfixOp, Qualifier,
+    RecordKind, RecordSpec, StorageClass, TranslationUnit, TypeName, TypeSpecifier, UnaryOp,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -340,6 +340,10 @@ fn record_text(record: &RecordSpec) -> String {
 
 /// Print an `enum` specifier, with its underlying type and enumerators when
 /// it has them.
+///
+/// C has no payload enum, so a definition with payload variants is printed as
+/// the layout it really has: a tag followed by one union of the payloads. A
+/// plain enum keeps its ordinary `enum` spelling.
 fn enum_text(enumeration: &EnumSpec) -> String {
     let underlying = match &enumeration.underlying {
         Some(type_name) => format!("({})", type_name_text(type_name)),
@@ -352,6 +356,12 @@ fn enum_text(enumeration: &EnumSpec) -> String {
     let Some(enumerators) = &enumeration.enumerators else {
         return format!("enum{underlying}{tag}");
     };
+    if enumerators
+        .iter()
+        .any(|enumerator| enumerator.payload.is_some())
+    {
+        return payload_enum_text(enumeration, enumerators);
+    }
     let mut items = Vec::new();
     for enumerator in enumerators {
         items.push(match &enumerator.value {
@@ -360,6 +370,36 @@ fn enum_text(enumeration: &EnumSpec) -> String {
         });
     }
     format!("enum{underlying}{tag} {{ {} }}", items.join(", "))
+}
+
+/// The visible C form of a payload enum: `struct Tag { tag; union {...} payload; }`.
+///
+/// A payload enum without an explicit storage type uses `int` for its tag, so
+/// the exported header says `int` too. Every payloadless variant still only
+/// contributes its tag value and no union member.
+fn payload_enum_text(enumeration: &EnumSpec, enumerators: &[Enumerator]) -> String {
+    let tag_type = match &enumeration.underlying {
+        Some(type_name) => type_name_text(type_name),
+        None => "int".to_string(),
+    };
+    let tag = match &enumeration.tag {
+        Some(tag) => format!(" {}", tag.text),
+        None => String::new(),
+    };
+    let mut members = Vec::new();
+    for enumerator in enumerators {
+        if let Some(payload) = &enumerator.payload {
+            members.push(format!(
+                "{} {};",
+                type_name_text(payload),
+                enumerator.name.text
+            ));
+        }
+    }
+    format!(
+        "struct{tag} {{ {tag_type} tag; union {{ {} }} payload; }}",
+        members.join(" ")
+    )
 }
 
 /// Print one member declaration of a `struct` or `union`.

@@ -25,6 +25,11 @@ impl FnLower<'_> {
         op: ast::MemberOp,
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
+        // A payload enum has generated `.tag` and `.payload.<Variant>` members
+        // instead of source fields.
+        if let Some(value) = self.lower_payload_enum_member(object, name, span)? {
+            return Ok(value);
+        }
         // A bit-field shares its storage unit with its neighbours, so it is
         // read through a mask instead of as an ordinary member.
         let object_ty = self.type_of(object)?;
@@ -55,6 +60,214 @@ impl FnLower<'_> {
             ty: target.ty,
             qualifiers: target.qualifiers,
             kind: ExprKind::Place(target.address),
+        })
+    }
+
+    /// Lower `m.tag` and `m.payload.Variant` for a payload enum.
+    ///
+    /// The representation is transparent: the tag is the underlying integer
+    /// stored at offset 0, and every payload starts at the enum's payload
+    /// offset. `Ok(None)` means the object is not a payload enum, so ordinary
+    /// member access continues unchanged.
+    fn lower_payload_enum_member(
+        &mut self,
+        object: &ast::Expr,
+        name: &ast::Name,
+        span: Span,
+    ) -> Result<Option<ExprVal>, Diagnostic> {
+        // `m.payload.Variant`: the inner `m.payload` is not an object of its
+        // own, so the object type is the one behind that pair.
+        if let ast::Expr::Member {
+            object: base,
+            name: payload,
+            ..
+        } = object
+            && payload.text == "payload"
+        {
+            let base_ty = self.type_of(base)?;
+            if let Some(enum_ty) = self.l.payload_enum_target(base_ty) {
+                let value = self.lower_expr(base)?;
+                let (address, qualifiers) = self.payload_enum_address(value, span)?;
+                let variant = self
+                    .l
+                    .types
+                    .enum_variant(enum_ty, &name.text)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            name.span,
+                            format!("payload enum has no variant '{}'", name.text),
+                        )
+                    })?;
+                let Some(payload_ty) = variant.payload else {
+                    return Err(Diagnostic::new(
+                        name.span,
+                        format!("variant '{}' has no payload", name.text),
+                    ));
+                };
+                let payload_offset = self
+                    .l
+                    .types
+                    .enum_info(enum_ty)
+                    .map(|info| info.payload_offset)
+                    .unwrap_or(0);
+                // `with_offset` replaces the displacement, so keep the base
+                // object's own offset: the payload of a nested enum sits at
+                // the outer payload plus this enum's payload offset.
+                let displacement = address.offset + i64::from(payload_offset);
+                return Ok(Some(ExprVal {
+                    ty: payload_ty,
+                    qualifiers,
+                    kind: ExprKind::Place(address.with_offset(displacement)),
+                }));
+            }
+        }
+
+        let object_ty = self.type_of(object)?;
+        let Some(enum_ty) = self.l.payload_enum_target(object_ty) else {
+            return Ok(None);
+        };
+        match name.text.as_str() {
+            "tag" => {
+                let value = self.lower_expr(object)?;
+                let (address, qualifiers) = self.payload_enum_address(value, span)?;
+                let Some(underlying) = self.l.types.enum_underlying(enum_ty) else {
+                    return Err(Diagnostic::new(span, "payload enum has no underlying type"));
+                };
+                Ok(Some(ExprVal {
+                    ty: underlying,
+                    qualifiers,
+                    kind: ExprKind::Place(address),
+                }))
+            }
+            "payload" => Err(Diagnostic::new(
+                span,
+                "a payload is read through a variant: write 'value.payload.Variant'",
+            )),
+            other => Err(Diagnostic::new(
+                span,
+                format!("payload enum has no field '{other}'; use '.tag' or '.payload.<Variant>'"),
+            )),
+        }
+    }
+
+    /// The address of a payload enum object, dereferencing any pointer depth
+    /// for dot access. The returned qualifiers are the object's own, so a
+    /// volatile payload enum keeps volatile loads and stores.
+    fn payload_enum_address(
+        &mut self,
+        mut value: ExprVal,
+        span: Span,
+    ) -> Result<(ir::Address, Qualifiers), Diagnostic> {
+        if self.l.types.is_payload_enum(value.ty) {
+            let qualifiers = value.qualifiers;
+            return Ok((self.object_address(value, span)?, qualifiers));
+        }
+        while let Some(pointee) = self.l.pointee(value.ty) {
+            let (operand, _) = self.rvalue_val(value, span)?;
+            let address = super::address_operand(operand);
+            if self.l.types.is_payload_enum(pointee.ty) {
+                return Ok((address, pointee.qualifiers));
+            }
+            // Still a pointer: load it and keep walking.
+            let loaded = self.load_value(address, pointee.ty, pointee.qualifiers);
+            value = ExprVal {
+                ty: pointee.ty,
+                qualifiers: pointee.qualifiers,
+                kind: ExprKind::Value(loaded),
+            };
+        }
+        Err(Diagnostic::new(span, "member access needs a payload enum"))
+    }
+
+    /// Build a payload enum value: zero the whole object, store the tag, then
+    /// store the payload at its layout offset.
+    pub(super) fn construct_payload_enum(
+        &mut self,
+        qualifier: &ast::Name,
+        variant_name: &ast::Name,
+        variant: super::type_of::ScopedVariant,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<ExprVal, Diagnostic> {
+        let super::type_of::ScopedVariant { ty, tag, payload } = variant;
+        match (payload, args.len()) {
+            (None, 0) | (Some(_), 1) => {}
+            (None, _) => {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "variant '{}::{}' takes no payload",
+                        qualifier.text, variant_name.text
+                    ),
+                ));
+            }
+            (Some(_), 0) => {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "variant '{}::{}' needs a payload: write '{}::{}(value)'",
+                        qualifier.text, variant_name.text, qualifier.text, variant_name.text
+                    ),
+                ));
+            }
+            (Some(_), _) => {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "variant '{}::{}' takes exactly one payload value",
+                        qualifier.text, variant_name.text
+                    ),
+                ));
+            }
+        }
+
+        let size = self.l.size_of(ty, span)?;
+        let slot = self.temp_slot(ty, "");
+        self.emit_statement(ir::InstKind::MemSet {
+            dst: ir::Address::slot(slot),
+            byte: 0,
+            bytes: size,
+        });
+        let Some(underlying) = self.l.types.enum_underlying(ty) else {
+            return Err(Diagnostic::new(span, "payload enum has no underlying type"));
+        };
+        let tag_operand = ir::Operand::Constant(ir::Constant::int(self.l.ir_type(underlying), tag));
+        self.store_value(
+            ir::Address::slot(slot),
+            tag_operand,
+            underlying,
+            Qualifiers::NONE,
+        );
+        if let Some(payload_ty) = payload {
+            let payload_offset = self
+                .l
+                .types
+                .enum_info(ty)
+                .map(|info| info.payload_offset)
+                .unwrap_or(0);
+            let address = ir::Address::slot(slot).with_offset(i64::from(payload_offset));
+            let (operand, argument_ty) = self.rvalue(&args[0])?;
+            if self.l.types.is_aggregate(payload_ty) {
+                if !self.l.types.is_compatible(payload_ty, argument_ty) {
+                    return Err(Diagnostic::new(
+                        args[0].span(),
+                        format!(
+                            "payload of variant '{}::{}' has an incompatible type",
+                            qualifier.text, variant_name.text
+                        ),
+                    ));
+                }
+                self.store_value(address, operand, payload_ty, Qualifiers::NONE);
+            } else {
+                let operand =
+                    self.convert(operand, argument_ty, payload_ty, args[0].span(), false)?;
+                self.store_value(address, operand, payload_ty, Qualifiers::NONE);
+            }
+        }
+        Ok(ExprVal {
+            ty,
+            qualifiers: Qualifiers::NONE,
+            kind: ExprKind::Place(ir::Address::slot(slot)),
         })
     }
 
@@ -180,6 +393,9 @@ impl FnLower<'_> {
             span: call_span,
         } = callee
         {
+            if let Some(variant) = self.l.scoped_variant(qualifier, name) {
+                return self.construct_payload_enum(qualifier, name, variant, args, *call_span);
+            }
             let method = self.l.scoped_method(qualifier, name)?;
             let (params, variadic) = self.function_params(method.ty, span)?;
             let operands = self.lower_arguments(args, &params, variadic, span)?;

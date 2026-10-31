@@ -206,11 +206,15 @@ pub struct EnumSpec {
 }
 
 /// One enumerator. A missing `value` means "previous value plus one".
+///
+/// `payload` is the type in `Variant(Type)`; such an enum is a payload enum
+/// and the variant cannot also carry an explicit value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Enumerator {
     pub span: Span,
     pub name: Name,
     pub value: Option<Expr>,
+    pub payload: Option<TypeName>,
 }
 
 // ---------------------------------------------------------------------------

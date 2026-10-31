@@ -143,9 +143,59 @@ pub fn abi_type(types: &TypeStore, ty: TypeId) -> Result<AbiType, AbiError> {
             Some(underlying) => abi_type(types, underlying),
             None => Err(invalid("enum type has no underlying type")),
         },
+        // A payload enum is a visible aggregate in the ABI: a tag followed by
+        // one union holding every payload.
+        TypeKind::PayloadEnum(_) => payload_enum_type(types, ty),
         TypeKind::Record { kind, .. } => record_type(types, ty, *kind),
         TypeKind::Function { .. } => Err(invalid("function type has no object ABI shape")),
     }
+}
+
+/// The transparent `tag + union payload` ABI shape.
+///
+/// The payload is an [`AbiType::Union`], so it inherits `abi-plan`'s union
+/// rule: a union is classified as one opaque integer aggregate. A C compiler
+/// merges its members' classes instead, so a float-only payload is not
+/// register-compatible with an equivalent C struct (the same limitation
+/// already applies to a source-level union member).
+fn payload_enum_type(types: &TypeStore, ty: TypeId) -> Result<AbiType, AbiError> {
+    let info = types
+        .enum_info(ty)
+        .ok_or_else(|| invalid("payload enum has no layout"))?;
+    let size = types
+        .size_of(ty)
+        .map_err(|error| invalid(error.to_string()))?;
+    let align = types
+        .align_of(ty)
+        .map_err(|error| invalid(error.to_string()))?;
+
+    let mut variants = Vec::new();
+    for variant in &info.variants {
+        if let Some(payload) = variant.payload {
+            variants.push(AbiField::new(
+                variant.name.clone(),
+                abi_type(types, payload)?,
+                0,
+            ));
+        }
+    }
+
+    Ok(AbiType::Struct {
+        fields: vec![
+            AbiField::new("tag", abi_type(types, info.underlying)?, 0),
+            AbiField::new(
+                "payload",
+                AbiType::Union {
+                    fields: variants,
+                    size: info.payload_size,
+                    align: info.payload_align as u16,
+                },
+                info.payload_offset,
+            ),
+        ],
+        size,
+        align: align as u16,
+    })
 }
 
 fn record_type(types: &TypeStore, ty: TypeId, kind: RecordKind) -> Result<AbiType, AbiError> {

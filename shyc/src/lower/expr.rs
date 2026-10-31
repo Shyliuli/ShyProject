@@ -543,8 +543,13 @@ impl FnLower<'_> {
             }
             ast::Expr::Name(name) => self.lower_name(name),
             ast::Expr::ScopedName {
-                qualifier, name, ..
+                qualifier,
+                name,
+                span,
             } => {
+                if let Some(variant) = self.l.scoped_variant(qualifier, name) {
+                    return self.construct_payload_enum(qualifier, name, variant, &[], *span);
+                }
                 let method = self.l.scoped_method(qualifier, name)?;
                 Ok(ExprVal {
                     ty: method.ty,

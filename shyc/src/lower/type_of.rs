@@ -13,6 +13,16 @@ use crate::source::{Diagnostic, Span};
 /// A local-name lookup supplied by the function lowerer.
 pub(super) type LocalLookup<'a> = &'a mut dyn FnMut(&str) -> Option<TypeId>;
 
+/// One payload enum variant resolved from `Enum::Variant`.
+pub(super) struct ScopedVariant {
+    /// The payload enum that owns the variant.
+    pub ty: TypeId,
+    /// The tag value stored when this variant is active.
+    pub tag: i64,
+    /// The type stored at the payload offset, or `None` for a plain variant.
+    pub payload: Option<TypeId>,
+}
+
 impl Lowerer {
     pub(super) fn type_of(
         &mut self,
@@ -72,7 +82,10 @@ impl Lowerer {
             }
             ast::Expr::ScopedName {
                 qualifier, name, ..
-            } => Ok(self.scoped_method(qualifier, name)?.ty),
+            } => match self.scoped_variant(qualifier, name) {
+                Some(variant) => Ok(variant.ty),
+                None => Ok(self.scoped_method(qualifier, name)?.ty),
+            },
             ast::Expr::BuiltinTypeCall { .. } => Ok(self.types.builtin(Builtin::Int)),
             ast::Expr::Unary { op, operand, span } => {
                 let operand_ty = self.type_of(operand, local)?;
@@ -133,6 +146,16 @@ impl Lowerer {
                 span,
                 ..
             } => {
+                // `Enum::Variant(value)` constructs an aggregate; it is not a
+                // function call, so it never reaches the signature path.
+                if type_args.is_empty()
+                    && let ast::Expr::ScopedName {
+                        qualifier, name, ..
+                    } = callee.as_ref()
+                    && let Some(variant) = self.scoped_variant(qualifier, name)
+                {
+                    return Ok(variant.ty);
+                }
                 // Type-only analysis instantiates through the same cache as
                 // lowering, so `sizeof(identity<int>(1))` names the instance
                 // the call will later use.
@@ -339,7 +362,54 @@ impl Lowerer {
         span: Span,
         local: LocalLookup<'_>,
     ) -> Result<TypeId, Diagnostic> {
+        // `m.payload.Variant` is the only way to name a payload; the inner
+        // `m.payload` has no type of its own.
+        if let ast::Expr::Member {
+            object: base,
+            name: payload,
+            ..
+        } = object
+            && payload.text == "payload"
+        {
+            let base_ty = self.type_of(base, &mut *local)?;
+            if let Some(enum_ty) = self.payload_enum_target(base_ty) {
+                let variant = self
+                    .types
+                    .enum_variant(enum_ty, &name.text)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            span,
+                            format!("payload enum has no variant '{}'", name.text),
+                        )
+                    })?;
+                return match variant.payload {
+                    Some(payload) => Ok(payload),
+                    None => Err(Diagnostic::new(
+                        span,
+                        format!("variant '{}' has no payload", name.text),
+                    )),
+                };
+            }
+        }
         let object_ty = self.type_of(object, local)?;
+        if let Some(enum_ty) = self.payload_enum_target(object_ty) {
+            return match name.text.as_str() {
+                "tag" => self
+                    .types
+                    .enum_underlying(enum_ty)
+                    .ok_or_else(|| Diagnostic::new(span, "payload enum has no underlying type")),
+                "payload" => Err(Diagnostic::new(
+                    span,
+                    "a payload is read through a variant: write 'value.payload.Variant'",
+                )),
+                other => Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "payload enum has no field '{other}'; use '.tag' or '.payload.<Variant>'"
+                    ),
+                )),
+            };
+        }
         if op == ast::MemberOp::Arrow && !self.types.is_pointer(object_ty) {
             return Err(Diagnostic::new(
                 span,
@@ -378,6 +448,39 @@ impl Lowerer {
         self.method_of(record, &name.text).ok_or_else(|| {
             Diagnostic::new(name.span, format!("no method '{}' on this type", name.text))
         })
+    }
+
+    /// Resolve `Type::Variant` when `qualifier` names a payload enum.
+    ///
+    /// `None` leaves the name to method resolution or to a diagnostic.
+    pub(super) fn scoped_variant(
+        &self,
+        qualifier: &ast::Name,
+        name: &ast::Name,
+    ) -> Option<ScopedVariant> {
+        let ty = self.lookup_named_type(&qualifier.text)?;
+        let variant = self.types.enum_variant(ty, &name.text)?;
+        Some(ScopedVariant {
+            ty,
+            tag: variant.value,
+            payload: variant.payload,
+        })
+    }
+
+    /// The payload enum an object of `ty` denotes, through any pointer depth.
+    ///
+    /// ShyC dereferences dot access automatically, so `m.tag` on a `Msg *` or
+    /// `Msg **` reaches the same object as an explicit dereference would.
+    pub(super) fn payload_enum_target(&self, mut ty: TypeId) -> Option<TypeId> {
+        loop {
+            if self.types.is_payload_enum(ty) {
+                return Some(ty);
+            }
+            let TypeKind::Pointer { pointee } = self.types.kind(ty) else {
+                return None;
+            };
+            ty = pointee.ty;
+        }
     }
 
     pub(super) fn callee_function_type(

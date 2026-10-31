@@ -29,6 +29,8 @@
 
 pub use super::layout::{Layout, RecordField, RecordInfo, TypeError};
 
+use super::layout::align_up;
+
 // ---------------------------------------------------------------------------
 // Identities
 // ---------------------------------------------------------------------------
@@ -214,7 +216,12 @@ pub enum TypeKind {
         id: RecordId,
         kind: RecordKind,
     },
+    /// A C-compatible enum: an object whose representation is exactly its
+    /// underlying integer type.
     Enum(EnumId),
+    /// An enum with at least one payload variant. It is an aggregate object
+    /// (`tag` plus a union of payloads), never an integer.
+    PayloadEnum(EnumId),
 }
 
 /// A type and its layout. `size` is `None` while the type is incomplete.
@@ -238,9 +245,32 @@ pub enum RecordKind {
 /// An enum type and its integer representation. A plain `enum` uses `int`,
 /// while an explicit `enum(type)` stores the chosen type. Enum identity is
 /// still distinct from the underlying type.
+///
+/// `variants` is empty for a plain (payload-free) enum. A payload enum stores
+/// its tag in the first `size_of(underlying)` bytes and every payload at
+/// `payload_offset`, overlapping in one union of size `payload_size`. That is
+/// the transparent `tag + max-payload` layout: no hidden discriminant, no
+/// pointer indirection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumInfo {
     pub underlying: TypeId,
+    pub variants: Vec<EnumVariant>,
+    /// Byte offset of the payload union, and the union's size and alignment.
+    /// A plain enum leaves these at `0, 0, 1`.
+    pub payload_offset: u32,
+    pub payload_size: u32,
+    pub payload_align: u32,
+}
+
+/// One payload enum variant.
+///
+/// `value` is the tag written to the object; `payload` is the type stored at
+/// [`EnumInfo::payload_offset`] when the variant is active.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumVariant {
+    pub name: String,
+    pub value: i64,
+    pub payload: Option<TypeId>,
 }
 
 // ---------------------------------------------------------------------------
@@ -469,13 +499,90 @@ impl TypeStore {
         let size = self.size_of(underlying)?;
         let align = self.align_of(underlying)?;
         let id = EnumId(self.enums.len() as u32);
-        self.enums.push(EnumInfo { underlying });
+        self.enums.push(EnumInfo {
+            underlying,
+            variants: Vec::new(),
+            payload_offset: 0,
+            payload_size: 0,
+            payload_align: 1,
+        });
         Ok(push_type(
             &mut self.types,
             TypeKind::Enum(id),
             Some(size),
             Some(align),
         ))
+    }
+
+    /// Creates a fresh payload enum. Its layout is unknown until
+    /// [`TypeStore::complete_payload_enum`] supplies the variants, so the type
+    /// is incomplete and cannot be a payload or a member before then.
+    pub fn new_payload_enum(&mut self, underlying: TypeId) -> Result<TypeId, TypeError> {
+        self.size_of(underlying)?;
+        self.align_of(underlying)?;
+        let id = EnumId(self.enums.len() as u32);
+        self.enums.push(EnumInfo {
+            underlying,
+            variants: Vec::new(),
+            payload_offset: 0,
+            payload_size: 0,
+            payload_align: 1,
+        });
+        Ok(push_type(
+            &mut self.types,
+            TypeKind::PayloadEnum(id),
+            None,
+            None,
+        ))
+    }
+
+    /// Defines the variants of a payload enum and computes the transparent
+    /// `tag + max-payload` layout.
+    ///
+    /// The tag occupies the underlying type's bytes at offset 0. Every payload
+    /// starts at the same offset, aligned for the widest one, and the object is
+    /// rounded up to the larger of the tag and payload alignments. A
+    /// payload-free variant contributes no bytes to the union.
+    pub fn complete_payload_enum(
+        &mut self,
+        ty: TypeId,
+        variants: Vec<EnumVariant>,
+    ) -> Result<Layout, TypeError> {
+        let TypeKind::PayloadEnum(id) = *self.kind(ty) else {
+            return Err(TypeError::NotAnEnum);
+        };
+        if self.get(ty).size.is_some() {
+            return Err(TypeError::EnumAlreadyComplete);
+        }
+        let underlying = self.enums[id.index()].underlying;
+        let tag_size = self.size_of(underlying)?;
+        let tag_align = self.align_of(underlying)?;
+
+        let mut payload_size = 0u32;
+        let mut payload_align = 1u32;
+        for variant in &variants {
+            let Some(payload) = variant.payload else {
+                continue;
+            };
+            payload_size = payload_size.max(self.size_of(payload)?);
+            payload_align = payload_align.max(self.align_of(payload)?);
+        }
+        let payload_offset = align_up(tag_size, payload_align).ok_or(TypeError::LayoutOverflow)?;
+        let align = tag_align.max(payload_align);
+        let size =
+            align_up(payload_offset + payload_size, align).ok_or(TypeError::LayoutOverflow)?;
+
+        self.enums[id.index()] = EnumInfo {
+            underlying,
+            variants,
+            payload_offset,
+            payload_size,
+            payload_align,
+        };
+        let enum_type = &mut self.types[ty.index()];
+        enum_type.size = Some(size);
+        enum_type.align = Some(align);
+        Ok(Layout { size, align })
     }
 
     pub fn record_info(&self, ty: TypeId) -> Option<&RecordInfo> {
@@ -487,13 +594,24 @@ impl TypeStore {
 
     pub fn enum_info(&self, ty: TypeId) -> Option<&EnumInfo> {
         match self.kind(ty) {
-            TypeKind::Enum(id) => self.enums.get(id.index()),
+            TypeKind::Enum(id) | TypeKind::PayloadEnum(id) => self.enums.get(id.index()),
             _ => None,
         }
     }
 
     pub fn enum_underlying(&self, ty: TypeId) -> Option<TypeId> {
         self.enum_info(ty).map(|info| info.underlying)
+    }
+
+    /// The payload enum variant called `name`, if `ty` is a payload enum.
+    pub fn enum_variant(&self, ty: TypeId, name: &str) -> Option<&EnumVariant> {
+        match self.kind(ty) {
+            TypeKind::PayloadEnum(id) => self.enums[id.index()]
+                .variants
+                .iter()
+                .find(|variant| variant.name == name),
+            _ => None,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -539,12 +657,16 @@ impl TypeStore {
         matches!(self.kind(ty), TypeKind::Record { .. })
     }
 
+    pub fn is_payload_enum(&self, ty: TypeId) -> bool {
+        matches!(self.kind(ty), TypeKind::PayloadEnum(_))
+    }
+
     pub fn is_scalar(&self, ty: TypeId) -> bool {
         self.is_arithmetic(ty) || self.is_pointer(ty)
     }
 
     pub fn is_aggregate(&self, ty: TypeId) -> bool {
-        self.is_array(ty) || self.is_record(ty)
+        self.is_array(ty) || self.is_record(ty) || self.is_payload_enum(ty)
     }
 
     /// A type is complete when its size is known. `void`, function types, and

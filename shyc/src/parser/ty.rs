@@ -339,16 +339,40 @@ impl Parser {
                     // Enumerators are ordinary identifiers and may shadow a
                     // typedef name from an outer scope.
                     self.declare_value(&name.text);
+                    let payload = if self.eat_punct("(") {
+                        let type_name = self.type_name()?;
+                        self.expect_punct(")")?;
+                        Some(type_name)
+                    } else {
+                        None
+                    };
+                    if payload.is_some() && self.at_punct("=") {
+                        return Err(Diagnostic::new(
+                            self.here(),
+                            format!(
+                                "payload variant '{}' cannot have an explicit value",
+                                name.text
+                            ),
+                        ));
+                    }
                     let value = if self.eat_punct("=") {
                         Some(self.conditional()?)
                     } else {
                         None
                     };
-                    let span = match &value {
+                    let mut span = match &value {
                         Some(value) => name.span.join(value.span()),
                         None => name.span,
                     };
-                    list.push(Enumerator { span, name, value });
+                    if let Some(payload) = &payload {
+                        span = span.join(payload.span);
+                    }
+                    list.push(Enumerator {
+                        span,
+                        name,
+                        value,
+                        payload,
+                    });
                     if !self.eat_punct(",") {
                         break;
                     }

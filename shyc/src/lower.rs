@@ -328,10 +328,15 @@ impl Lowerer {
             TypeKind::Float32 => ir::Type::F32,
             TypeKind::Float64 => ir::Type::F64,
             TypeKind::Pointer { .. } | TypeKind::Function { .. } => ir::Type::Ptr,
-            TypeKind::Array { .. } | TypeKind::Record { .. } => ir::Type::aggregate(
-                self.types.size_of(ty).unwrap_or(0),
-                self.types.align_of(ty).unwrap_or(1),
-            ),
+            // A payload enum is an aggregate object in the IR; its tag and
+            // payload offsets stay in the source arena, the same way a record
+            // keeps its field layout there.
+            TypeKind::Array { .. } | TypeKind::Record { .. } | TypeKind::PayloadEnum(_) => {
+                ir::Type::aggregate(
+                    self.types.size_of(ty).unwrap_or(0),
+                    self.types.align_of(ty).unwrap_or(1),
+                )
+            }
         }
     }
 
