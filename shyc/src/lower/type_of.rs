@@ -52,6 +52,15 @@ impl Lowerer {
                                 )
                             })
                     }
+                    None if self.generic_functions.contains_key(&name.text) => {
+                        Err(Diagnostic::new(
+                            name.span,
+                            format!(
+                                "generic function '{}' needs explicit type arguments",
+                                name.text
+                            ),
+                        ))
+                    }
                     None => Err(Diagnostic::new(
                         name.span,
                         format!("use of undeclared identifier '{}'", name.text),
@@ -116,15 +125,19 @@ impl Lowerer {
                 Ok(self.decay_type(ty))
             }
             ast::Expr::Call {
-                callee, type_args, ..
+                callee,
+                type_args,
+                span,
+                ..
             } => {
-                if !type_args.is_empty() {
-                    return Err(Diagnostic::new(
-                        type_args[0].span,
-                        "generic calls are not supported by lowering yet",
-                    ));
-                }
-                let function_ty = self.callee_function_type(callee, local)?;
+                // Type-only analysis instantiates through the same cache as
+                // lowering, so `sizeof(identity<int>(1))` names the instance
+                // the call will later use.
+                let function_ty = if type_args.is_empty() {
+                    self.callee_function_type(callee, local)?
+                } else {
+                    self.generic_call_target(callee, type_args, *span)?.ty
+                };
                 match self.types.kind(function_ty) {
                     TypeKind::Function { result, .. } => Ok(*result),
                     _ => Err(Diagnostic::new(

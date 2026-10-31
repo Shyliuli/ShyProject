@@ -34,8 +34,9 @@
 //! - objects become `extern` declarations without their initializers, so the
 //!   header declares but never defines anything;
 //! - `static` objects and functions stay private to their translation unit;
-//! - generic records, their instantiations, and any declaration whose type
-//!   mentions one stay private too, because C cannot spell them;
+//! - generic records, generic functions, their instantiations, and any
+//!   declaration whose type mentions one stay private too, because C cannot
+//!   spell a template and every instance is internal to its unit;
 //! - `impl` blocks are skipped: method export arrives with generic
 //!   instantiation work, because a method name alone does not name a symbol.
 //!
@@ -168,10 +169,10 @@ fn prototype_text(function: &FunctionDecl) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Generic records
+// Generic records and functions
 // ---------------------------------------------------------------------------
 
-/// Whether a declaration mentions a generic record anywhere in its type.
+/// Whether a declaration mentions a generic record or declares a `fn` template.
 fn declaration_uses_generics(declaration: &Declaration) -> bool {
     specs_use_generics(&declaration.specs)
         || declaration
@@ -199,13 +200,18 @@ fn record_uses_generics(record: &RecordSpec) -> bool {
 
 fn declarator_uses_generics(declarator: &Declarator) -> bool {
     declarator.derived.iter().any(|derived| match derived {
-        DerivedDeclarator::Function(function) => function.params.iter().any(|param| {
-            specs_use_generics(&param.specs)
-                || param
-                    .declarator
-                    .as_ref()
-                    .is_some_and(declarator_uses_generics)
-        }),
+        DerivedDeclarator::Function(function) => {
+            // A `fn name<T>` template has no C spelling. Its instances are
+            // lowered later, and each one has an internal symbol.
+            !function.generics.is_empty()
+                || function.params.iter().any(|param| {
+                    specs_use_generics(&param.specs)
+                        || param
+                            .declarator
+                            .as_ref()
+                            .is_some_and(declarator_uses_generics)
+                })
+        }
         _ => false,
     })
 }

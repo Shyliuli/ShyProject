@@ -65,7 +65,7 @@ impl Lowerer {
         {
             return Err(Diagnostic::new(
                 argument.span,
-                "generic calls are not supported by lowering yet",
+                "a generic call is not a constant expression",
             ));
         }
         match expr {

@@ -5,6 +5,7 @@
 //! have an initializer, explicit stores or a `MemSet`/`MemCpy` sequence.
 
 use super::const_eval::ConstKind;
+use super::generics::generic_declarator;
 use super::types::ResolvedSpecsWithName;
 use super::{FnLower, GlobalRef, Local, Lowerer, ObjectInfo, PendingFunction, ResolvedSpecs};
 use crate::ast;
@@ -15,6 +16,7 @@ use crate::source::{Diagnostic, Span};
 impl Lowerer {
     pub(super) fn collect(&mut self, unit: &ast::TranslationUnit) -> Result<(), Diagnostic> {
         self.register_generic_records(unit)?;
+        self.register_generic_functions(unit)?;
         for item in &unit.items {
             match item {
                 ast::Item::Decl(declaration) => self.collect_declaration(declaration)?,
@@ -78,6 +80,15 @@ impl Lowerer {
                     "a generic record needs type arguments before it can be used",
                 ));
             }
+            return Ok(());
+        }
+        // A `fn` template is not a concrete function yet; its prototype has no
+        // symbol and no file-scope name until an instantiation needs one.
+        if declaration
+            .declarators
+            .iter()
+            .any(|init| generic_declarator(&init.declarator).is_some())
+        {
             return Ok(());
         }
         for init in &declaration.declarators {
@@ -150,6 +161,17 @@ impl Lowerer {
         declaration: &ast::FunctionDecl,
         impl_context: Option<(TypeId, String)>,
     ) -> Result<(), Diagnostic> {
+        if generic_declarator(&declaration.declarator).is_some() {
+            if impl_context.is_some() {
+                return Err(Diagnostic::new(
+                    declaration.declarator.span,
+                    "generic methods are not supported by lowering yet",
+                ));
+            }
+            // A file-scope template was registered by the collection pre-pass;
+            // only an instantiation creates a concrete function.
+            return Ok(());
+        }
         self.reject_generic_declarator(&declaration.declarator)?;
         let ResolvedSpecs { ty, qualifiers } = self.resolve_specs(&declaration.specs)?;
         let resolved = self.resolve_declarator(ty, qualifiers, &declaration.declarator)?;
@@ -214,6 +236,8 @@ impl Lowerer {
             symbol,
             ty: resolved.ty,
             impl_context,
+            env: None,
+            internal: false,
         });
         Ok(())
     }

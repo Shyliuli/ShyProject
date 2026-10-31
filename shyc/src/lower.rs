@@ -25,6 +25,7 @@ mod call;
 mod const_eval;
 mod decl;
 mod expr;
+mod generics;
 mod shyc;
 mod stmt;
 mod type_of;
@@ -132,6 +133,12 @@ pub(super) struct PendingFunction {
     pub symbol: String,
     pub ty: TypeId,
     pub impl_context: Option<(TypeId, String)>,
+    /// Concrete bindings of the generic parameters, when this pending function
+    /// is one instantiation of a template.
+    pub env: Option<GenericEnv>,
+    /// Internal linkage for a reason other than `static`: every generic
+    /// instance is private to its translation unit.
+    pub internal: bool,
 }
 
 #[derive(Default)]
@@ -151,9 +158,38 @@ pub(super) struct GenericRecord {
     pub spec: ast::RecordSpec,
 }
 
-/// Identity of one instantiation: the generic record's tag plus its concrete
-/// type arguments. Stage 2 only instantiates type arguments, so the key has no
-/// const part yet.
+/// One generic function definition or prototype, kept as the AST template it
+/// is.
+///
+/// Instantiating it binds the parameters in a pushed type scope and re-resolves
+/// the same declaration, so no source is copied and the type arena needs no
+/// generic kind. A prototype registers without a declaration because there is
+/// no body to instantiate yet.
+#[derive(Clone)]
+pub(super) struct GenericFunction {
+    pub params: Vec<ast::GenericParam>,
+    pub decl: Option<ast::FunctionDecl>,
+}
+
+/// Concrete type bindings for one generic function instantiation.
+///
+/// `const` parameters are not supported yet, so only types are bound.
+#[derive(Clone)]
+pub(super) struct GenericEnv {
+    pub types: HashMap<String, TypeId>,
+}
+
+/// The emitted symbol and concrete type of one function instantiation.
+#[derive(Clone)]
+pub(super) struct FunctionInstance {
+    pub symbol: String,
+    pub ty: TypeId,
+}
+
+/// Identity of one instantiation: the generic's name plus its concrete type
+/// arguments. Records and functions keep separate caches, so one key type
+/// serves both. Only type arguments are instantiated, so the key has no const
+/// part yet.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct InstanceKey {
     pub name: String,
@@ -184,7 +220,12 @@ pub(super) struct Lowerer {
     pub generic_records: HashMap<String, GenericRecord>,
     /// Instantiated generic records, keyed by tag and concrete arguments.
     pub record_instances: HashMap<InstanceKey, TypeId>,
-    /// Nesting level of the instantiation currently being resolved.
+    /// Every generic function definition or prototype, registered before
+    /// anything resolves.
+    pub generic_functions: HashMap<String, GenericFunction>,
+    /// Instantiated generic functions, keyed by name and concrete arguments.
+    pub function_instances: HashMap<InstanceKey, FunctionInstance>,
+    /// Nesting level of the generic instantiation currently being resolved.
     pub instantiation_depth: u32,
     pub impls: HashMap<TypeId, ImplInfo>,
     pub impl_context: Option<(TypeId, String)>,
@@ -220,6 +261,8 @@ impl Lowerer {
             enum_consts: HashMap::new(),
             generic_records: HashMap::new(),
             record_instances: HashMap::new(),
+            generic_functions: HashMap::new(),
+            function_instances: HashMap::new(),
             instantiation_depth: 0,
             impls: HashMap::new(),
             impl_context: None,
@@ -702,8 +745,10 @@ impl<'a> FnLower<'a> {
                 )
             })?;
         let symbol = pending.symbol;
+        let env = pending.env;
         let mut f = ir::Function::new(&symbol, signature, l.layout, abi);
-        f.internal = matches!(pending.decl.specs.storage, Some(ast::StorageClass::Static));
+        f.internal = pending.internal
+            || matches!(pending.decl.specs.storage, Some(ast::StorageClass::Static));
         let function_declarator = match pending.decl.declarator.derived.first() {
             Some(ast::DerivedDeclarator::Function(function)) => Some(function),
             _ => None,
@@ -744,6 +789,16 @@ impl<'a> FnLower<'a> {
             body: pending.decl.body,
         };
         lowering.l.push_type_scope_for_function();
+        // An instantiated generic body still names its parameters (`T x;`), so
+        // the concrete bindings join the function's own type scope. A direct
+        // insert, unlike `declare_typedef`, lets a parameter shadow an outer
+        // name.
+        if let Some(env) = env {
+            let scope = lowering.l.type_scopes.last_mut().expect("type scope stack");
+            for (name, ty) in env.types {
+                scope.typedefs.insert(name, ty);
+            }
+        }
         lowering.l.current_function_name = Some(symbol.clone());
         for (index, ty) in params.iter().enumerate() {
             let param = lowering.f.params[index];

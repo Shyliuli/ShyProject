@@ -428,6 +428,11 @@ impl FnLower<'_> {
                 if name == "__func__" || name == "__FUNCTION__" {
                     let (symbol, ty) = self.function_name_string()?;
                     Ok(Resolved::FuncName { symbol, ty })
+                } else if self.l.generic_functions.contains_key(name) {
+                    Err(Diagnostic::new(
+                        span,
+                        format!("generic function '{name}' needs explicit type arguments"),
+                    ))
                 } else {
                     Err(Diagnostic::new(
                         span,
@@ -601,15 +606,7 @@ impl FnLower<'_> {
                 type_args,
                 args,
                 span,
-            } => {
-                if !type_args.is_empty() {
-                    return Err(Diagnostic::new(
-                        type_args[0].span,
-                        "generic calls are not supported by lowering yet",
-                    ));
-                }
-                self.lower_call(callee, args, *span)
-            }
+            } => self.lower_call(callee, type_args, args, *span),
             ast::Expr::Index { array, index, span } => self.lower_index(array, index, *span),
             ast::Expr::Member {
                 object,
