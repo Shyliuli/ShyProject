@@ -24,7 +24,7 @@ pub(crate) struct GlobalNames {
 /// pass insensitive to declaration order: the real parse gets the complete
 /// file-scope sets no matter where a typedef or tag is written.
 pub(crate) fn prescan(tokens: &[Token]) -> GlobalNames {
-    let mut parser = Parser::new(tokens, true);
+    let mut parser = Parser::new(tokens.to_vec(), true);
     parser.prescan_items();
     GlobalNames {
         typedefs: std::mem::take(&mut parser.scopes[0].typedefs),
@@ -32,7 +32,7 @@ pub(crate) fn prescan(tokens: &[Token]) -> GlobalNames {
     }
 }
 
-impl Parser<'_> {
+impl Parser {
     // -- top-level items --------------------------------------------------
 
     /// Parses one file-scope item: a declaration, a function definition, or an

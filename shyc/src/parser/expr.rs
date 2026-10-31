@@ -14,7 +14,7 @@ use crate::source::{Diagnostic, Span};
 
 use super::Parser;
 
-impl Parser<'_> {
+impl Parser {
     /// Comma expression. Used by expression statements, `return`, `for`
     /// clauses, and parenthesised subexpressions.
     pub(crate) fn expression(&mut self) -> Result<Expr, Diagnostic> {

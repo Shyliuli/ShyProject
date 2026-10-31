@@ -5,7 +5,7 @@ use crate::source::Diagnostic;
 
 use super::Parser;
 
-impl Parser<'_> {
+impl Parser {
     /// An initializer: `= expr`, or a brace-enclosed list.
     pub(crate) fn initializer(&mut self) -> Result<Initializer, Diagnostic> {
         if self.at_punct("{") {

@@ -6,7 +6,7 @@ use crate::source::{Diagnostic, Span};
 
 use super::Parser;
 
-impl Parser<'_> {
+impl Parser {
     /// Index of the `n`-th following token, ignoring `Newline` tokens.
     fn index_ahead(&self, count: usize) -> usize {
         let mut index = self.pos;
@@ -111,6 +111,28 @@ impl Parser<'_> {
         } else {
             Err(self.expected(&format!("'{punct}'")))
         }
+    }
+
+    /// Consumes one closing `>`.
+    ///
+    /// A `>>` token is split into two `>` tokens whose spans meet at the token
+    /// midpoint, so a future nested generic argument list can close one angle
+    /// bracket at a time.
+    #[allow(dead_code)] // No generic argument list parses yet.
+    pub(crate) fn close_angle(&mut self) -> Result<Span, Diagnostic> {
+        if self.at_punct(">>") {
+            let index = self.index_ahead(0);
+            let mut second = self.tokens[index].clone();
+            let midpoint = second.span.start + (second.span.end - second.span.start) / 2;
+            second.kind = TokenKind::Punct(">".to_string());
+            second.span.start = midpoint;
+            second.at_line_start = false;
+            second.leading_space = false;
+            self.tokens[index].kind = TokenKind::Punct(">".to_string());
+            self.tokens[index].span.end = midpoint;
+            self.tokens.insert(index + 1, second);
+        }
+        self.expect_punct(">")
     }
 
     pub(crate) fn expect_keyword(&mut self, word: &str) -> Result<Span, Diagnostic> {

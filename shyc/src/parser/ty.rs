@@ -16,7 +16,7 @@ use crate::source::Diagnostic;
 use super::Parser;
 use super::cursor::unsupported_message;
 
-impl Parser<'_> {
+impl Parser {
     // -- declaration specifiers ------------------------------------------
 
     /// Parses the specifier list in front of a declaration or type name.

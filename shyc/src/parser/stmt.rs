@@ -6,7 +6,7 @@ use crate::source::Diagnostic;
 use super::Parser;
 use super::cursor::is_keyword;
 
-impl Parser<'_> {
+impl Parser {
     /// One statement, including a declaration used as a statement.
     pub(crate) fn statement(&mut self) -> Result<Stmt, Diagnostic> {
         if self.at_punct("{") {
