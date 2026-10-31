@@ -119,10 +119,13 @@ ShyC does not have bindings, ownership, or reference semantics. `mut` only
 controls whether the object is writable in a Rustic translation unit; aliases
 remain ordinary C aliases. `const` remains exactly C's type qualifier.
 
-A Rustic unit defaults declarations and pointer targets to read-only access;
-`mut` explicitly enables writes. `#![disable_rustic_mut]` makes the unit use
-ordinary C writable defaults. This only affects checking and optimization; it
-does not change the ABI, object layout, pointer representation, or lifetime.
+The frontend currently implements the `let` form itself: a `let` local without
+`mut` is read-only, and a write through a pointer stays ordinary C aliasing.
+Ordinary C declarations and pointer targets keep C's writable defaults until
+the remaining Rustic checks land. `#![disable_rustic_mut]` makes the unit use
+ordinary C writable defaults for `let` too. This only affects checking and
+optimization; it does not change the ABI, object layout, pointer representation,
+or lifetime.
 
 ## Slices and library types
 

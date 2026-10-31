@@ -105,6 +105,7 @@ impl FnLower<'_> {
             ast::Stmt::Empty(_) => Ok(()),
             ast::Stmt::Expr { expr, .. } => self.discard(expr),
             ast::Stmt::Decl(declaration) => self.lower_declaration(declaration),
+            ast::Stmt::Let(declaration) => self.lower_let(declaration),
             ast::Stmt::Block(block) => self.lower_block(block),
             ast::Stmt::If {
                 condition,

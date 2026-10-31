@@ -888,6 +888,7 @@ impl FnLower<'_> {
         if qualifiers.is_const {
             return Err(Diagnostic::new(span, "cannot modify a const object"));
         }
+        self.check_writable(&address, span)?;
         if self.l.types.is_array(ty) {
             return Err(Diagnostic::new(span, "cannot increment an array"));
         }
@@ -1569,6 +1570,44 @@ impl FnLower<'_> {
         }))
     }
 
+    /// Reject a write to the object of a `let` local that is not `mut`.
+    pub(super) fn check_writable_local(&self, index: usize, span: Span) -> Result<(), Diagnostic> {
+        let local = &self.locals[index];
+        if !local.readonly {
+            return Ok(());
+        }
+        Err(Diagnostic::new(
+            span,
+            format!(
+                "cannot assign to '{}': it is a read-only `let` local; declare it as `let mut {}`",
+                local.name, local.name
+            ),
+        ))
+    }
+
+    /// Reject a direct store whose address names a read-only `let` local.
+    ///
+    /// Only a slot-based address names the object itself. A store through a
+    /// pointer (`*p = v`, `p->field = v`, `p[i] = v`) keeps an operand base and
+    /// stays ordinary C aliasing, so `mut` never turns into ownership.
+    pub(super) fn check_writable(
+        &self,
+        address: &ir::Address,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let ir::AddressBase::Slot(slot) = &address.base else {
+            return Ok(());
+        };
+        match self
+            .locals
+            .iter()
+            .position(|local| local.slot == *slot && local.readonly)
+        {
+            Some(index) => self.check_writable_local(index, span),
+            None => Ok(()),
+        }
+    }
+
     fn lower_assignment(
         &mut self,
         op: ast::AssignOp,
@@ -1605,6 +1644,7 @@ impl FnLower<'_> {
         if qualifiers.is_const {
             return Err(Diagnostic::new(span, "cannot assign to a const object"));
         }
+        self.check_writable(&address, span)?;
         if self.l.types.is_array(ty) {
             return Err(Diagnostic::new(span, "cannot assign to an array"));
         }

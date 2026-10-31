@@ -8,9 +8,9 @@
 //! [`TokenKind::Eof`] ends it.
 //!
 //! Shy's metadata attributes (`#![no_main]`, `#![mem(10M)]`,
-//! `#![stack(4K)]`, `#![disable_nonexhaustive_switch]`) are consumed from the
-//! main input file and returned in [`Output::attributes`]. They are only
-//! recognised at the start of a line.
+//! `#![stack(4K)]`, `#![disable_nonexhaustive_switch]`,
+//! `#![disable_rustic_mut]`) are consumed from the main input file and returned
+//! in [`Output::attributes`]. They are only recognised at the start of a line.
 //!
 //! Supported directives:
 //!
@@ -96,6 +96,10 @@ pub struct Attributes {
     /// `#![disable_nonexhaustive_switch]`: allow a `switch` on a plain C enum
     /// without a `default` label. Payload enums stay closed.
     pub disable_nonexhaustive_switch: bool,
+    /// `#![disable_rustic_mut]`: keep ordinary C writable defaults, so a `let`
+    /// local without `mut` may be assigned. This is a checking choice only; the
+    /// ABI and object layout are unchanged either way.
+    pub disable_rustic_mut: bool,
 }
 
 /// The result of preprocessing one translation unit.

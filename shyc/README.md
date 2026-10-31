@@ -54,15 +54,17 @@ header: file-scope typedefs, record and enum definitions, prototypes for every
 non-`static` function, and `extern` declarations for objects (initializers are
 dropped). `static` declarations and `impl` blocks are not exported; methods need
 generic instantiation to name a concrete symbol first. `--emit=c` prints the
-preprocessed unit as plain C and drops the `#![...]` attribute lines.
+preprocessed unit as plain C and drops the `#![...]` attribute lines. A `let`
+declaration has no C spelling, so a unit that uses one is rejected with a
+diagnostic instead of being printed as invalid C.
 
 Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `-O0`..`-O3`
 (`-O1` promotes slots and cleans up, `-O2` repeats that to a fixed point, and
 `-O3` adds block-local common subexpression elimination),
-`--target <triple>`. `#![no_main]`, `#![mem(...)]`, `#![stack(...)]`, and
-`#![disable_nonexhaustive_switch]` are honoured, and the resource hints reach
-the linked image. The switch attribute is file-level: there is no local
-attribute form yet.
+`--target <triple>`. `#![no_main]`, `#![mem(...)]`, `#![stack(...)]`,
+`#![disable_nonexhaustive_switch]`, and `#![disable_rustic_mut]` are honoured,
+and the resource hints reach the linked image. The switch attribute is
+file-level: there is no local attribute form yet.
 
 ## Linking
 
@@ -98,6 +100,18 @@ Working: integers, pointers, arrays, structs and unions, enums, control flow,
 direct and indirect calls, recursion, global initialisers with symbol
 relocations, ShyC's `impl`/`self`/`drop`, and floating point through the
 soft-float runtime.
+
+`let name = expression;` infers its type from the initializer as an rvalue:
+arrays and functions decay, and top-level qualifiers do not carry over. The
+object is an ordinary local slot, so the ABI and pointer representation are
+unchanged. `let mut name = ...` allows assignment to the local; a plain `let`
+rejects a direct write with a diagnostic, including a member write through the
+local. A write through a pointer (`*p = v`, `p->field = v`, `p[i] = v`) is
+ordinary C aliasing and is not restricted, and `&name` keeps its normal pointer
+type. `const` keeps its C meaning and is checked separately.
+`#![disable_rustic_mut]` restores ordinary C writable defaults for `let`
+declarations in that translation unit. Existing C declarations, including
+`const` locals, are unchanged.
 
 Payload enums (`enum(u8) Msg { Ping, Text(Str), Num(int) };`) are transparent
 aggregates: the tag at offset 0 and one union of payloads at the aligned

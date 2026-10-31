@@ -2,7 +2,9 @@
 //!
 //! Global objects are built as target bytes plus relocations, because the IR
 //! exposes raw initialized memory. Local objects get a slot and, when they
-//! have an initializer, explicit stores or a `MemSet`/`MemCpy` sequence.
+//! have an initializer, explicit stores or a `MemSet`/`MemCpy` sequence. A
+//! `let` local is the same kind of slot; only the inferred type and the
+//! read-only flag differ.
 
 use super::const_eval::ConstKind;
 use super::generics::generic_declarator;
@@ -1072,9 +1074,11 @@ impl FnLower<'_> {
             let active = drop_symbol.is_some();
             let local = self.locals.len();
             self.locals.push(Local {
+                name: name.clone(),
                 slot,
                 ty: resolved.ty,
                 qualifiers: resolved.qualifiers,
+                readonly: false,
                 drop_symbol,
                 drop_active: active,
             });
@@ -1088,6 +1092,57 @@ impl FnLower<'_> {
                     self.deactivate_if_local_expr(init);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Lower `let [mut] name = expr;`.
+    ///
+    /// The object is an ordinary slot. Its type is the initializer's rvalue
+    /// type, so arrays and functions decay and top-level qualifiers do not
+    /// carry over. A non-`mut` `let` only forbids direct stores to the slot;
+    /// `&name` keeps its plain C pointer type, so a C alias can still write the
+    /// object. There is no borrow or ownership rule.
+    pub(super) fn lower_let(&mut self, decl: &ast::LetDecl) -> Result<(), Diagnostic> {
+        let span = decl.init.span();
+        let value = self.lower_expr(&decl.init)?;
+        if matches!(value.kind, super::ExprKind::Void) {
+            return Err(Diagnostic::new(span, "a `let` initializer needs a value"));
+        }
+        let ty = if self.l.types.is_array(value.ty) || self.l.types.is_function(value.ty) {
+            self.l.decay_type(value.ty)
+        } else {
+            value.ty
+        };
+        let name = decl.name.text.clone();
+        let ir_ty = self.l.ir_type(ty);
+        let align = self.l.types.align_of(ty).unwrap_or(1);
+        let slot = self.f.alloc_slot_aligned(&name, ir_ty, align);
+        let drop_symbol = self.l.drop_method(ty).map(|method| method.symbol);
+        let active = drop_symbol.is_some();
+        let local = self.locals.len();
+        self.locals.push(Local {
+            name: name.clone(),
+            slot,
+            ty,
+            qualifiers: Qualifiers::NONE,
+            readonly: !decl.is_mut && !self.l.disable_rustic_mut,
+            drop_symbol,
+            drop_active: active,
+        });
+        self.bind(name, super::LocalBinding::Local(local));
+        if active {
+            self.current_scope_mut().drops.push(local);
+        }
+        if self.l.types.is_aggregate(ty) {
+            self.copy_aggregate(ir::Address::slot(slot), value, ty, span)?;
+        } else {
+            let (operand, operand_ty) = self.rvalue_val(value, span)?;
+            let operand = self.convert(operand, operand_ty, ty, span, false)?;
+            self.store_value(ir::Address::slot(slot), operand, ty, Qualifiers::NONE);
+        }
+        if self.locals[local].drop_symbol.is_some() {
+            self.deactivate_if_local(&decl.init);
         }
         Ok(())
     }
@@ -1326,9 +1381,11 @@ impl FnLower<'_> {
         let slot = self.f.alloc_slot_aligned(name, ir_ty, align);
         let local = self.locals.len();
         self.locals.push(Local {
+            name: name.to_string(),
             slot,
             ty,
             qualifiers: Qualifiers::NONE,
+            readonly: false,
             drop_symbol: None,
             drop_active: false,
         });
@@ -1363,9 +1420,11 @@ impl FnLower<'_> {
             .alloc_slot_aligned("__va_area__", ir::Type::aggregate(136, 1), 1);
         let local = self.locals.len();
         self.locals.push(Local {
+            name: "__va_area__".to_string(),
             slot,
             ty: array,
             qualifiers: Qualifiers::NONE,
+            readonly: false,
             drop_symbol: None,
             drop_active: false,
         });

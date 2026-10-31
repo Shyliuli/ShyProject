@@ -51,6 +51,12 @@ impl Parser {
                 "file-scope assembly is not supported",
             ));
         }
+        if self.at_let_declaration() {
+            return Err(Diagnostic::new(
+                self.here(),
+                "a `let` declaration is only allowed inside a function body",
+            ));
+        }
 
         let specs = self.decl_specs()?;
         let no_specs =

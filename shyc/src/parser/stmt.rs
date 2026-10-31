@@ -1,6 +1,7 @@
 //! Statements, blocks, labels, and inline assembly.
 
-use crate::ast::{AsmStmt, Block, Declarator, DerivedDeclarator, ForInit, Stmt};
+use crate::ast::{AsmStmt, Block, Declarator, DerivedDeclarator, ForInit, LetDecl, Stmt};
+use crate::lexer::TokenKind;
 use crate::source::Diagnostic;
 
 use super::Parser;
@@ -18,6 +19,9 @@ impl Parser {
         if self.at_punct(";") {
             let span = self.bump().span;
             return Ok(Stmt::Empty(span));
+        }
+        if self.at_let_declaration() {
+            return self.let_statement();
         }
 
         if self.at_ident("if") {
@@ -95,6 +99,45 @@ impl Parser {
             expr,
             span: start.join(semicolon),
         })
+    }
+
+    /// Whether the cursor starts a Shy `let` declaration.
+    ///
+    /// `let` and `mut` are soft keywords: a C typedef or object with either
+    /// spelling keeps its ordinary meaning, and only the shape `let name` or
+    /// `let mut name` starts the inferred form. A visible typedef named `let`
+    /// wins, so existing C declarations keep parsing as declarations.
+    pub(crate) fn at_let_declaration(&self) -> bool {
+        if !self.at_ident("let") || self.is_type_name("let") {
+            return false;
+        }
+        if self.at_ident_ahead(1, "mut") {
+            return matches!(&self.peek_ahead(2).kind, TokenKind::Ident(name) if !is_keyword(name));
+        }
+        matches!(&self.peek_ahead(1).kind, TokenKind::Ident(name) if !is_keyword(name))
+    }
+
+    /// `let [mut] name = expr;`; the type is inferred from `expr` in lowering.
+    fn let_statement(&mut self) -> Result<Stmt, Diagnostic> {
+        let start = self.bump().span;
+        let is_mut = self.eat_ident("mut");
+        let name = self.expect_ident()?;
+        if !self.at_punct("=") {
+            return Err(Diagnostic::new(
+                self.here(),
+                "a `let` declaration needs an initializer",
+            ));
+        }
+        self.bump();
+        let init = self.expression()?;
+        let semicolon = self.expect_punct(";")?;
+        self.declare_value(&name.text);
+        Ok(Stmt::Let(LetDecl {
+            span: start.join(semicolon),
+            is_mut,
+            name,
+            init,
+        }))
     }
 
     /// A `{ ... }` block, opening a fresh name scope.

@@ -1,8 +1,9 @@
 //! Statement syntax.
 //!
 //! A block is a flat `Vec<Stmt>`. Local declarations are statements
-//! ([`Stmt::Decl`]) so that declarations and statements keep their exact
-//! source order, including declarations after statements.
+//! ([`Stmt::Decl`] and the inferred [`Stmt::Let`]) so that declarations and
+//! statements keep their exact source order, including declarations after
+//! statements.
 
 use crate::ast::Name;
 use crate::ast::decl::Declaration;
@@ -55,6 +56,23 @@ impl AsmStmt {
     }
 }
 
+/// A `let` local declaration: `let name = expression;` or
+/// `let mut name = expression;`.
+///
+/// This is ShyC's only inferred declaration form. The type is deduced from the
+/// required initializer, so no declaration specifier list is written; `mut`
+/// only makes the object writable and adds no ownership or reference
+/// semantics. `let` is a soft keyword: ordinary identifiers with that spelling
+/// stay valid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LetDecl {
+    pub span: Span,
+    /// `true` for `let mut`, `false` for a read-only `let`.
+    pub is_mut: bool,
+    pub name: Name,
+    pub init: Expr,
+}
+
 /// One C statement or Shy statement extension.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Stmt {
@@ -64,6 +82,8 @@ pub enum Stmt {
     Expr { expr: Expr, span: Span },
     /// A declaration used as a statement: `int x = 1;`.
     Decl(Declaration),
+    /// An inferred local declaration: `let x = 1;` or `let mut x = 1;`.
+    Let(LetDecl),
     /// A compound statement: `{ ... }`.
     Block(Block),
     /// `if (cond) then_branch else else_branch`.
@@ -147,6 +167,7 @@ impl Stmt {
             | Stmt::Goto { span, .. }
             | Stmt::Return { span, .. } => *span,
             Stmt::Decl(decl) => decl.span,
+            Stmt::Let(decl) => decl.span,
             Stmt::Block(block) => block.span,
             Stmt::Asm(asm) => asm.span(),
         }

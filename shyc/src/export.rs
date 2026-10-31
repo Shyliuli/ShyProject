@@ -24,6 +24,12 @@
 //! - `asm!` register bindings;
 //! - automatic dot dereference (the `.` of `p.method()` stays a C `.`).
 //!
+//! A `let` declaration is Shy-only as well, but it is not copied: the driver
+//! calls [`reject_let`] first and reports a diagnostic, because a silently
+//! copied `let x = 1;` would be read as a C declaration with a made-up type
+//! name. `--emit=c-header` never prints function bodies, so a `let` local
+//! cannot appear in a header.
+//!
 //! # `--emit=c-header`
 //!
 //! [`render_c_header`] walks the [`TranslationUnit`] and prints the interface a
@@ -59,6 +65,7 @@ use crate::ast::{
     RecordKind, RecordSpec, StorageClass, TranslationUnit, TypeName, TypeSpecifier, UnaryOp,
 };
 use crate::lexer::{Token, TokenKind};
+use crate::source::Diagnostic;
 
 /// Include guard of every exported header.
 const HEADER_GUARD: &str = "SHYC_EXPORT_H";
@@ -66,6 +73,41 @@ const HEADER_GUARD: &str = "SHYC_EXPORT_H";
 /// Printed for a construct a C header cannot express; the host compiler then
 /// reports the generated header instead of accepting a changed meaning.
 const UNSUPPORTED: &str = "__shyc_unsupported_expression";
+
+/// Reject Shy-only `let` declarations before they are printed as C.
+///
+/// `let` has no C spelling. The parser accepts the shape `let name` or
+/// `let mut name`; the same shape is what this check looks for in the
+/// preprocessed stream, so ordinary C identifiers keep their meaning.
+pub fn reject_let(tokens: &[Token]) -> Result<(), Diagnostic> {
+    let tokens: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token.kind, TokenKind::Newline))
+        .collect();
+    let name_at = |index: usize| {
+        matches!(
+            tokens.get(index).map(|token| &token.kind),
+            Some(TokenKind::Ident(name)) if name != "mut"
+        )
+    };
+    for (index, token) in tokens.iter().enumerate() {
+        if !matches!(&token.kind, TokenKind::Ident(word) if word == "let") {
+            continue;
+        }
+        let starts_let = name_at(index + 1)
+            || (matches!(
+                tokens.get(index + 1).map(|token| &token.kind),
+                Some(TokenKind::Ident(word)) if word == "mut"
+            ) && name_at(index + 2));
+        if starts_let {
+            return Err(Diagnostic::new(
+                token.span,
+                "`let` declarations are ShyC-only and cannot be exported as C",
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Respell a preprocessed token stream as plain C text.
 ///

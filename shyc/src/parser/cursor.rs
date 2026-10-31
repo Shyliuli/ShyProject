@@ -76,6 +76,10 @@ impl Parser {
         self.ident_here() == Some(word)
     }
 
+    pub(crate) fn at_ident_ahead(&self, count: usize, word: &str) -> bool {
+        matches!(&self.peek_ahead(count).kind, TokenKind::Ident(text) if text == word)
+    }
+
     pub(crate) fn ident_here(&self) -> Option<&str> {
         match &self.peek().kind {
             TokenKind::Ident(text) => Some(text),

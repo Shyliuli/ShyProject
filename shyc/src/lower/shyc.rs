@@ -127,6 +127,7 @@ impl FnLower<'_> {
         right: &ast::Expr,
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
+        self.check_writable_local(local, span)?;
         if let ast::Expr::Name(name) = right
             && let Ok(Resolved::Local(other)) = self.resolve_name(&name.text, name.span)
             && other == local

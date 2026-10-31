@@ -74,6 +74,7 @@ fn run() -> Result<(), String> {
         Stage::CSource => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
+            export::reject_let(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
             export::render_c_source(&preprocessed.tokens)
         }
         Stage::CHeader => {
@@ -111,6 +112,7 @@ fn run() -> Result<(), String> {
                     disable_nonexhaustive_switch: preprocessed
                         .attributes
                         .disable_nonexhaustive_switch,
+                    disable_rustic_mut: preprocessed.attributes.disable_rustic_mut,
                 },
             )
             .map_err(|error| sources.render(&error))?;
@@ -473,6 +475,9 @@ fn render_preprocessed(tokens: &[Token], attributes: &Attributes) -> String {
     }
     if attributes.disable_nonexhaustive_switch {
         output.push_str("#![disable_nonexhaustive_switch]\n");
+    }
+    if attributes.disable_rustic_mut {
+        output.push_str("#![disable_rustic_mut]\n");
     }
     output.push_str(&export::render_c_source(tokens));
     output

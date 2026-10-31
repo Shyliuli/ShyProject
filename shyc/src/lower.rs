@@ -71,6 +71,9 @@ pub struct Options {
     /// plain C enum that has no `default` label. Payload enums are closed and
     /// keep their exhaustiveness check either way.
     pub disable_nonexhaustive_switch: bool,
+    /// `#![disable_rustic_mut]`: keep ordinary C writable defaults, so a `let`
+    /// local without `mut` may be assigned. This changes checking only.
+    pub disable_rustic_mut: bool,
 }
 
 impl Default for Options {
@@ -81,6 +84,7 @@ impl Default for Options {
             startup: StartupMode::Main,
             abi: abi_plan::AbiKind::ShyV1,
             disable_nonexhaustive_switch: false,
+            disable_rustic_mut: false,
         }
     }
 }
@@ -263,6 +267,7 @@ pub(super) struct Lowerer {
     pub impl_context: Option<(TypeId, String)>,
     pub current_function_name: Option<String>,
     pub disable_nonexhaustive_switch: bool,
+    pub disable_rustic_mut: bool,
     pub pending: Vec<PendingFunction>,
     string_counter: u32,
     static_counter: u32,
@@ -303,6 +308,7 @@ impl Lowerer {
             impl_context: None,
             current_function_name: None,
             disable_nonexhaustive_switch: options.disable_nonexhaustive_switch,
+            disable_rustic_mut: options.disable_rustic_mut,
             pending: Vec::new(),
             string_counter: 0,
             static_counter: 0,
@@ -679,9 +685,14 @@ pub(super) struct FnScope {
 }
 
 pub(super) struct Local {
+    pub name: String,
     pub slot: ir::SlotId,
     pub ty: TypeId,
     pub qualifiers: Qualifiers,
+    /// `let` without `mut`: assigning to this object is rejected. This is a
+    /// checking flag, not a C `const` qualifier, so `&local` keeps the plain
+    /// pointer type and aliases keep ordinary C semantics.
+    pub readonly: bool,
     pub drop_symbol: Option<String>,
     pub drop_active: bool,
 }
