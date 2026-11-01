@@ -49,6 +49,60 @@ target/bin/shyc --emit=c-header api.shyc -o api.h   # prototypes, types, extern 
 target/bin/shyc --emit=c       api.shyc -o api.c    # the TU as plain C
 ```
 
+Export concrete generic instances under explicit C names:
+
+```text
+// api.shyinst
+Vec<int> as vec_int,
+Array<int, 16> as int_array_16,
+identity<int> as identity_int;
+```
+
+```sh
+target/bin/shyc --emit=llvm --target=x86_64-pc-linux-gnu lib.shyc \
+  --instances api.shyinst -o lib.ll
+target/bin/shyc --emit=c-header --target=x86_64-pc-linux-gnu lib.shyc \
+  --instances api.shyinst -o api.h
+target/bin/shyc --emit=c-wrapper --target=x86_64-pc-linux-gnu lib.shyc \
+  --instances api.shyinst -o api_wrapper.c
+
+clang -x ir -c lib.ll -o lib.o
+clang -c api_wrapper.c -o api_wrapper.o
+clang client.c api_wrapper.o lib.o -o client
+```
+
+The instance table is compile-time input, not C source. `--instances` names the
+concrete generic records, enums, and functions that may cross the C boundary:
+everything else stays internal to its translation unit. Each entry is
+`Name<arguments> as alias`; entries are separated by `,` or `;`, whitespace and
+`//` / `/* ... */` comments are free, and arguments use the ordinary ShyC type
+and constant-expression grammar, so `Vec<Vec<int>>`, `Pair<u8 *>`, and
+`Array<char, 2 * 8>` parse as usual. The alias must be a unique C identifier.
+Two aliases for one concrete instance (`Vec<int> as vec_int, Vec<int> as vint`)
+instantiate it once and share the implementation. A trait-qualified entry such
+as `Drawable for Vec<int>` is rejected with an explicit diagnostic, as are the
+cases the table cannot name: a variadic generic function, and an inherent impl
+whose methods declare type parameters of their own (one instantiation of such a
+method has no `<alias>_<method>` spelling).
+
+With an instance table, `--emit=c-header` adds to the ordinary header:
+
+- a `typedef` of the concrete C layout under each record or enum alias
+  (`typedef struct shyc_R... vec_int;`);
+- one prototype per inherent method named `<alias>_<method>`
+  (`vec_int_push`, `vec_int_get`);
+- one prototype per generic free function named `<alias>` (`identity_int`).
+
+The concrete instantiation is exported once under a stable `shyc_inst_...`
+symbol, and `--emit=c-wrapper` prints a self-contained C file with one thin
+wrapper per alias that calls it. Pass the same `--target` and the same
+preprocessing options (`-I`, `-D`, `-U`) to the output invocations as to the
+implementation build, because the pointer width and the preprocessed source
+decide the concrete layout and symbol names; without `--target` the Shy target
+layout is used.
+`--emit=c-header` without `--instances` keeps the ordinary AST export
+described below.
+
 `--emit=c-header` walks the parsed translation unit and prints an include-guarded
 header: file-scope typedefs, record and enum definitions, prototypes for every
 non-`static` function, and `extern` declarations for objects (initializers are
@@ -57,14 +111,16 @@ file's `#include` lines and `#define` macros before the declarations, which are
 wrapped in `#ifdef __cplusplus` / `extern "C"`. Declarations that came from an
 included header are not repeated, so the generated header describes exactly one
 source header and leaves its dependencies to the carried includes. `static`
-declarations and `impl` blocks are not exported; methods need a concrete symbol
-before they can be declared. A `trait` is exported as a forward `typedef` plus
+declarations and `impl` blocks are not exported by that ordinary header; a
+method needs a concrete instantiated symbol before it can be declared, which is
+what the instance table above provides. A `trait` is exported as a forward `typedef` plus
 the `struct` of function pointers that its value type uses. `--emit=c` prints the
 preprocessed unit as plain C and drops the `#![...]` attribute lines. A `let`
 declaration has no C spelling, so a unit that uses one is rejected with a
 diagnostic instead of being printed as invalid C.
 
-Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `-O0`..`-O3`
+Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `--instances <file>`,
+`-O0`..`-O3`
 (`-O1` promotes slots and cleans up, `-O2` repeats that to a fixed point, and
 `-O3` adds block-local common subexpression elimination),
 `--target <triple>`. `#![no_main]`, `#![mem(...)]`, `#![stack(...)]`,

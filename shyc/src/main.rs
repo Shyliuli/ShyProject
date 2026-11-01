@@ -14,7 +14,7 @@ use shyc::lexer::{self, Token};
 use shyc::lower::{self, StartupMode};
 use shyc::preprocess::{self, Attributes};
 use shyc::source::SourceMap;
-use shyc::{export, llvm, parser, passes, shy};
+use shyc::{export, export_instances, llvm, parser, passes, shy};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -22,6 +22,7 @@ enum Stage {
     Preprocess,
     CSource,
     CHeader,
+    CWrapper,
     Ast,
     Ir,
     Emit(Backend),
@@ -40,6 +41,8 @@ struct Options {
     target: Option<String>,
     opt_level: u8,
     freestanding: bool,
+    /// Explicit generic instance table (`--instances`).
+    instances: Option<PathBuf>,
     preprocess: preprocess::Options,
 }
 
@@ -57,6 +60,18 @@ fn run() -> Result<(), String> {
     let Some(options) = arguments()? else {
         return Ok(());
     };
+    if options.instances.is_some()
+        && matches!(
+            options.stage,
+            Stage::Tokens | Stage::Preprocess | Stage::Ast
+        )
+    {
+        return Err(
+            "--instances is compile-time input for a lowering output and has no effect on \
+             -E, --dump-tokens, or --dump-ast"
+                .into(),
+        );
+    }
     let text = fs::read_to_string(&options.input)
         .map_err(|error| format!("{}: {error}", options.input.display()))?;
     let mut sources = SourceMap::default();
@@ -72,6 +87,14 @@ fn run() -> Result<(), String> {
             render_preprocessed(&preprocessed.tokens, &preprocessed.attributes)
         }
         Stage::CSource => {
+            if options.instances.is_some() {
+                return Err(
+                    "--instances exports concrete generics and needs --emit=c-header, \
+                     --emit=c-wrapper, or one of the code-generation outputs; --emit=c cannot \
+                     spell a generic instance"
+                        .into(),
+                );
+            }
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
             export::reject_let(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
@@ -85,15 +108,31 @@ fn run() -> Result<(), String> {
             // The output path names the include guard. Without `-o` the header
             // goes to stdout, so the input path names it instead.
             let guard_path = options.output.as_deref().unwrap_or(options.input.as_path());
-            export::render_c_header(
-                &unit,
-                &export::HeaderOptions {
-                    guard: export::header_guard(guard_path),
-                    root: file,
-                    includes: preprocessed.includes,
-                    defines: preprocessed.defines,
-                },
-            )
+            let header_options = export::HeaderOptions {
+                guard: export::header_guard(guard_path),
+                root: file,
+                includes: preprocessed.includes,
+                defines: preprocessed.defines,
+            };
+            if options.instances.is_none() {
+                export::render_c_header(&unit, &header_options)
+            } else {
+                let lowered =
+                    lower_instances(&options, &unit, &preprocessed.attributes, &mut sources)?;
+                let section = export_instances::render_header_section(&lowered);
+                export::render_c_header_with(&unit, &header_options, &section)
+            }
+        }
+        Stage::CWrapper => {
+            let Some(_) = options.instances else {
+                return Err("--emit=c-wrapper requires --instances <file>".into());
+            };
+            let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
+                .map_err(|error| sources.render(&error))?;
+            let unit =
+                parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
+            let lowered = lower_instances(&options, &unit, &preprocessed.attributes, &mut sources)?;
+            export_instances::render_wrapper(&lowered)
         }
         Stage::Ast => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
@@ -113,6 +152,7 @@ fn run() -> Result<(), String> {
             } else {
                 StartupMode::Main
             };
+            let exports = instance_requests(&options, &unit, &mut sources)?;
             let mut lowered = lower::lower(
                 &unit,
                 &lower::Options {
@@ -124,6 +164,7 @@ fn run() -> Result<(), String> {
                         .attributes
                         .disable_nonexhaustive_switch,
                     disable_rustic_mut: preprocessed.attributes.disable_rustic_mut,
+                    exports,
                 },
             )
             .map_err(|error| sources.render(&error))?;
@@ -165,6 +206,57 @@ fn run() -> Result<(), String> {
             .write_all(output.as_bytes())
             .map_err(|error| error.to_string()),
     }
+}
+
+/// Parses the explicit instance table, if the driver was given one.
+fn instance_requests(
+    options: &Options,
+    unit: &shyc::ast::TranslationUnit,
+    sources: &mut SourceMap,
+) -> Result<Vec<lower::ExportRequest>, String> {
+    let Some(path) = &options.instances else {
+        return Ok(Vec::new());
+    };
+    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let file = sources.add(path.clone(), text);
+    let tokens = lexer::lex(sources, file).map_err(|error| sources.render(&error))?;
+    let names = parser::type_names(unit);
+    let table =
+        export_instances::parse_table(&tokens, &names).map_err(|error| sources.render(&error))?;
+    Ok(table
+        .entries
+        .into_iter()
+        .map(|entry| lower::ExportRequest {
+            name: entry.name,
+            args: entry.args,
+            alias: entry.alias,
+        })
+        .collect())
+}
+
+/// Lowers the unit only to produce the instance export plan for a C header or
+/// wrapper. No entry point is required; a table may export from a library.
+fn lower_instances(
+    options: &Options,
+    unit: &shyc::ast::TranslationUnit,
+    attributes: &Attributes,
+    sources: &mut SourceMap,
+) -> Result<lower::Lowered, String> {
+    let target = resolve_target(options)?;
+    let exports = instance_requests(options, unit, sources)?;
+    lower::lower(
+        unit,
+        &lower::Options {
+            module_name: module_name(&options.input),
+            layout: target.layout,
+            startup: StartupMode::Manual,
+            abi: target.abi,
+            disable_nonexhaustive_switch: attributes.disable_nonexhaustive_switch,
+            disable_rustic_mut: attributes.disable_rustic_mut,
+            exports,
+        },
+    )
+    .map_err(|error| sources.render(&error))
 }
 
 struct Target {
@@ -262,6 +354,7 @@ fn arguments() -> Result<Option<Options>, String> {
     let mut target = None;
     let mut opt_level = 0;
     let mut freestanding = false;
+    let mut instances = None;
     let mut preprocess = preprocess::Options::default();
     // The bundled headers describe the Shy target, so they are searched before
     // any `-I` directory and before the host C library.
@@ -274,11 +367,14 @@ fn arguments() -> Result<Option<Options>, String> {
                 println!(
                     "usage: shyc [options] file\n\
                      output: -S / --emit=shy (default), --emit=llvm, --emit=c, \
-                     --emit=c-header, -E, --dump-tokens, --dump-ast, --dump-ir\n\
+                     --emit=c-header, --emit=c-wrapper, -E, --dump-tokens, --dump-ast, \
+                     --dump-ir\n\
                      options: -O0..-O3, --target <triple>, -ffreestanding, -fhosted, \
-                     -I dir, -D name[=value], -U name, -o file\n\
+                     -I dir, -D name[=value], -U name, -o file, --instances <file>\n\
                      --emit=llvm requires a 64-bit --target triple; \
-                     assembly and linking stay in shycc"
+                     assembly and linking stay in shycc; \
+                     --instances lists explicit generic instances to export to C \
+                     (with --emit=c-header / --emit=c-wrapper or a code generator)"
                 );
                 return Ok(None);
             }
@@ -293,6 +389,16 @@ fn arguments() -> Result<Option<Options>, String> {
             }
             "--target" => {
                 target = Some(args.next().ok_or("--target requires a triple")?);
+                None
+            }
+            "--instances" => {
+                instances = Some(PathBuf::from(
+                    args.next().ok_or("--instances requires a path")?,
+                ));
+                None
+            }
+            flag if flag.starts_with("--instances=") => {
+                instances = Some(PathBuf::from(&flag["--instances=".len()..]));
                 None
             }
             flag if flag.starts_with("--target=") => {
@@ -335,6 +441,7 @@ fn arguments() -> Result<Option<Options>, String> {
                 "llvm" => Stage::Emit(Backend::Llvm),
                 "c" => Stage::CSource,
                 "c-header" => Stage::CHeader,
+                "c-wrapper" => Stage::CWrapper,
                 other => return Err(format!("unknown --emit value: {other}")),
             }),
             _ if arg.starts_with("--target=") => {
@@ -358,7 +465,7 @@ fn arguments() -> Result<Option<Options>, String> {
         {
             return Err(
                 "select exactly one of -E, --dump-tokens, --dump-ast, --dump-ir, -S, \
-                 or --emit=<backend>"
+                 or --emit=<output>"
                     .into(),
             );
         }
@@ -439,6 +546,7 @@ fn arguments() -> Result<Option<Options>, String> {
         target,
         opt_level,
         freestanding,
+        instances,
         preprocess,
     }))
 }

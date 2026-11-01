@@ -8,6 +8,7 @@ pub mod abi_adapter;
 pub mod analysis;
 pub mod ast;
 pub mod export;
+pub mod export_instances;
 pub mod ir;
 pub mod lexer;
 pub mod literal;

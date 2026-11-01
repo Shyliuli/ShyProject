@@ -585,7 +585,7 @@ impl Lowerer {
 
     /// Instantiate `Name<args>`: validate the arguments, then re-resolve the
     /// generic record or enum template with its parameters bound.
-    fn instantiate_generic(
+    pub(super) fn instantiate_generic(
         &mut self,
         name: &ast::Name,
         args: &[ast::GenericArg],

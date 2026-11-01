@@ -26,6 +26,7 @@
 mod call;
 mod const_eval;
 mod decl;
+mod export;
 mod expr;
 mod generics;
 mod propagate;
@@ -37,6 +38,7 @@ mod types;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast;
+use crate::export_instances::{CTypeName, ExportedInstance};
 use crate::ir;
 use crate::sema::types::{QualifiedType, Qualifiers, TypeId, TypeKind, TypeStore};
 use crate::source::{Diagnostic, Span};
@@ -48,6 +50,23 @@ use crate::source::{Diagnostic, Span};
 pub struct Lowered {
     pub module: ir::Module,
     pub types: TypeStore,
+    /// The concrete instances named by the explicit instance table, in table
+    /// order. Empty when the driver has no instance table.
+    pub exports: Vec<ExportedInstance>,
+    /// C spelling facts for every record and enum type an exported signature
+    /// can mention. The exporter never guesses a name from a type id.
+    pub c_types: HashMap<TypeId, CTypeName>,
+}
+
+/// One instance the explicit table asks the C boundary to expose.
+#[derive(Clone, Debug)]
+pub struct ExportRequest {
+    /// The generic template name.
+    pub name: ast::Name,
+    /// Concrete type and `const` arguments, resolved in file scope.
+    pub args: Vec<ast::GenericArg>,
+    /// The C identifier the instance is exported under.
+    pub alias: String,
 }
 
 /// Where the generated entry point comes from.
@@ -76,6 +95,10 @@ pub struct Options {
     /// `#![disable_rustic_mut]`: keep ordinary C writable defaults, so a `let`
     /// local without `mut` may be assigned. This changes checking only.
     pub disable_rustic_mut: bool,
+    /// Concrete generic instances the explicit instance table exports. Each
+    /// one is instantiated even when the unit never uses it, and its functions
+    /// get a public C symbol.
+    pub exports: Vec<ExportRequest>,
 }
 
 impl Default for Options {
@@ -87,6 +110,7 @@ impl Default for Options {
             abi: abi_plan::AbiKind::ShyV1,
             disable_nonexhaustive_switch: false,
             disable_rustic_mut: false,
+            exports: Vec::new(),
         }
     }
 }
@@ -95,10 +119,16 @@ impl Default for Options {
 pub fn lower(unit: &ast::TranslationUnit, options: &Options) -> Result<Lowered, Diagnostic> {
     let mut lowerer = Lowerer::new(options);
     lowerer.collect(unit)?;
+    // Exports are instantiated after every file-scope name exists and before
+    // any body is lowered, so a call site already sees the exported symbol.
+    let exports = lowerer.export_instances(&options.exports)?;
     lowerer.lower_functions()?;
+    let c_types = lowerer.c_type_names(&exports);
     Ok(Lowered {
         module: lowerer.module,
         types: lowerer.types,
+        exports,
+        c_types,
     })
 }
 

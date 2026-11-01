@@ -147,7 +147,13 @@ and `static inline` wrappers around the stable symbols.
 C export rules:
 
 - uninstantiated generics cannot cross a C ABI boundary;
-- an exported generic must name concrete type and `const` arguments;
+- an exported generic must name concrete type and `const` arguments in the
+  explicit instance table (`--instances`); an instance the unit only uses
+  internally is not exported;
+- only listed concrete instances cross the boundary; a listed instance shares
+  one implementation with every alias that names it;
+- the generated header and wrapper must be built for the same `--target` as the
+  implementation, because the layout depends on the target's pointer width;
 - `repr(C)`-style layout is required for a structure intended for external C;
 - a trait value is a structure of function pointers;
 - a payload enum is a visible tag and union payload;
@@ -162,8 +168,77 @@ without the `#![...]` attribute lines. A generated header carries the main
 file's `#include` lines and `#define` macros, takes its include guard from the
 output path, and omits declarations that came from an included file, so it
 describes exactly one header. `static` declarations and `impl` blocks are not
-exported yet: a method needs a concrete instantiated symbol before it can appear
-in a C header.
+exported by that ordinary header: a method needs a concrete instantiated symbol
+before it can appear in a C header.
+
+### Explicit generic instance table
+
+A generic record, enum, or function crosses into C only when a separate
+compile-time table names it. Pass that table with `--instances <file>`:
+
+```text
+// api.shyinst
+Vec<int> as vec_int,
+Array<int, 16> as int_array_16,
+identity<int> as identity_int;
+```
+
+Entries are separated by `,` or `;`; newlines, `//` comments, and
+`/* ... */` comments are free. Each entry names one generic template and its
+concrete arguments, followed by `as` and a unique C identifier. The arguments
+are parsed with the ordinary ShyC type and constant-expression grammar, so
+nested arguments (`Vec<Vec<int>>`), pointer arguments (`Pair<u8 *>`), and
+constant expressions (`Array<char, 2 * 8>`) keep their usual spelling. Two
+aliases for the same concrete instance (`Vec<int> as vec_int, Vec<int> as vint`)
+instantiate it once and share one implementation. A trait-qualified entry such
+as `Drawable for Vec<int>` is rejected with an explicit diagnostic; trait
+implementation tables are not exported yet. A variadic generic function and an
+inherent impl whose methods declare their own type parameters are rejected too:
+a C wrapper cannot forward a variadic list, and `<alias>_<method>` cannot name
+one instance of a generic method.
+
+The table is compile-time input, never C source. One implementation build and
+one header/wrapper build are ordinary compiler invocations:
+
+```sh
+target/bin/shyc --emit=llvm --target=x86_64-pc-linux-gnu lib.shyc \
+  --instances api.shyinst -o lib.ll
+target/bin/shyc --emit=c-header --target=x86_64-pc-linux-gnu lib.shyc \
+  --instances api.shyinst -o api.h
+target/bin/shyc --emit=c-wrapper --target=x86_64-pc-linux-gnu lib.shyc \
+  --instances api.shyinst -o api_wrapper.c
+
+clang -x ir -c lib.ll -o lib.o
+clang -c api_wrapper.c -o api_wrapper.o
+clang client.c api_wrapper.o lib.o -o client
+```
+
+The header exports exactly the listed instances:
+
+- each concrete generic record exports its C layout as a `typedef` under the
+  alias (`typedef struct shyc_R... vec_int;`) and its inherent methods as
+  `<alias>_<method>` (`vec_int_push`, `vec_int_get`);
+- each concrete generic enum exports its layout or integer representation under
+  the alias; enumerators stay in ShyC spelling;
+- each generic free function is exported as `<alias>` (`identity_int`).
+
+An instance the unit uses but the table does not list stays internal and has no
+C name; a listed instance the unit never uses is still instantiated. The
+concrete functions themselves get stable public mangled symbols
+(`shyc_inst_...`), shared by every alias of one instance.
+`--emit=c-wrapper` turns each alias into a thin C wrapper around the concrete
+symbol and repeats the layouts it needs, so the file compiles on its own. Plain
+(non-generic) types in an exported signature use the spelling the ordinary
+header already prints; a generic layout dependency of a listed record (the inner
+`Vec<int>` of `Vec<Vec<int>>`, for example) is printed as needed.
+
+The header and wrapper describe the target they were generated for, so pass the
+same `--target` and preprocessing options used for the implementation; pointer
+width and preprocessed declarations change the concrete layout and the exported
+symbol names. Without `--target` the Shy target layout (32-bit pointers) is
+used.
+`--emit=c-header` without `--instances` keeps the ordinary AST export
+unchanged.
 
 ## Backend boundary
 

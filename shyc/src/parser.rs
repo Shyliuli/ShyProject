@@ -41,7 +41,7 @@ mod ty;
 use std::collections::HashSet;
 
 use crate::ast;
-use crate::lexer::Token;
+use crate::lexer::{Token, TokenKind};
 use crate::source::{Diagnostic, FileId, Span};
 
 /// Parses one preprocessed token stream into a syntax-only translation unit.
@@ -55,6 +55,130 @@ pub fn parse(tokens: &[Token]) -> Result<ast::TranslationUnit, Diagnostic> {
     parser.scopes[0].tags = global.tags;
     parser.scopes[0].traits = global.traits;
     parser.translation_unit()
+}
+
+/// File-scope type names of an already parsed unit.
+///
+/// The explicit generic instance table ([`crate::export_instances`]) names a
+/// generic template with arguments that are parsed after the unit exists. The
+/// parser needs to know which identifiers spell types to tell a type argument
+/// from a constant one, so this collects the same names the prescan would.
+#[derive(Default)]
+pub struct TypeNames {
+    typedefs: HashSet<String>,
+    tags: HashSet<String>,
+    traits: HashSet<String>,
+}
+
+/// Collects the file-scope type names of `unit`.
+pub fn type_names(unit: &ast::TranslationUnit) -> TypeNames {
+    let mut names = TypeNames::default();
+    for item in &unit.items {
+        match item {
+            ast::Item::Decl(declaration) => {
+                collect_specs_type_names(&declaration.specs, &mut names);
+                if declaration.specs.storage == Some(ast::StorageClass::Typedef) {
+                    for declarator in &declaration.declarators {
+                        if let Some(name) = &declarator.declarator.name {
+                            names.typedefs.insert(name.text.clone());
+                        }
+                    }
+                }
+            }
+            ast::Item::Function(function) => collect_specs_type_names(&function.specs, &mut names),
+            ast::Item::Impl(_) | ast::Item::Use(_) => {}
+            ast::Item::Trait(declaration) => {
+                names.traits.insert(declaration.name.text.clone());
+            }
+        }
+    }
+    names
+}
+
+/// Collects every typedef name, tag, and trait a specifier list mentions.
+fn collect_specs_type_names(specs: &ast::DeclSpecs, names: &mut TypeNames) {
+    for specifier in &specs.type_specs {
+        match specifier {
+            ast::TypeSpecifier::TypedefName(name) => {
+                names.typedefs.insert(name.text.clone());
+            }
+            ast::TypeSpecifier::Generic(generic) => {
+                names.typedefs.insert(generic.name.text.clone());
+                for argument in &generic.args {
+                    if let ast::GenericArgKind::Type(type_name) = &argument.kind {
+                        collect_type_name_names(type_name, names);
+                    }
+                }
+            }
+            ast::TypeSpecifier::Record(record) => {
+                if let Some(tag) = &record.tag {
+                    names.tags.insert(tag.text.clone());
+                }
+                for member in record.members.iter().flatten() {
+                    collect_specs_type_names(&member.specs, names);
+                }
+            }
+            ast::TypeSpecifier::Enum(enumeration) => {
+                if let Some(tag) = &enumeration.tag {
+                    names.tags.insert(tag.text.clone());
+                }
+                for enumerator in enumeration.enumerators.iter().flatten() {
+                    if let Some(payload) = &enumerator.payload {
+                        collect_type_name_names(payload, names);
+                    }
+                }
+            }
+            ast::TypeSpecifier::Atomic(type_name) => collect_type_name_names(type_name, names),
+            ast::TypeSpecifier::Builtin(_) | ast::TypeSpecifier::SelfType => {}
+        }
+    }
+}
+
+fn collect_type_name_names(type_name: &ast::TypeName, names: &mut TypeNames) {
+    collect_specs_type_names(&type_name.specs, names);
+}
+
+/// Parses a standalone `<...>` generic argument list with the file-scope type
+/// names of an already parsed unit in scope.
+///
+/// The explicit instance table is not a translation unit, but its arguments
+/// are exactly the generic arguments a use site writes. Reusing the parser
+/// keeps nested types and constant expressions spelled the same way instead of
+/// a second, weaker grammar. The slice starts with `<`; trailing tokens are
+/// rejected.
+pub fn parse_generic_args(
+    tokens: &[Token],
+    names: &TypeNames,
+) -> Result<Vec<ast::GenericArg>, Diagnostic> {
+    let mut end = tokens.to_vec();
+    if !matches!(end.last().map(|token| &token.kind), Some(TokenKind::Eof)) {
+        let span = end.last().map_or(
+            Span {
+                file: FileId(0),
+                start: 0,
+                end: 0,
+            },
+            |token| token.span,
+        );
+        end.push(Token {
+            kind: TokenKind::Eof,
+            span,
+            at_line_start: false,
+            leading_space: false,
+        });
+    }
+    let mut parser = Parser::new(end, false);
+    parser.scopes[0].typedefs = names.typedefs.clone();
+    parser.scopes[0].tags = names.tags.clone();
+    parser.scopes[0].traits = names.traits.clone();
+    let args = parser.generic_args()?;
+    if !parser.at_eof() {
+        return Err(Diagnostic::new(
+            parser.here(),
+            "unexpected tokens after a generic argument list",
+        ));
+    }
+    Ok(args)
 }
 
 /// Parser state shared by every grammar file.

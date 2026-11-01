@@ -875,7 +875,7 @@ impl Lowerer {
 
     /// The instantiation key of a concrete record, when it came from a generic
     /// record template.
-    fn record_instance_key(&self, record: TypeId) -> Option<InstanceKey> {
+    pub(super) fn record_instance_key(&self, record: TypeId) -> Option<InstanceKey> {
         self.record_instances
             .iter()
             .find_map(|(key, instance)| (*instance == record).then(|| key.clone()))
