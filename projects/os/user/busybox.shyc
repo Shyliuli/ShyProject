@@ -41,7 +41,7 @@ impl Args {
     }
 
     char *shift(self *a) {
-        char *first = a.get(0);
+        let first = a.get(0);
 
         if (first == 0) {
             return (char *)0;
@@ -54,7 +54,7 @@ impl Args {
     }
 
     int parse(self *a, char *s) {
-        int i = 0;
+        let mut i = 0;
 
         a.clear();
         while (s[i]) {
@@ -79,7 +79,7 @@ impl Args {
 
 impl Text {
     int len(self *t) {
-        int n = 0;
+        let mut n = 0;
 
         while (t.data[n]) {
             n = n + 1;
@@ -88,17 +88,16 @@ impl Text {
     }
 
     int contains(self *t, const char *needle) {
-        int i = 0;
+        let mut i = 0;
         struct Text pat;
-        int n;
 
         pat.data = needle;
-        n = pat.len();
+        let n = pat.len();
         if (n == 0) {
             return 1;
         }
         while (t.data[i]) {
-            int j = 0;
+            let mut j = 0;
 
             while (needle[j] && t.data[i + j] == needle[j]) {
                 j = j + 1;
@@ -127,7 +126,7 @@ static char *skip_spaces(char *s) {
 }
 
 static void trim_right(char *s) {
-    int n = 0;
+    let mut n = 0;
 
     while (s[n]) {
         n = n + 1;
@@ -147,8 +146,8 @@ static int strlen2(const char *s) {
 
 static void print_int(int value) {
     char buf[12];
-    int i = 0;
-    int n = value;
+    let mut i = 0;
+    let mut n = value;
 
     if (n == 0) {
         puts("0");
@@ -170,9 +169,9 @@ static void print_int(int value) {
 }
 
 static int parse_int(const char *s) {
-    int n = 0;
-    int i = 0;
-    int neg = 0;
+    let mut n = 0;
+    let mut i = 0;
+    let mut neg = 0;
 
     if (s[0] == '-') {
         neg = 1;
@@ -196,7 +195,7 @@ static int contains(const char *s, const char *needle) {
 }
 
 static void make_path(const char *cmd, char *path) {
-    int i = 0;
+    let mut i = 0;
 
     path[0] = '/';
     while (cmd[i] && i < 30) {
@@ -207,7 +206,7 @@ static void make_path(const char *cmd, char *path) {
 }
 
 static void append_word(char *dst, int *pos, const char *word) {
-    int i = 0;
+    let mut i = 0;
 
     if (*pos > 0 && *pos < LINE_MAX - 1) {
         dst[*pos] = ' ';
@@ -222,8 +221,8 @@ static void append_word(char *dst, int *pos, const char *word) {
 }
 
 static int wait_one(void) {
-    int status = 0;
-    int pid = wait(&status);
+    let status = 0;
+    let mut pid = wait(&status);
 
     while (pid == 0) {
         yield();
@@ -235,8 +234,8 @@ static int wait_one(void) {
 static void exec_argv(struct Args *args) {
     char path[32];
     char argbuf[LINE_MAX];
-    int pos = 0;
-    int i = 1;
+    let mut pos = 0;
+    let mut i = 1;
 
     if (args->argc <= 0) {
         exit(1);
@@ -244,7 +243,7 @@ static void exec_argv(struct Args *args) {
     make_path(arg_at(args, 0), path);
     argbuf[0] = 0;
     while (i < args->argc) {
-        char *w = arg_at(args, i);
+        let w = arg_at(args, i);
 
         if (streq(w, "<") || streq(w, ">")) {
             i = i + 2;
@@ -258,13 +257,13 @@ static void exec_argv(struct Args *args) {
 }
 
 static void apply_redirs(struct Args *args) {
-    int i = 0;
+    let mut i = 0;
 
     while (i < args->argc) {
-        char *w = arg_at(args, i);
+        let w = arg_at(args, i);
 
         if (streq(w, "<") && i + 1 < args->argc) {
-            int fd = open(arg_at(args, i + 1));
+            let fd = open(arg_at(args, i + 1));
             if (fd < 0 || dup2(fd, 0) < 0) {
                 exit(1);
             }
@@ -273,7 +272,7 @@ static void apply_redirs(struct Args *args) {
             continue;
         }
         if (streq(w, ">") && i + 1 < args->argc) {
-            int fd = create(arg_at(args, i + 1));
+            let fd = create(arg_at(args, i + 1));
             if (fd < 0 || dup2(fd, 1) < 0) {
                 exit(1);
             }
@@ -287,7 +286,6 @@ static void apply_redirs(struct Args *args) {
 
 static int run_simple(char *cmdline) {
     struct Args args;
-    int pid;
 
     trim_right(cmdline);
     cmdline = skip_spaces(cmdline);
@@ -305,7 +303,7 @@ static int run_simple(char *cmdline) {
         exit(0);
     }
 
-    pid = fork();
+    let pid = fork();
     if (pid < 0) {
         puts("?\n");
         return 1;
@@ -321,8 +319,6 @@ static int run_pipeline(char *left, char *right) {
     struct Args largs;
     struct Args rargs;
     int fds[2];
-    int lpid;
-    int rpid;
 
     trim_right(left);
     trim_right(right);
@@ -339,7 +335,7 @@ static int run_pipeline(char *left, char *right) {
         return 1;
     }
 
-    lpid = fork();
+    let lpid = fork();
     if (lpid < 0) {
         close(fds[0]);
         close(fds[1]);
@@ -354,7 +350,7 @@ static int run_pipeline(char *left, char *right) {
         exec_argv(&largs);
     }
 
-    rpid = fork();
+    let rpid = fork();
     if (rpid < 0) {
         close(fds[0]);
         close(fds[1]);
@@ -376,9 +372,9 @@ static int run_pipeline(char *left, char *right) {
 }
 
 static int run_line(char *line) {
-    char *bar = (char *)0;
-    char *andand = (char *)0;
-    int i = 0;
+    let mut bar = (char *)0;
+    let mut andand = (char *)0;
+    let mut i = 0;
 
     while (line[i]) {
         if (line[i] == '|' && bar == 0) {
@@ -391,11 +387,9 @@ static int run_line(char *line) {
     }
 
     if (andand != 0) {
-        int status;
-
         andand[0] = 0;
         andand[1] = 0;
-        status = run_line(line);
+        let status = run_line(line);
         if (status == 0) {
             return run_line(andand + 2);
         }
@@ -412,10 +406,8 @@ static int applet_sh(int argc, char *argv[]) {
     char line[LINE_MAX];
 
     while (1) {
-        int n;
-
         puts("$ ");
-        n = read_line(line, LINE_MAX);
+        let n = read_line(line, LINE_MAX);
         if (n == 0) {
             exit(2);
         }
@@ -425,7 +417,7 @@ static int applet_sh(int argc, char *argv[]) {
 }
 
 static int applet_echo(int argc, char *argv[]) {
-    int i = 0;
+    let mut i = 0;
 
     while (i < argc) {
         if (i > 0) {
@@ -442,7 +434,7 @@ static int cat_fd(int fd) {
     char buf[64];
 
     while (1) {
-        int n = read(fd, buf, 64);
+        let n = read(fd, buf, 64);
 
         if (n < 0) {
             return 1;
@@ -455,13 +447,13 @@ static int cat_fd(int fd) {
 }
 
 static int applet_cat(int argc, char *argv[]) {
-    int status = 0;
+    let mut status = 0;
 
     if (argc == 0) {
         return cat_fd(0);
     }
     for (int i = 0; i < argc; i++) {
-        int fd = open(argv[i]);
+        let fd = open(argv[i]);
 
         if (fd < 0) {
             status = 1;
@@ -477,10 +469,10 @@ static int applet_cat(int argc, char *argv[]) {
 
 static int applet_ls(int argc, char *argv[]) {
     char name[40];
-    int i = 0;
+    let mut i = 0;
 
     while (1) {
-        int r = dirent(i, name, 40);
+        let r = dirent(i, name, 40);
 
         if (r < 0) {
             return 1;
@@ -495,7 +487,7 @@ static int applet_ls(int argc, char *argv[]) {
 }
 
 static int applet_mkdir(int argc, char *argv[]) {
-    int status = 0;
+    let mut status = 0;
 
     for (int i = 0; i < argc; i++) {
         if (mkdir(argv[i]) < 0) {
@@ -506,7 +498,7 @@ static int applet_mkdir(int argc, char *argv[]) {
 }
 
 static int applet_rm(int argc, char *argv[]) {
-    int status = 0;
+    let mut status = 0;
 
     for (int i = 0; i < argc; i++) {
         if (rm(argv[i]) < 0) {
@@ -523,13 +515,13 @@ static int applet_pwd(int argc, char *argv[]) {
 
 static int wc_fd(int fd, const char *name) {
     char buf[64];
-    int lines = 0;
-    int words = 0;
-    int bytes = 0;
-    int inword = 0;
+    let mut lines = 0;
+    let mut words = 0;
+    let mut bytes = 0;
+    let mut inword = 0;
 
     while (1) {
-        int n = read(fd, buf, 64);
+        let n = read(fd, buf, 64);
 
         if (n < 0) {
             return 1;
@@ -538,7 +530,7 @@ static int wc_fd(int fd, const char *name) {
             break;
         }
         for (int i = 0; i < n; i++) {
-            char c = buf[i];
+            let c = buf[i];
 
             bytes = bytes + 1;
             if (c == '\n') {
@@ -566,13 +558,13 @@ static int wc_fd(int fd, const char *name) {
 }
 
 static int applet_wc(int argc, char *argv[]) {
-    int status = 0;
+    let mut status = 0;
 
     if (argc == 0) {
         return wc_fd(0, (const char *)0);
     }
     for (int i = 0; i < argc; i++) {
-        int fd = open(argv[i]);
+        let fd = open(argv[i]);
 
         if (fd < 0) {
             status = 1;
@@ -596,10 +588,10 @@ static void grep_line(const char *pattern, char *line) {
 static int grep_fd(int fd, const char *pattern) {
     char buf[64];
     char line[96];
-    int pos = 0;
+    let mut pos = 0;
 
     while (1) {
-        int n = read(fd, buf, 64);
+        let n = read(fd, buf, 64);
 
         if (n < 0) {
             return 1;
@@ -608,7 +600,7 @@ static int grep_fd(int fd, const char *pattern) {
             break;
         }
         for (int i = 0; i < n; i++) {
-            char c = buf[i];
+            let c = buf[i];
 
             if (c == '\n') {
                 line[pos] = 0;
@@ -628,18 +620,17 @@ static int grep_fd(int fd, const char *pattern) {
 }
 
 static int applet_grep(int argc, char *argv[]) {
-    const char *pattern;
-    int status = 0;
+    let mut status = 0;
 
     if (argc < 1) {
         return 1;
     }
-    pattern = argv[0];
+    let pattern = argv[0];
     if (argc == 1) {
         return grep_fd(0, pattern);
     }
     for (int i = 1; i < argc; i++) {
-        int fd = open(argv[i]);
+        let fd = open(argv[i]);
 
         if (fd < 0) {
             status = 1;
@@ -655,10 +646,10 @@ static int applet_grep(int argc, char *argv[]) {
 
 static int applet_ps(int argc, char *argv[]) {
     char line[64];
-    int i = 0;
+    let mut i = 0;
 
     while (1) {
-        int r = psline(i, line, 64);
+        let r = psline(i, line, 64);
 
         if (r < 0) {
             return 1;
@@ -672,7 +663,7 @@ static int applet_ps(int argc, char *argv[]) {
 }
 
 static int applet_kill(int argc, char *argv[]) {
-    int status = 0;
+    let mut status = 0;
 
     for (int i = 0; i < argc; i++) {
         if (kill(parse_int(argv[i])) < 0) {
@@ -731,10 +722,10 @@ static int dispatch(const char *name, int argc, char *argv[]) {
 int main(void) {
     struct Args args;
     char argbuf[LINE_MAX];
-    char *src = user_arg();
-    char *name = user_argv0();
-    int i = 0;
-    int status;
+    let src = user_arg();
+    let name = user_argv0();
+    let mut i = 0;
+    let mut status = 0;
 
     while (src[i] && i < LINE_MAX - 1) {
         argbuf[i] = src[i];
@@ -744,7 +735,7 @@ int main(void) {
     args.parse(argbuf);
 
     if (streq(name, "busybox") && args.argc > 0) {
-        char *applet = args.shift();
+        let applet = args.shift();
         status = dispatch(applet, args.argc, args.argv);
     } else {
         status = dispatch(name, args.argc, args.argv);

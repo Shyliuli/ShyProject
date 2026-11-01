@@ -22,7 +22,7 @@ unsigned int sched_stack_top = SCHED_STACK_TOP;
 unsigned int user_seg_size = USER_SEG_SIZE;
 
 static void load_init(struct proc *p) {
-    struct fs_file *file = fs_lookup("init");
+    let file = fs_lookup("init");
     if (!user_image_layout_ok(file)) {
         arch_uart_putc('!');
         arch_uart_putc('\n');
@@ -44,8 +44,7 @@ static void load_init(struct proc *p) {
 }
 
 void kmain(void) {
-    struct proc *p;
-    char *banner = "ShyOS boot\n";
+    let banner = "ShyOS boot\n";
 
     mem_init();
 
@@ -66,7 +65,7 @@ void kmain(void) {
     arch_enable_timer();
 #endif
 
-    p = alloc_proc();
+    let p = alloc_proc();
     load_init(p);
     p->state = RUNNABLE;
 

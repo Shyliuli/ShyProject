@@ -98,8 +98,8 @@ impl Pipe {
     }
 
     int read(self *p, void *user_buf, unsigned int n) {
-        unsigned int addr = (unsigned int)user_buf;
-        unsigned int i = 0;
+        let addr = (unsigned int)user_buf;
+        let mut i = 0;
 
         if (!user_range_ok(addr, n)) {
             return -1;
@@ -127,8 +127,8 @@ impl Pipe {
     }
 
     int write(self *p, const void *user_buf, unsigned int n) {
-        unsigned int addr = (unsigned int)user_buf;
-        unsigned int i = 0;
+        let addr = (unsigned int)user_buf;
+        let mut i = 0;
 
         if (!user_range_ok(addr, n)) {
             return -1;
@@ -163,7 +163,7 @@ impl Pipe {
 }
 
 static int streq(const char *a, const char *b) {
-    int i = 0;
+    let mut i = 0;
 
     while (a[i] && b[i]) {
         if (a[i] != b[i]) {
@@ -206,7 +206,7 @@ static char *user_path_name(const char *path, char *buf) {
 }
 
 static int valid_mem_name(const char *name) {
-    int i = 0;
+    let mut i = 0;
 
     while (name[i]) {
         if (i >= MEM_NAME_MAX - 1) {
@@ -221,7 +221,7 @@ static int valid_mem_name(const char *name) {
 }
 
 static void copy_mem_name(char *dst, const char *src) {
-    int i = 0;
+    let mut i = 0;
 
     while (i < MEM_NAME_MAX - 1 && src[i]) {
         dst[i] = src[i];
@@ -295,9 +295,9 @@ struct fs_file *fs_lookup(const char *path_name) {
 }
 
 static int copy_to_user_string(char *user_buf, int max, const char *src) {
-    unsigned int addr = (unsigned int)user_buf;
-    char zero = 0;
-    int i = 0;
+    let addr = (unsigned int)user_buf;
+    let zero = (char)0;
+    let mut i = 0;
 
     if (max <= 0) {
         return -1;
@@ -312,7 +312,7 @@ static int copy_to_user_string(char *user_buf, int max, const char *src) {
 }
 
 int fs_dirent(int index, char *user_buf, int max) {
-    int seen = 0;
+    let mut seen = 0;
 
     if (index < 0) {
         return 0;
@@ -329,7 +329,7 @@ int fs_dirent(int index, char *user_buf, int max) {
     for (int i = 0; i < NMEMFILE; i++) {
         if (mem_files[i].used) {
             if (seen == index) {
-                int r = copy_to_user_string(user_buf, max, mem_files[i].name);
+                let r = copy_to_user_string(user_buf, max, mem_files[i].name);
                 lock_release(&file_lock);
                 if (r < 0) {
                     return -1;
@@ -345,8 +345,7 @@ int fs_dirent(int index, char *user_buf, int max) {
 
 int fs_mkdir(const char *path) {
     char pathbuf[USER_ARG_MAX];
-    char *name = user_path_name(path, pathbuf);
-    struct mem_file *mf;
+    let name = user_path_name(path, pathbuf);
 
     if (name == 0 || !valid_mem_name(name)) {
         return -1;
@@ -360,7 +359,7 @@ int fs_mkdir(const char *path) {
         lock_release(&file_lock);
         return -1;
     }
-    mf = mem_alloc_locked();
+    let mf = mem_alloc_locked();
     if (mf == 0) {
         lock_release(&file_lock);
         return -1;
@@ -372,15 +371,14 @@ int fs_mkdir(const char *path) {
 
 int fs_rm(const char *path) {
     char pathbuf[USER_ARG_MAX];
-    char *name = user_path_name(path, pathbuf);
-    struct mem_file *mf;
+    let name = user_path_name(path, pathbuf);
 
     if (name == 0 || !valid_mem_name(name)) {
         return -1;
     }
 
     lock_acquire(&file_lock);
-    mf = mem_lookup_locked(name);
+    let mf = mem_lookup_locked(name);
     if (mf == 0) {
         lock_release(&file_lock);
         return -1;
@@ -494,7 +492,7 @@ impl file {
     }
 
     int read(self *f, void *user_buf, unsigned int n) {
-        unsigned int addr = (unsigned int)user_buf;
+        let addr = (unsigned int)user_buf;
         unsigned int remaining;
 
         if (!f.can_read()) {
@@ -539,7 +537,7 @@ impl file {
     }
 
     int write(self *f, const void *user_buf, unsigned int n) {
-        unsigned int addr = (unsigned int)user_buf;
+        let addr = (unsigned int)user_buf;
         unsigned int space;
 
         if (!f.can_write()) {
@@ -602,9 +600,7 @@ impl file {
 
 int file_open(const char *path) {
     char pathbuf[USER_ARG_MAX];
-    char *path_name = user_path_name(path, pathbuf);
-    struct fs_file *fsf;
-    struct mem_file *mf;
+    let path_name = user_path_name(path, pathbuf);
     int fd;
 
     if (path_name == 0) {
@@ -612,7 +608,7 @@ int file_open(const char *path) {
     }
 
     lock_acquire(&file_lock);
-    mf = mem_lookup_locked(path_name);
+    let mf = mem_lookup_locked(path_name);
     if (mf != 0 && mf->is_dir) {
         lock_release(&file_lock);
         return -1;
@@ -622,7 +618,7 @@ int file_open(const char *path) {
             if (mf != 0) {
                 file_table[fd].open_mem(mf, 0);
             } else {
-                fsf = fs_lookup(path_name);
+                let fsf = fs_lookup(path_name);
                 if (fsf == 0) {
                     lock_release(&file_lock);
                     return -1;
@@ -641,8 +637,7 @@ int file_open(const char *path) {
 
 int file_create(const char *path) {
     char pathbuf[USER_ARG_MAX];
-    char *path_name = user_path_name(path, pathbuf);
-    struct mem_file *mf;
+    let path_name = user_path_name(path, pathbuf);
     int fd;
 
     if (path_name == 0 || !valid_mem_name(path_name)) {
@@ -650,7 +645,7 @@ int file_create(const char *path) {
     }
 
     lock_acquire(&file_lock);
-    mf = mem_lookup_locked(path_name);
+    let mut mf = mem_lookup_locked(path_name);
     if (mf != 0 && mf->is_dir) {
         lock_release(&file_lock);
         return -1;
@@ -678,17 +673,14 @@ int file_create(const char *path) {
 }
 
 int file_read(int fd, void *user_buf, unsigned int n) {
-    struct file *f;
-    int r;
-
-    int original_fd = fd;
+    let original_fd = fd;
     fd = resolve_fd(fd);
     if (fd < 3 || fd >= NFILE || !fd_available_to_current(original_fd, fd)) {
         return -1;
     }
     lock_acquire(&file_lock);
-    f = &file_table[fd];
-    r = f.read(user_buf, n);
+    let f = &file_table[fd];
+    let r = f.read(user_buf, n);
     if (r != FILE_BLOCKED) {
         lock_release(&file_lock);
     }
@@ -696,17 +688,14 @@ int file_read(int fd, void *user_buf, unsigned int n) {
 }
 
 int file_write(int fd, const void *user_buf, unsigned int n) {
-    struct file *f;
-    int r;
-
-    int original_fd = fd;
+    let original_fd = fd;
     fd = resolve_fd(fd);
     if (fd < 3 || fd >= NFILE || !fd_available_to_current(original_fd, fd)) {
         return -1;
     }
     lock_acquire(&file_lock);
-    f = &file_table[fd];
-    r = f.write(user_buf, n);
+    let f = &file_table[fd];
+    let r = f.write(user_buf, n);
     if (r != FILE_BLOCKED) {
         lock_release(&file_lock);
     }
@@ -714,25 +703,19 @@ int file_write(int fd, const void *user_buf, unsigned int n) {
 }
 
 int file_close(int fd) {
-    struct file *f;
-    int r;
-
     if (fd < 0 || fd >= NFILE) {
         return -1;
     }
     lock_acquire(&file_lock);
-    f = &file_table[fd];
-    r = f.close();
+    let f = &file_table[fd];
+    let r = f.close();
     lock_release(&file_lock);
     return r;
 }
 
 int file_close_fd(int fd) {
-    int actual;
-    int r;
-
     if (fd == 0) {
-        actual = current->stdin_fd;
+        let actual = current->stdin_fd;
         current->stdin_fd = -1;
         if (actual >= 3) {
             return file_close(actual);
@@ -740,7 +723,7 @@ int file_close_fd(int fd) {
         return 0;
     }
     if (fd == 1) {
-        actual = current->stdout_fd;
+        let actual = current->stdout_fd;
         current->stdout_fd = -1;
         if (actual >= 3) {
             return file_close(actual);
@@ -752,12 +735,11 @@ int file_close_fd(int fd) {
         return -1;
     }
     current_del_fd(fd);
-    r = file_close(fd);
-    return r;
+    return file_close(fd);
 }
 
 void file_close_proc(void) {
-    unsigned int mask = current->open_fds;
+    let mask = current->open_fds;
 
     file_close_fd(0);
     file_close_fd(1);
@@ -771,13 +753,11 @@ void file_close_proc(void) {
 }
 
 int file_dup(int fd) {
-    struct file *f;
-
     if (fd < 3 || fd >= NFILE) {
         return -1;
     }
     lock_acquire(&file_lock);
-    f = &file_table[fd];
+    let f = &file_table[fd];
     if (f.dup_ref() < 0) {
         lock_release(&file_lock);
         return -1;
@@ -795,8 +775,7 @@ void file_dup_open_mask(unsigned int mask) {
 }
 
 int file_dup2(int oldfd, int newfd) {
-    int actual = resolve_fd(oldfd);
-    int r;
+    let actual = resolve_fd(oldfd);
 
     if (newfd != 0 && newfd != 1) {
         return -1;
@@ -805,8 +784,7 @@ int file_dup2(int oldfd, int newfd) {
         return -1;
     }
 
-    r = file_dup(actual);
-    if (r < 0) {
+    if (file_dup(actual) < 0) {
         return -1;
     }
 
@@ -820,9 +798,9 @@ int file_dup2(int oldfd, int newfd) {
 }
 
 int file_pipe(int *fds) {
-    unsigned int addr = (unsigned int)fds;
-    int rfd = -1;
-    int wfd = -1;
+    let addr = (unsigned int)fds;
+    let mut rfd = -1;
+    let mut wfd = -1;
     struct Pipe *p = 0;
     int result[2];
 
@@ -869,14 +847,12 @@ int file_pipe(int *fds) {
 }
 
 static int copy_user_arg(const char *arg, unsigned char *buf) {
-    unsigned int addr;
-
     buf[0] = 0;
     if (arg == 0) {
         return 0;
     }
 
-    addr = (unsigned int)arg;
+    let addr = (unsigned int)arg;
     if (addr >= USER_SEG_SIZE) {
         return -1;
     }
@@ -896,8 +872,8 @@ static int copy_user_arg(const char *arg, unsigned char *buf) {
 
 static int copy_exec_name(const char *path, unsigned char *buf) {
     char pathbuf[USER_ARG_MAX];
-    char *name = user_path_name(path, pathbuf);
-    int i = 0;
+    let name = user_path_name(path, pathbuf);
+    let mut i = 0;
 
     buf[0] = 0;
     if (name == 0) {
@@ -979,9 +955,6 @@ int user_image_layout_ok(struct fs_file *fsf) {
 int sys_exec(const char *path, const char *arg) {
     unsigned char namebuf[USER_ARG_MAX];
     unsigned char argbuf[USER_ARG_MAX];
-    int fd;
-    struct fs_file *fsf;
-    unsigned int stack_base;
 
     if (copy_exec_name(path, namebuf) < 0) {
         return -1;
@@ -989,19 +962,19 @@ int sys_exec(const char *path, const char *arg) {
     if (copy_user_arg(arg, argbuf) < 0) {
         return -1;
     }
-    fd = file_open(path);
+    let fd = file_open(path);
     if (fd < 0) {
         return -1;
     }
 
     lock_acquire(&file_lock);
-    fsf = file_table[fd].file;
+    let fsf = file_table[fd].file;
     lock_release(&file_lock);
     if (!user_image_layout_ok(fsf)) {
         file_close_fd(fd);
         return -1;
     }
-    stack_base = user_image_stack_base(fsf);
+    let stack_base = user_image_stack_base(fsf);
 
     arch_space_load(current, fsf->data, fsf->size);
     arch_space_write(current, USER_ARG0_ADDR, namebuf, USER_ARG_MAX);

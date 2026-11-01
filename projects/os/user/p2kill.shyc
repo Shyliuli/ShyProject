@@ -8,8 +8,8 @@
 #define P2_KILL_CHAN 5151
 
 int main(void) {
-    int status = 0;
-    int pid = fork();
+    let status = 0;
+    let mut pid = fork();
 
     if (pid < 0) {
         puts("p2kill fork failed\n");

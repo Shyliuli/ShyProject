@@ -11,7 +11,7 @@ static void fail(void) {
 }
 
 static void fill(char *p, int n, int seed) {
-    int i = 0;
+    let mut i = 0;
 
     while (i < n) {
         p[i] = (char)((i + seed) & 127);
@@ -20,7 +20,7 @@ static void fill(char *p, int n, int seed) {
 }
 
 static void check(char *p, int n, int seed) {
-    int i = 0;
+    let mut i = 0;
 
     while (i < n) {
         if (p[i] != (char)((i + seed) & 127)) {
@@ -31,14 +31,10 @@ static void check(char *p, int n, int seed) {
 }
 
 int main(void) {
-    char *a;
-    char *b;
-    char *c;
-    void *bad;
+    let mut a = (char *)malloc(32);
+    let mut b = (char *)malloc(257);
+    let mut c = (char *)malloc(4);
 
-    a = (char *)malloc(32);
-    b = (char *)malloc(257);
-    c = (char *)malloc(4);
     if (a == 0 || b == 0 || c == 0) {
         fail();
     }
@@ -58,7 +54,7 @@ int main(void) {
     free(c);
     free((void *)0);
 
-    bad = sbrk(1048576);
+    let mut bad = sbrk(1048576);
     if ((int)bad != -1) {
         fail();
     }

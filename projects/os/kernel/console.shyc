@@ -5,20 +5,20 @@ void uart_putc(int c) { arch_uart_putc(c); }
 int uart_getc(void) { return arch_uart_getc(); }
 
 void user_exit(void) {
-    char *msg = "ShyOS user exit\n";
+    let msg = "ShyOS user exit\n";
     for (int i = 0; msg[i]; i++) arch_uart_putc(msg[i]);
     arch_shutdown(0);
 }
 
 void trap_unexpected(void) {
-    char *msg = "ShyOS unexpected trap\n";
+    let msg = "ShyOS unexpected trap\n";
     for (int i = 0; msg[i]; i++) arch_uart_putc(msg[i]);
     arch_shutdown(1);
 }
 
 void panic(char *msg) {
-    char *prefix = "panic: ";
-    char *null_msg = "(null)";
+    let prefix = "panic: ";
+    let null_msg = "(null)";
     for (int i = 0; prefix[i]; i++) arch_uart_putc(prefix[i]);
     if (!msg) msg = null_msg;
     for (int i = 0; msg[i]; i++) arch_uart_putc(msg[i]);

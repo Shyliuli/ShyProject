@@ -13,8 +13,8 @@ static char expected(int n) {
 
 static void print_int(int value) {
     char buf[12];
-    int i = 0;
-    int n = value;
+    let mut i = 0;
+    let mut n = value;
 
     if (n == 0) {
         puts("0");
@@ -36,13 +36,12 @@ static void print_int(int value) {
 }
 
 static int writer(int fd) {
-    int sent = 0;
+    let mut sent = 0;
 
     while (sent < P4_TOTAL) {
-        char c = expected(sent);
-        int w;
+        let c = expected(sent);
+        let w = write(fd, &c, 1);
 
-        w = write(fd, &c, 1);
         if (w <= 0) {
             puts("p4pipe write failed\n");
             return -1;
@@ -61,14 +60,12 @@ static int writer(int fd) {
 
 int main(void) {
     int fds[2];
-    int pid;
-    int total = 0;
-    int ok = 1;
-    int status = 0;
-    int saved_status = 0;
-    int bad = -1;
-    int bad_got = 0;
-    int bad_want = 0;
+    let mut total = 0;
+    let mut ok = 1;
+    let status = 0;
+    let mut bad = -1;
+    let mut bad_got = 0;
+    let mut bad_want = 0;
     char buf[29];
 
     if (pipe(fds) < 0) {
@@ -76,7 +73,7 @@ int main(void) {
         exit(1);
     }
 
-    pid = fork();
+    let pid = fork();
     if (pid < 0) {
         puts("p4pipe fork failed\n");
         exit(1);
@@ -96,7 +93,7 @@ int main(void) {
     yield();
 
     while (total < P4_TOTAL) {
-        int n = read(fds[0], buf, 29);
+        let n = read(fds[0], buf, 29);
         if (n < 0) {
             puts("p4pipe read failed\n");
             exit(1);
@@ -123,7 +120,7 @@ int main(void) {
     while (wait(&status) == 0) {
         yield();
     }
-    saved_status = status;
+    let saved_status = status;
 
     if (ok && total == P4_TOTAL) {
         close(fds[0]);

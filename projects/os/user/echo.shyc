@@ -6,7 +6,7 @@
 #include "ulib.h"
 
 int main(void) {
-    char *arg = user_arg();
+    let arg = user_arg();
 
     if (arg[0]) {
         puts(arg);

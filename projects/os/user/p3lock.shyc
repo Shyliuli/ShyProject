@@ -10,8 +10,8 @@
 
 static void print_int(int value) {
     char buf[12];
-    int i = 0;
-    int n = value;
+    let mut i = 0;
+    let mut n = value;
 
     if (n == 0) {
         puts("0");
@@ -43,15 +43,12 @@ static void child_work(void) {
 }
 
 int main(void) {
-    int status = 0;
-    int done = 0;
-    int pid1;
-    int pid2;
-    int count;
+    let status = 0;
+    let mut done = 0;
 
     p3counter(0);
 
-    pid1 = fork();
+    let pid1 = fork();
     if (pid1 < 0) {
         puts("p3lock fork failed\n");
         exit(1);
@@ -60,7 +57,7 @@ int main(void) {
         child_work();
     }
 
-    pid2 = fork();
+    let pid2 = fork();
     if (pid2 < 0) {
         puts("p3lock fork failed\n");
         exit(1);
@@ -70,7 +67,7 @@ int main(void) {
     }
 
     while (done < 2) {
-        int pid = wait(&status);
+        let pid = wait(&status);
         if (pid > 0) {
             done = done + 1;
         } else if (pid == 0) {
@@ -81,7 +78,7 @@ int main(void) {
         }
     }
 
-    count = p3counter(2);
+    let count = p3counter(2);
     puts("p3lock count ");
     print_int(count);
     puts("\n");

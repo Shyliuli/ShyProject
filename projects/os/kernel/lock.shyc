@@ -36,15 +36,13 @@ void lock_release(Lock *lock) {
 }
 
 int p3_counter_op(int op) {
-    int value;
-
     p3_counter_lock.acquire();
     if (op == 0) {
         p3_counter = 0;
     } else if (op == 1) {
         p3_counter = p3_counter + 1;
     }
-    value = p3_counter;
+    let value = p3_counter;
     p3_counter_lock.release();
     return value;
 }

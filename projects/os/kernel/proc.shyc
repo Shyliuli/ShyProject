@@ -43,7 +43,7 @@ static void write_inst(unsigned char *p, unsigned int off,
 }
 
 static void copy_proc_name(char *dst, const char *src) {
-    int i = 0;
+    let mut i = 0;
 
     while (i < PROC_NAME_MAX - 1 && src[i]) {
         dst[i] = src[i];
@@ -268,7 +268,7 @@ static void wakeup_locked(int chan);
 static void proc_exit_locked(int status);
 
 static void wake_waiting_parent_locked(struct proc *parent, struct proc *child) {
-    int pid = child->pid;
+    let pid = child->pid;
 
     copy_wait_status(parent, parent->wait_status, child->xstatus);
     if (child == current) {
@@ -284,15 +284,13 @@ static void wake_waiting_parent_locked(struct proc *parent, struct proc *child) 
 }
 
 void proc_init(void) {
-    struct proc *idle;
-
     lock_init(&proc_lock);
     for (int i = 0; i < NPROC; i++) {
         procs[i].init_unused();
     }
 
     next_pid = 1;
-    idle = alloc_proc();
+    let idle = alloc_proc();
     idle->pid = 0;
     idle->parent = -1;
     idle.set_state(RUNNABLE);
@@ -344,11 +342,10 @@ void free_proc(struct proc *p) {
 }
 
 int fork(void) {
-    struct proc *child = alloc_proc();
-    int child_pid;
-    int stdin_fd = current->stdin_fd;
-    int stdout_fd = current->stdout_fd;
-    unsigned int open_fds = current->open_fds;
+    let child = alloc_proc();
+    let stdin_fd = current->stdin_fd;
+    let stdout_fd = current->stdout_fd;
+    let open_fds = current->open_fds;
 
     if (child == 0) {
         lock_acquire(&proc_lock);
@@ -398,14 +395,13 @@ int fork(void) {
     }
 
     ctx_set_ret(&current->ctx, child->pid);
-    child_pid = child->pid;
+    let child_pid = child->pid;
     lock_release(&proc_lock);
     return child_pid;
 }
 
 static void proc_exit_locked(int status) {
-    int pid = current->pid;
-    struct proc *parent;
+    let pid = current->pid;
 
     current->xstatus = status;
     current.clear_wait();
@@ -413,7 +409,7 @@ static void proc_exit_locked(int status) {
     if (status == 2 && current->parent == 1) {
         arch_shutdown(0);
     }
-    parent = find_proc_locked(current->parent);
+    let parent = find_proc_locked(current->parent);
     if (parent != 0 &&
         parent.is_state(SLEEPING) &&
         parent->waiting) {
@@ -457,14 +453,14 @@ void exit(int status) {
 
 int wait(int *status) {
     while (1) {
-        int have_child = 0;
+        let mut have_child = 0;
 
         lock_acquire(&proc_lock);
         for (int i = 0; i < NPROC; i++) {
             if (procs[i].parent == current->pid) {
                 have_child = 1;
                 if (procs[i].is_state(ZOMBIE)) {
-                    int pid = procs[i].pid;
+                    let pid = procs[i].pid;
                     copy_wait_status(current, (unsigned int)status, procs[i].xstatus);
                     current.clear_wait();
                     free_proc_locked(&procs[i]);
@@ -492,19 +488,15 @@ int wait(int *status) {
 }
 
 int getpid(void) {
-    int pid;
-
     lock_acquire(&proc_lock);
-    pid = current->pid;
+    let pid = current->pid;
     lock_release(&proc_lock);
     return pid;
 }
 
 int kill(int pid) {
-    struct proc *p;
-
     lock_acquire(&proc_lock);
-    p = find_proc_locked(pid);
+    let p = find_proc_locked(pid);
     if (p == 0 || p->pid == 0) {
         lock_release(&proc_lock);
         return -1;
@@ -557,25 +549,21 @@ void yield(void) {
 }
 
 int proc_sbrk(int n) {
-    unsigned int old;
-    unsigned int new_break;
-    unsigned int stack_base;
-
     lock_acquire(&proc_lock);
     if (current == 0 || current->pid == 0) {
         lock_release(&proc_lock);
         return -1;
     }
 
-    old = current->sz;
-    new_break = old;
-    stack_base = current->stack_base;
+    let old = current->sz;
+    let mut new_break = old;
+    let mut stack_base = current->stack_base;
     if (stack_base == 0 || stack_base > USER_SEG_SIZE) {
         stack_base = USER_STACK_DEFAULT_BASE;
     }
 
     if (n >= 0) {
-        unsigned int inc = (unsigned int)n;
+        let inc = (unsigned int)n;
 
         new_break = old + inc;
         if (new_break < old) {
@@ -583,7 +571,7 @@ int proc_sbrk(int n) {
             return -1;
         }
     } else {
-        unsigned int dec = 0 - (unsigned int)n;
+        let dec = 0 - (unsigned int)n;
 
         if (dec > old || old - dec < current->heap_base) {
             lock_release(&proc_lock);
@@ -603,8 +591,7 @@ int proc_sbrk(int n) {
 }
 
 struct proc *proc_next(void) {
-    int start = 0;
-    struct proc *next;
+    let mut start = 0;
 
     lock_acquire(&proc_lock);
     for (int i = 0; i < NPROC; i++) {
@@ -629,19 +616,19 @@ struct proc *proc_next(void) {
                 proc_exit_locked(-1);
                 continue;
             }
-            next = &procs[i];
+            let next = &procs[i];
             lock_release(&proc_lock);
             return next;
         }
     }
 
     if (current != 0 && current.is_runnable_user()) {
-        next = current;
+        let next = current;
         lock_release(&proc_lock);
         return next;
     }
 
-    next = &procs[0];
+    let next = &procs[0];
     lock_release(&proc_lock);
     return next;
 }
@@ -655,7 +642,7 @@ void proc_set_current_state(enum procstate state) {
 }
 
 int proc_current_state_is(enum procstate state) {
-    int same = 0;
+    let mut same = 0;
 
     lock_acquire(&proc_lock);
     if (current != 0 && current.is_state(state)) {
@@ -666,7 +653,7 @@ int proc_current_state_is(enum procstate state) {
 }
 
 int proc_current_killed_runnable(void) {
-    int killed = 0;
+    let mut killed = 0;
 
     lock_acquire(&proc_lock);
     if (current != 0 && current.killed_runnable()) {
@@ -677,10 +664,8 @@ int proc_current_killed_runnable(void) {
 }
 
 int proc_live_non_idle_exists(void) {
-    int live;
-
     lock_acquire(&proc_lock);
-    live = has_live_non_idle_locked();
+    let live = has_live_non_idle_locked();
     lock_release(&proc_lock);
     return live;
 }
@@ -712,9 +697,9 @@ void proc_set_current_name(const char *name) {
 
 int proc_psline(int index, char *user_buf, int max) {
     char dst[64];
-    unsigned int addr = (unsigned int)user_buf;
-    int seen = 0;
-    int pos = 0;
+    let addr = (unsigned int)user_buf;
+    let mut seen = 0;
+    let mut pos = 0;
 
     if (index < 0) {
         return 0;
@@ -728,11 +713,11 @@ int proc_psline(int index, char *user_buf, int max) {
     for (int i = 0; i < NPROC; i++) {
         if (procs[i].is_used()) {
             if (seen == index) {
-                int pid = procs[i].pid;
-                int divisor = 1;
-                const char *state_name = proc_state_name(procs[i].state);
-                const char *name = procs[i].name;
-                int j = 0;
+                let mut pid = procs[i].pid;
+                let mut divisor = 1;
+                let state_name = proc_state_name(procs[i].state);
+                let mut name = procs[i].name;
+                let mut j = 0;
 
                 if (pid == 0) {
                     if (pos < max - 1) {

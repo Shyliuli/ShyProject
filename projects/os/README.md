@@ -192,6 +192,9 @@ segment.
 ## Constraints
 
 - ShyC currently has no function pointers, so dispatch is explicit rather than table-driven in several places.
+- Plain locals use `let`/`let mut` inference when the initializer determines the type; declarations without an initializer stay C.
+- ABI-facing and machine-facing code keeps explicit C declarations: syscall dispatch, trap frames, page tables and segments, the allocator, MMIO, inline assembly, and raw byte copies.
+- `Option`/`Result` and generic declarations are not used; boundaries stay C integers, pointers, and syscall numbers so the ABI remains visible at every call site.
 - User syscall wrappers are raw Shy assembly in `user/usys.shy`.
 - Trap entry, context save/restore, and scheduler return paths are handwritten assembly.
 - The code avoids ShyC patterns that are known to stress current 64-bit loop code generation; loops and memory copies stay simple and explicit.

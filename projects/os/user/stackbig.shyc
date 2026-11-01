@@ -7,9 +7,8 @@
 
 int main(void) {
     char buf[6000];
-    int i;
+    let mut i = 0;
 
-    i = 0;
     while (i < 6000) {
         buf[i] = (char)(i & 127);
         i = i + 1;

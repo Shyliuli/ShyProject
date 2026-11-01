@@ -15,7 +15,7 @@ struct Buffer {
 
 impl String {
     int len(self *s) {
-        int n = 0;
+        let mut n = 0;
 
         while (s.data[n]) {
             n = n + 1;
@@ -24,7 +24,7 @@ impl String {
     }
 
     int eq(self *s, const char *other) {
-        int i = 0;
+        let mut i = 0;
 
         while (s.data[i] && other[i]) {
             if (s.data[i] != other[i]) {
@@ -36,7 +36,7 @@ impl String {
     }
 
     int starts_with(self *s, const char *prefix) {
-        int i = 0;
+        let mut i = 0;
 
         while (prefix[i]) {
             if (s.data[i] != prefix[i]) {
@@ -48,17 +48,16 @@ impl String {
     }
 
     int find(self *s, const char *needle) {
-        int i = 0;
+        let mut i = 0;
         struct String pat;
-        int n;
 
         pat.data = needle;
-        n = pat.len();
+        let n = pat.len();
         if (n == 0) {
             return 0;
         }
         while (s.data[i]) {
-            int j = 0;
+            let mut j = 0;
 
             while (needle[j] && s.data[i + j] == needle[j]) {
                 j = j + 1;
@@ -101,10 +100,9 @@ int streq(const char *a, const char *b) {
 
 void puts(const char *s) {
     struct String text;
-    int n;
 
     text.data = s;
-    n = text.len();
+    let n = text.len();
     if (n > 0) {
         write(1, s, n);
     }
@@ -120,7 +118,7 @@ int read_line(char *buf, int max) {
     line.init(buf, max);
     while (line.has_room()) {
         char c;
-        int r = read(0, &c, 1);
+        let r = read(0, &c, 1);
         if (r <= 0) {
             break;
         }
@@ -136,19 +134,16 @@ int read_line(char *buf, int max) {
 }
 
 void *malloc(int n) {
-    int aligned;
-    void *p;
-
     if (n <= 0) {
         return (void *)0;
     }
 
-    aligned = (n + 3) & ~3;
+    let aligned = (n + 3) & ~3;
     if (aligned < n) {
         return (void *)0;
     }
 
-    p = sbrk(aligned);
+    let p = sbrk(aligned);
     if ((int)p == -1) {
         return (void *)0;
     }

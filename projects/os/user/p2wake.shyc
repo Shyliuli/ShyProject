@@ -8,8 +8,8 @@
 #define P2_WAKE_CHAN 4242
 
 int main(void) {
-    int status = 0;
-    int pid = fork();
+    let status = 0;
+    let mut pid = fork();
 
     if (pid < 0) {
         puts("p2wake fork failed\n");
