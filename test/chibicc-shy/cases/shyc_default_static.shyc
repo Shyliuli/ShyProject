@@ -1,0 +1,15 @@
+// ShyC 默认文件级私有：本单元也有一个 pick，和另一个单元的同名函数互不影响。
+fn pick(void) -> int { return 1; }
+
+// 原型声明的是别处的东西，永远用对外名字。
+fn exported(void) -> int;
+
+int main(void) {
+    if (pick() != 1) {
+        return 1;
+    }
+    if (exported() != 7) {
+        return 2;
+    }
+    return 0;
+}

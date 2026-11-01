@@ -1,0 +1,6 @@
+#![disable_default_static]
+
+// 这个文件按 C 的默认来：不带 static 的 fn 就是对外符号。
+fn pick(void) -> int { return 2; }
+
+pub fn exported(void) -> int { return pick() + 5; }

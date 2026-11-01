@@ -292,11 +292,12 @@ impl Lowerer {
                         "a function cannot have an initializer",
                     ));
                 }
+                // 这里只是一条声明（原型），名字要按对外符号走。
                 let symbol = self.declared_function_symbol(
                     &name,
                     storage,
                     declaration.specs.is_shy_fn,
-                    true,
+                    false,
                 );
                 self.declare_function_symbol(&name, &symbol, resolved.ty, false, init.span)?;
             } else {

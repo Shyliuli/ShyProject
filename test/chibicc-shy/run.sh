@@ -44,3 +44,4 @@ run_case c_float_ops.c 0 -lfloat
 run_case shyc_impl_methods.shyc 0
 run_case shyc_asm_and_defer.shyc 0
 run_case shyc_small_sret_raii.shyc 0
+run_case shyc_default_static.shyc 0 test/chibicc-shy/cases/shyc_default_static_lib.shyc

@@ -282,11 +282,19 @@ impl Parser {
     fn fn_signature(&mut self) -> Result<(Span, DeclSpecs, Declarator), Diagnostic> {
         let start = self.here();
         // `pub` 只是一个空 token：ShyC 的默认就是文件级私有，写它是给读代码的人看的。
-        while self.eat_ident("pub") {
-            self.eat_ident("static");
-            let _ = self.eat_ident("pub");
+        // `static` 与 `pub` 可以按任意顺序写，`static` 最多一次。
+        let mut storage = None;
+        loop {
+            if self.eat_ident("pub") {
+                continue;
+            }
+            if storage.is_none() && self.at_ident("static") {
+                self.bump();
+                storage = Some(StorageClass::Static);
+                continue;
+            }
+            break;
         }
-        let storage = self.eat_ident("static").then_some(StorageClass::Static);
         self.bump();
         self.push_scope();
         let name = self.expect_ident()?;
