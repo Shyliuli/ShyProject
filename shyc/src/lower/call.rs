@@ -2,8 +2,10 @@
 //!
 //! Dot access auto-dereferences one pointer level, matching Shy. Instance
 //! methods are ordinary functions whose first parameter is the receiver; the
-//! call passes the receiver explicitly and targets the mangled
-//! `____Type__method` symbol.
+//! call passes the receiver explicitly and targets the mangled symbol
+//! (`____Type__method` for an inherent method, with the trait name in front
+//! for a trait method). An inherent method wins over a trait method, and two
+//! matching trait methods make a receiver call ambiguous.
 
 use super::{ExprKind, ExprVal, FnLower, FunctionInstance};
 use crate::ast;
@@ -432,7 +434,7 @@ impl FnLower<'_> {
         {
             let object_ty = self.type_of(object)?;
             if let Some(record) = self.l.record_of(object_ty)
-                && let Some(method) = self.l.method_of(record, &name.text)?
+                && let Some(method) = self.l.method_of(record, name)?
             {
                 return self.lower_method_call(object, name, *op, method, args, span);
             }
@@ -546,7 +548,7 @@ impl FnLower<'_> {
                         "method call needs a struct, union, or pointer receiver",
                     ));
                 };
-                if self.l.method_of(record, &name.text)?.is_some() {
+                if self.l.method_of(record, name)?.is_some() {
                     return Err(Diagnostic::new(
                         span,
                         format!("method '{}' is not generic", name.text),
@@ -566,7 +568,7 @@ impl FnLower<'_> {
                         format!("unknown type name '{}'", qualifier.text),
                     ));
                 };
-                if self.l.method_of(record, &name.text)?.is_some() {
+                if self.l.method_of(record, name)?.is_some() {
                     return Err(Diagnostic::new(
                         span,
                         format!("method '{}' is not generic", name.text),
@@ -581,7 +583,7 @@ impl FnLower<'_> {
                 ..
             } => {
                 let ty = self.l.generic_qualifier_type(qualifier, args)?;
-                if self.l.method_of(ty, &name.text)?.is_some() {
+                if self.l.method_of(ty, name)?.is_some() {
                     return Err(Diagnostic::new(
                         span,
                         format!("method '{}' is not generic", name.text),
@@ -636,7 +638,7 @@ impl FnLower<'_> {
             }
             _ => return Ok(None),
         };
-        if self.l.method_of(record, &name.text)?.is_some()
+        if self.l.method_of(record, name)?.is_some()
             || !self.l.has_generic_method(record, &name.text)?
         {
             return Ok(None);

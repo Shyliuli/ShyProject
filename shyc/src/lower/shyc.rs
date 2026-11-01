@@ -1,19 +1,22 @@
 //! Shy-specific lowering: `impl` methods, traits, RAII drops, and `asm!`
 //! bindings.
 //!
-//! Methods are plain functions named `____Type__method`. `self` in a method
-//! signature denotes the implemented record type, so `self *s` is an ordinary
-//! pointer parameter. Locals whose type has a `drop` method are dropped in
-//! reverse declaration order at scope exit, `return`, `break`, and `continue`.
+//! An inherent method is a plain function named `____Type__method`; a trait
+//! method is `____Trait__Type__method` plus one suffix part per resolved trait
+//! argument, so several traits and several parameterizations of one trait can
+//! implement the same method name. `self` in a method signature denotes the
+//! implemented record type, so `self *s` is an ordinary pointer parameter.
+//! Locals whose type has a `drop` method are dropped in reverse declaration
+//! order at scope exit, `return`, `break`, and `continue`.
 //!
 //! A `trait` declares compile-time signatures and a transparent value shape.
 //! `impl Trait for Type` checks that the method set and every signature match
-//! the trait, then registers the methods exactly like an ordinary `impl Type`.
-//! Used as a type, the trait denotes a synthetic struct with one
-//! function-pointer field per method; `Trait::from<Type>()` fills it with the
-//! implementation's symbols. The only erased part of a signature is `self`,
-//! which becomes `void *`, so the table is plain C data with no hidden data
-//! pointer, vtable header, or allocation.
+//! the trait, then registers each method under its trait identity. Used as a
+//! type, a trait denotes a synthetic struct with one function-pointer field per
+//! method; `Trait::from<Type>()` fills it with the implementation's symbols.
+//! The only erased part of a signature is `self`, which becomes `void *`, so
+//! the table is plain C data with no hidden data pointer, vtable header, or
+//! allocation.
 //!
 //! A method may declare its own type parameters. Its signature is compared
 //! with the implementation after both sides bind a fresh placeholder, and each
@@ -258,6 +261,12 @@ impl super::Lowerer {
             }
             None => None,
         };
+        let trait_impl = trait_info
+            .as_ref()
+            .map(|(trait_name, _, args)| super::TraitImplKey {
+                name: trait_name.text.clone(),
+                args: args.clone(),
+            });
         let saved = self.impl_context.clone();
         self.impl_context = Some((ty, name.clone()));
         // The trait's concrete arguments are in scope while its method
@@ -274,11 +283,12 @@ impl super::Lowerer {
                         ty,
                         name: name.clone(),
                         instance: None,
+                        trait_impl: trait_impl.clone(),
                     }),
                 )?;
             }
             if let Some((trait_name, info, _)) = &trait_info {
-                self.check_impl_signatures(block, trait_name, info, ty)?;
+                self.check_impl_signatures(block, trait_name, info, ty, trait_impl.as_ref())?;
             }
             Ok(())
         })();
@@ -289,7 +299,7 @@ impl super::Lowerer {
         {
             self.trait_impls
                 .insert((trait_name.text.clone(), args.clone(), ty));
-            self.register_from_conversion(trait_name, args, ty);
+            self.register_from_conversion(trait_name, args, ty)?;
         }
         result
     }
@@ -305,27 +315,27 @@ impl super::Lowerer {
         trait_name: &ast::Name,
         args: &[super::GenericArgKey],
         target: TypeId,
-    ) {
+    ) -> Result<(), Diagnostic> {
         if trait_name.text != "From" {
-            return;
+            return Ok(());
         }
         let [super::GenericArgKey::Type(source)] = args else {
-            return;
+            return Ok(());
         };
-        let Some(method) = self
-            .impls
-            .get(&target)
-            .and_then(|info| info.methods.get("from"))
-            .cloned()
-        else {
-            return;
+        let key = super::TraitImplKey {
+            name: trait_name.text.clone(),
+            args: args.to_vec(),
+        };
+        let Some(method) = self.trait_method_named(target, &key, "from")? else {
+            return Ok(());
         };
         let TypeKind::Function { params, result, .. } = self.types.kind(method.ty) else {
-            return;
+            return Ok(());
         };
         if params.len() == 1 && self.types.is_compatible(*result, target) {
             self.from_conversions.insert((*source, target), method);
         }
+        Ok(())
     }
 
     /// Checks that the implementation defines exactly the trait's methods.
@@ -398,7 +408,15 @@ impl super::Lowerer {
         trait_name: &ast::Name,
         info: &TraitInfo,
         implemented: TypeId,
+        trait_impl: Option<&super::TraitImplKey>,
     ) -> Result<(), Diagnostic> {
+        let methods = trait_impl
+            .and_then(|key| {
+                self.impls
+                    .get(&implemented)
+                    .and_then(|info| info.trait_methods.get(key))
+            })
+            .cloned();
         for trait_method in &info.methods {
             let Some(trait_method_name) = &trait_method.declarator.name else {
                 continue;
@@ -420,15 +438,14 @@ impl super::Lowerer {
             let placeholders = self.method_placeholder_args(&trait_method.generics)?;
             let expected = self.trait_method_type_with_args(trait_method, &placeholders)?;
             let actual = if trait_method.generics.is_empty() {
-                if let Some(method) = self
-                    .impls
-                    .get(&implemented)
-                    .and_then(|info| info.methods.get(&trait_method_name.text))
+                if let Some(method) = methods
+                    .as_ref()
+                    .and_then(|set| set.methods.get(&trait_method_name.text))
                 {
                     method.ty
                 } else {
-                    if self.impls.get(&implemented).is_some_and(|info| {
-                        info.generic_methods.contains_key(&trait_method_name.text)
+                    if methods.as_ref().is_some_and(|set| {
+                        set.generic_methods.contains_key(&trait_method_name.text)
                     }) {
                         return Err(Diagnostic::new(
                             span,
@@ -448,10 +465,9 @@ impl super::Lowerer {
                     ));
                 }
             } else {
-                let Some(generic) = self
-                    .impls
-                    .get(&implemented)
-                    .and_then(|info| info.generic_methods.get(&trait_method_name.text))
+                let Some(generic) = methods
+                    .as_ref()
+                    .and_then(|set| set.generic_methods.get(&trait_method_name.text))
                     .cloned()
                 else {
                     return Err(Diagnostic::new(
@@ -693,6 +709,13 @@ impl super::Lowerer {
             ));
         };
         let impl_name = impl_info.name.clone();
+        // A trait value has no place for trait type arguments, so only the
+        // argument-free implementation is a candidate. Different traits are
+        // kept apart by their own keys.
+        let trait_impl = super::TraitImplKey {
+            name: trait_name.text.clone(),
+            args: Vec::new(),
+        };
         if !self
             .trait_impls
             .contains(&(trait_name.text.clone(), Vec::new(), concrete))
@@ -716,9 +739,9 @@ impl super::Lowerer {
             let Some(name) = &method.declarator.name else {
                 continue;
             };
-            // `method_of` also queues a deferred generic impl body, which the
+            // The lookup also queues a deferred generic impl body, which the
             // table's symbol needs before the lowerer emits any function.
-            let Some(found) = self.method_of(concrete, &name.text)? else {
+            let Some(found) = self.trait_method_of(concrete, &trait_impl, name)? else {
                 return Err(Diagnostic::new(
                     concrete_name.span,
                     format!(

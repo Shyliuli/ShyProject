@@ -531,7 +531,7 @@ impl Lowerer {
         match self.field_of(record, &name.text, name.span) {
             Ok((ty, _)) => Ok(ty),
             Err(error) => {
-                if self.method_of(record, &name.text)?.is_some()
+                if self.method_of(record, name)?.is_some()
                     || self.has_generic_method(record, &name.text)?
                 {
                     Err(Diagnostic::new(
@@ -585,7 +585,7 @@ impl Lowerer {
         ty: TypeId,
         name: &ast::Name,
     ) -> Result<MethodInfo, Diagnostic> {
-        self.method_of(ty, &name.text)?.ok_or_else(|| {
+        self.method_of(ty, name)?.ok_or_else(|| {
             Diagnostic::new(name.span, format!("no method '{}' on this type", name.text))
         })
     }
@@ -708,7 +708,7 @@ impl Lowerer {
             }
             _ => return Ok(None),
         };
-        if self.method_of(record, &name.text)?.is_some()
+        if self.method_of(record, name)?.is_some()
             || !self.has_generic_method(record, &name.text)?
         {
             return Ok(None);
@@ -745,7 +745,7 @@ impl Lowerer {
                         "method call needs a struct, union, or pointer receiver",
                     ));
                 };
-                if self.method_of(record, &name.text)?.is_some() {
+                if self.method_of(record, name)?.is_some() {
                     return Err(Diagnostic::new(
                         span,
                         format!("method '{}' is not generic", name.text),
@@ -763,7 +763,7 @@ impl Lowerer {
                         format!("unknown type name '{}'", qualifier.text),
                     ));
                 };
-                if self.method_of(record, &name.text)?.is_some() {
+                if self.method_of(record, name)?.is_some() {
                     return Err(Diagnostic::new(
                         span,
                         format!("method '{}' is not generic", name.text),
@@ -778,7 +778,7 @@ impl Lowerer {
                 ..
             } => {
                 let ty = self.generic_qualifier_type(qualifier, args)?;
-                if self.method_of(ty, &name.text)?.is_some() {
+                if self.method_of(ty, name)?.is_some() {
                     return Err(Diagnostic::new(
                         span,
                         format!("method '{}' is not generic", name.text),
@@ -801,7 +801,7 @@ impl Lowerer {
         {
             let object_ty = self.type_of(object, local)?;
             if let Some(record) = self.record_of(object_ty)
-                && let Some(method) = self.method_of(record, &name.text)?
+                && let Some(method) = self.method_of(record, name)?
             {
                 return Ok(method.ty);
             }

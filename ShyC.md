@@ -373,13 +373,25 @@ impl Counter {
 ```
 
 `self` is valid only inside an `impl` block and names the implemented type.
-Method symbols are lowered as:
+An inherent method symbol is:
 
 ```text
 ____TYPE__method
 ```
 
-For example, `Counter::new` lowers to `____Counter__new`.
+For example, `Counter::new` lowers to `____Counter__new`. A trait method adds
+the trait name, and a parameterized trait appends its resolved arguments, so
+implementations of several traits or several trait argument values never
+collide:
+
+```text
+____TRAIT__TYPE__method
+____TRAIT__TYPE__method__tN        // one type argument
+____TRAIT__TYPE__method__n<bits>   // one const argument
+```
+
+For example, `impl Drawable for Counter` gives `____Drawable__Counter__draw`,
+and `impl From<int> for Counter` gives `____From__Counter__from__tN`.
 
 Static-style calls use `Type::method(args...)`. Instance calls use dot syntax and
 pass the receiver as the first `self` argument:

@@ -11,9 +11,10 @@
 //!    stay in [`ir::Slot`]s; expressions become SSA values with explicit
 //!    loads, stores, casts, and pointer arithmetic.
 //!
-//! Shy extensions are handled here too: `impl` methods get the
-//! `____Type__method` symbol (a materialized generic impl gets one internal
-//! symbol per receiver and method), `self` names the implemented record type,
+//! Shy extensions are handled here too: inherent `impl` methods get the
+//! `____Type__method` symbol, trait methods add the trait name and trait
+//! arguments, and a materialized generic impl gets one internal symbol per
+//! receiver, trait, and method. `self` names the implemented record type,
 //! dot access auto-dereferences a pointer, and locals with a `drop` method are
 //! dropped at scope exit, `return`, `break`, and `continue`.
 //!
@@ -149,14 +150,51 @@ pub(super) struct DeferredMethod {
     pub impl_context: (TypeId, String),
 }
 
-pub(super) struct ImplInfo {
+/// Identity of one trait implementation: the trait name plus its resolved
+/// type or `const` arguments. A second implementation of the same trait with
+/// different arguments therefore has a different key, and so does every
+/// concrete receiver.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct TraitImplKey {
     pub name: String,
+    pub args: Vec<GenericArgKey>,
+}
+
+/// The methods of one trait implementation.
+///
+/// A trait method is stored separately from an inherent method, so the same
+/// method name may be implemented by an inherent block and by several traits,
+/// each with its own symbol and signature. A receiver call looks through this
+/// table only when no inherent method has the name.
+#[derive(Default, Clone)]
+pub(super) struct TraitMethodSet {
     pub methods: HashMap<String, MethodInfo>,
     /// Methods that declare their own generic parameters. A generic method has
     /// no single concrete signature, so it is instantiated like a generic
     /// function when a call names concrete arguments or when they are inferred
     /// from the value arguments.
     pub generic_methods: HashMap<String, GenericMethod>,
+}
+
+pub(super) struct ImplInfo {
+    pub name: String,
+    /// Methods of `impl Type`.
+    pub methods: HashMap<String, MethodInfo>,
+    /// Generic methods of `impl Type`.
+    pub generic_methods: HashMap<String, GenericMethod>,
+    /// Methods of `impl Trait<Args> for Type`, keyed by the trait identity.
+    pub trait_methods: HashMap<TraitImplKey, TraitMethodSet>,
+}
+
+impl ImplInfo {
+    pub(super) fn new(name: String) -> ImplInfo {
+        ImplInfo {
+            name,
+            methods: HashMap::new(),
+            generic_methods: HashMap::new(),
+            trait_methods: HashMap::new(),
+        }
+    }
 }
 
 /// One generic method of an impl, kept as the AST template it is.
@@ -172,6 +210,10 @@ pub(super) struct GenericMethod {
     pub decl: ast::FunctionDecl,
     pub env: GenericEnv,
     pub impl_context: (TypeId, String),
+    /// The trait implementation this method belongs to, empty for an inherent
+    /// impl. Two traits may both declare a generic method with the same name,
+    /// so the trait identity is part of the instance cache key and symbol.
+    pub trait_impl: Option<TraitImplKey>,
 }
 
 /// One `trait` declaration: the method signatures an implementation must
@@ -280,6 +322,19 @@ pub(super) struct ImplTarget {
     pub name: String,
     /// Concrete bindings when this target is one materialized generic impl.
     pub instance: Option<ImplInstance>,
+    /// The trait implementation this method belongs to. `None` is an inherent
+    /// `impl Type`, which keeps its `____Type__method` symbol.
+    pub trait_impl: Option<TraitImplKey>,
+}
+
+/// Identity of one materialized generic impl: the concrete receiver plus the
+/// trait it implements. An inherent template has no trait part. Two trait
+/// templates for the same receiver are separate when their trait arguments
+/// differ, which is why the resolved trait arguments are part of the key.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct GenericImplInstanceKey {
+    pub receiver: TypeId,
+    pub trait_impl: Option<TraitImplKey>,
 }
 
 /// Concrete bindings for one generic function instantiation: the type
@@ -351,8 +406,11 @@ pub(super) struct Lowerer {
     /// Every generic impl template, by the record name it targets. One record
     /// may have an inherent template plus one template per implemented trait.
     pub generic_impls: HashMap<String, Vec<GenericImpl>>,
-    /// Concrete records whose generic impl has already been materialized.
-    pub generic_impl_instances: HashSet<TypeId>,
+    /// Materialized generic impls, keyed by concrete receiver and trait (with
+    /// its resolved arguments), and mapped to the block that produced them so
+    /// a repeated lookup skips its own work while a second template with the
+    /// same identity is still diagnosed.
+    pub generic_impl_instances: HashMap<GenericImplInstanceKey, Span>,
     /// Nesting level of the generic instantiation currently being resolved.
     pub instantiation_depth: u32,
     /// Every trait declaration, by name. Registered before any `impl` is
@@ -413,7 +471,7 @@ impl Lowerer {
             generic_functions: HashMap::new(),
             function_instances: HashMap::new(),
             generic_impls: HashMap::new(),
-            generic_impl_instances: HashSet::new(),
+            generic_impl_instances: HashMap::new(),
             instantiation_depth: 0,
             traits: HashMap::new(),
             trait_impls: HashSet::new(),
@@ -543,43 +601,65 @@ impl Lowerer {
     /// The method `name` of a record, materializing its generic impl first when
     /// the record is an instance that has not needed one yet.
     ///
-    /// A method of a materialized impl has only a signature until this lookup
-    /// asks for it; the body is queued here, so an instance compiles exactly
-    /// the methods it uses.
+    /// An inherent method wins over a trait method. When only trait methods
+    /// match, they must be unique: two traits may implement the same method
+    /// name for one type, and then a receiver call has no unambiguous target.
+    /// The trait value table still reaches each implementation through its own
+    /// trait identity.
     pub(super) fn method_of(
         &mut self,
         record: TypeId,
-        name: &str,
+        name: &ast::Name,
     ) -> Result<Option<MethodInfo>, Diagnostic> {
-        // Materialize every generic impl template for this receiver once, so
-        // both ordinary and generic method lookups see the same method set.
         self.instantiate_generic_impl(record)?;
-        let Some(method) = self
+        if let Some(method) = self
             .impls
             .get(&record)
-            .and_then(|info| info.methods.get(name))
+            .and_then(|info| info.methods.get(&name.text))
             .cloned()
-        else {
-            return Ok(None);
-        };
-        if let Some(deferred) = &method.deferred {
-            self.pending.push(PendingFunction {
-                decl: deferred.decl.clone(),
-                symbol: method.symbol.clone(),
-                ty: method.ty,
-                impl_context: Some(deferred.impl_context.clone()),
-                env: Some(deferred.env.clone()),
-                internal: true,
-            });
-            if let Some(stored) = self
-                .impls
-                .get_mut(&record)
-                .and_then(|info| info.methods.get_mut(name))
-            {
-                stored.deferred = None;
+        {
+            return Ok(Some(
+                self.queue_deferred_method(record, None, &name.text, method),
+            ));
+        }
+        let mut matches = self.trait_methods_named(record, &name.text);
+        match matches.len() {
+            0 => Ok(None),
+            1 => {
+                let key = matches.remove(0);
+                let method = self
+                    .impls
+                    .get(&record)
+                    .and_then(|info| info.trait_methods.get(&key))
+                    .and_then(|set| set.methods.get(&name.text))
+                    .cloned()
+                    .expect("the method was just found");
+                Ok(Some(self.queue_deferred_method(
+                    record,
+                    Some(&key),
+                    &name.text,
+                    method,
+                )))
+            }
+            _ => {
+                let mut traits: Vec<String> = matches.into_iter().map(|key| key.name).collect();
+                traits.sort();
+                traits.dedup();
+                Err(Diagnostic::new(
+                    name.span,
+                    format!(
+                        "method '{}' is ambiguous: it is implemented by traits {}; \
+                         an inherent method or a trait value is needed",
+                        name.text,
+                        traits
+                            .iter()
+                            .map(|trait_name| format!("'{trait_name}'"))
+                            .collect::<Vec<_>>()
+                            .join(" and ")
+                    ),
+                ))
             }
         }
-        Ok(Some(method))
     }
 
     /// The `drop` method for a type, if an `impl` declared one.
@@ -587,7 +667,123 @@ impl Lowerer {
         if !self.types.is_record(ty) {
             return Ok(None);
         }
-        self.method_of(ty, "drop")
+        self.instantiate_generic_impl(ty)?;
+        if let Some(method) = self
+            .impls
+            .get(&ty)
+            .and_then(|info| info.methods.get("drop"))
+            .cloned()
+        {
+            return Ok(Some(self.queue_deferred_method(ty, None, "drop", method)));
+        }
+        // Several traits may own a `drop` method; without an inherent one the
+        // receiver call would be ambiguous, so no implicit drop is installed.
+        let matches = self.trait_methods_named(ty, "drop");
+        let [key] = matches.as_slice() else {
+            return Ok(None);
+        };
+        let key = key.clone();
+        let Some(method) = self
+            .impls
+            .get(&ty)
+            .and_then(|info| info.trait_methods.get(&key))
+            .and_then(|set| set.methods.get("drop"))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.queue_deferred_method(
+            ty,
+            Some(&key),
+            "drop",
+            method,
+        )))
+    }
+
+    /// Queue a materialized generic method's body on its first lookup.
+    fn queue_deferred_method(
+        &mut self,
+        record: TypeId,
+        trait_impl: Option<&TraitImplKey>,
+        name: &str,
+        method: MethodInfo,
+    ) -> MethodInfo {
+        let Some(deferred) = &method.deferred else {
+            return method;
+        };
+        self.pending.push(PendingFunction {
+            decl: deferred.decl.clone(),
+            symbol: method.symbol.clone(),
+            ty: method.ty,
+            impl_context: Some(deferred.impl_context.clone()),
+            env: Some(deferred.env.clone()),
+            internal: true,
+        });
+        let Some(info) = self.impls.get_mut(&record) else {
+            return method;
+        };
+        let stored = match trait_impl {
+            Some(trait_impl) => info
+                .trait_methods
+                .get_mut(trait_impl)
+                .and_then(|set| set.methods.get_mut(name)),
+            None => info.methods.get_mut(name),
+        };
+        if let Some(stored) = stored {
+            stored.deferred = None;
+        }
+        method
+    }
+
+    /// The ordinary method `name` of one concrete trait implementation,
+    /// materializing a generic impl first and queueing a deferred body.
+    pub(super) fn trait_method_of(
+        &mut self,
+        record: TypeId,
+        trait_impl: &TraitImplKey,
+        name: &ast::Name,
+    ) -> Result<Option<MethodInfo>, Diagnostic> {
+        self.instantiate_generic_impl(record)?;
+        Ok(self.trait_method_named_now(record, trait_impl, &name.text))
+    }
+
+    /// The ordinary method `name` of one concrete trait implementation,
+    /// materializing a generic impl first and queueing a deferred body.
+    pub(super) fn trait_method_named(
+        &mut self,
+        record: TypeId,
+        trait_impl: &TraitImplKey,
+        name: &str,
+    ) -> Result<Option<MethodInfo>, Diagnostic> {
+        self.instantiate_generic_impl(record)?;
+        Ok(self.trait_method_named_now(record, trait_impl, name))
+    }
+
+    fn trait_method_named_now(
+        &mut self,
+        record: TypeId,
+        trait_impl: &TraitImplKey,
+        name: &str,
+    ) -> Option<MethodInfo> {
+        let method = self
+            .impls
+            .get(&record)
+            .and_then(|info| info.trait_methods.get(trait_impl))
+            .and_then(|set| set.methods.get(name))
+            .cloned()?;
+        Some(self.queue_deferred_method(record, Some(trait_impl), name, method))
+    }
+
+    /// The trait implementations of `record` that declare an ordinary method
+    /// called `name`.
+    fn trait_methods_named(&self, record: TypeId, name: &str) -> Vec<TraitImplKey> {
+        self.impls
+            .get(&record)
+            .into_iter()
+            .flat_map(|info| info.trait_methods.iter())
+            .filter(|(_, set)| set.methods.contains_key(name))
+            .map(|(key, _)| key.clone())
+            .collect()
     }
 
     pub(super) fn sanitize_ident(name: &str) -> String {
@@ -600,6 +796,53 @@ impl Lowerer {
                 }
             })
             .collect()
+    }
+
+    /// The emitted symbol of one method of `impl Trait<Args> for Type`.
+    ///
+    /// The trait name and the resolved trait arguments are part of the symbol,
+    /// so two traits that declare the same method, and two parameterizations
+    /// of one trait, never collide. An inherent `impl Type` keeps the old
+    /// `____Type__method` spelling.
+    pub(super) fn trait_impl_method_symbol(
+        &self,
+        trait_impl: &TraitImplKey,
+        receiver: &str,
+        method: &str,
+    ) -> String {
+        let mut symbol = format!(
+            "____{}__{}__{}",
+            Self::sanitize_ident(&trait_impl.name),
+            Self::sanitize_ident(receiver),
+            Self::sanitize_ident(method)
+        );
+        push_symbol_args(&mut symbol, &trait_impl.args);
+        symbol
+    }
+
+    /// The internal symbol of one method of a materialized `impl<T> Trait for
+    /// Type<T>`.
+    ///
+    /// The concrete receiver is part of the generic impl cache already; the
+    /// trait identity and its resolved arguments keep several traits and
+    /// parameterizations of one receiver apart, while an inherent generic impl
+    /// keeps `generic.impl.Type.method`.
+    pub(super) fn generic_trait_impl_method_symbol(
+        &self,
+        trait_impl: &TraitImplKey,
+        receiver: &str,
+        method: &str,
+        record: TypeId,
+    ) -> String {
+        let mut mangled = format!(
+            "generic.trait.{}.{}.{}.{}",
+            Self::sanitize_ident(&trait_impl.name),
+            Self::sanitize_ident(receiver),
+            Self::sanitize_ident(method),
+            record.index()
+        );
+        push_symbol_args(&mut mangled, &trait_impl.args);
+        self.internal_symbol(&mangled)
     }
 
     /// The emitted name of a file-scope entity with internal linkage.
@@ -822,6 +1065,21 @@ impl Lowerer {
 // ---------------------------------------------------------------------------
 // Function body lowering
 // ---------------------------------------------------------------------------
+
+/// Append one `__t<index>` or `__n<hex>` part per resolved trait argument.
+///
+/// A type is spelled by its arena identity and a `const` value by its
+/// fixed-width bits, so the suffix is unique and cannot be confused with the
+/// trait, receiver, or method parts before it.
+pub(super) fn push_symbol_args(symbol: &mut String, args: &[GenericArgKey]) {
+    for arg in args {
+        symbol.push_str("__");
+        match arg {
+            GenericArgKey::Type(ty) => symbol.push_str(&format!("t{}", ty.index())),
+            GenericArgKey::Int(value) => symbol.push_str(&format!("n{:016x}", *value as u64)),
+        }
+    }
+}
 
 /// A name visible inside a function body.
 pub(super) enum LocalBinding {

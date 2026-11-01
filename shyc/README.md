@@ -145,13 +145,14 @@ concrete receiver, so `Pair<T, T>` accepts `Pair<int, int>` and rejects
 
 A generic impl may implement a trait: `impl<T> Show for Box<T> { ... }`, or
 with reordered bindings `impl<T, U> Convert<T> for Pair<U, T> { ... }`. The
-trait arguments resolve after the impl parameters bind, and a duplicate is
-detected by concrete trait + concrete receiver type, so `Show for Box<int>` and
-`Show for Box<long>` are distinct implementations. One record has at most one
-generic inherent impl; it may have generic impls of several different traits.
-A trait bound on an impl parameter still gets an explicit diagnostic, and a
-second generic impl of the same trait and concrete receiver is reported when
-the receiver is instantiated.
+trait arguments resolve after the impl parameters bind, and a materialized
+implementation is keyed by trait + concrete receiver + resolved trait arguments.
+`Show for Box<int>` and `Show for Box<long>` are therefore distinct, and so are
+`Convert<int> for Pair<U, T>` and `Convert<long> for Pair<U, T>`. One record has
+at most one generic inherent impl; it may have generic impls of several
+different traits. A trait bound on an impl parameter still gets an explicit
+diagnostic, and a second generic impl of the same trait arguments and concrete
+receiver is reported when the receiver is instantiated.
 
 A method may declare generic parameters of its own:
 `fn identity<U>(self *b, U value) -> U`. Such a method is a template inside its
@@ -175,9 +176,16 @@ const generic parameters on a trait method are not implemented yet.
 
 `trait Drawable { void draw(self *value); }` declares method signatures, and
 `impl Drawable for Circle { ... }` checks that the implementation defines exactly
-those methods with matching signatures. The methods are lowered exactly like an
-ordinary `impl`: they become plain `____Circle__draw` functions and a call on a
-concrete type stays statically dispatched.
+those methods with matching signatures. A method of `impl Trait for Type` lowers
+to `____Trait__Type__method`, and a parameterized trait adds one `__tN` (type
+argument) or `__n<bits>` (`const` argument) part per resolved trait argument:
+`impl From<int> for Target` gives `____From__Target__from__tN`. The trait name
+and arguments are part of the symbol, so two traits may declare the same method
+name for one type, and one trait may be implemented for several argument
+values. An inherent `impl Type` keeps the plain `____Type__method` spelling.
+A call on a concrete type stays statically dispatched; a receiver call whose
+name is provided by more than one trait implementation is diagnosed as
+ambiguous.
 
 A trait name can also be used as an object or field type. It denotes a
 transparent record with one function-pointer field per method, named after the
@@ -206,10 +214,11 @@ symbol. The method signature is erased only at `self`: `self *` becomes
 other parameter and the return type stay as written. This is why a trait method
 that takes or returns `self` by value still works for static dispatch but is
 rejected when the trait is used as a value type. A second implementation of the
-same trait for one concrete type, a duplicate method name across two traits on
-one type, and a trait with a generic method used as a value type each get an
-explicit diagnostic. Construction at file scope must follow the `impl` in
-source order;
+same trait and trait arguments for one concrete type, and a trait with a
+generic method used as a value type, each get an explicit diagnostic. The same
+method name in two traits is allowed; the table is built from each trait's own
+implementation, while a receiver call needs an unambiguous name. Construction
+at file scope must follow the `impl` in source order;
 function bodies are lowered after the whole unit is collected, so their
 construction does not depend on declaration order. There is no other dynamic
 dispatch mechanism.
@@ -255,7 +264,9 @@ same registers as an equivalent C struct.
 names `None`/`Some` and `Ok`/`Err`, so postfix `?` is structural: it copies the
 success payload out and returns the enclosing function's failure variant.
 `?` accepts the same error type, or a differing one that has an
-`impl From<Source> for Target`; there is no implicit error-code guess. A
+`impl From<Source> for Target`; there is no implicit error-code guess. Several
+sources may convert to one target: each `impl From<Source>` has its own symbol
+and the conversion is selected by the actual source and target types. A
 payload-free `Ok` produces no value, so `?` on it is only usable as a
 statement.
 

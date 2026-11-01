@@ -32,7 +32,9 @@
 //! generic function; the receiver bindings and the method's arguments are
 //! merged into the environment its body resolves under. A trait implementation
 //! may be generic too, and its trait arguments resolve once the impl parameters
-//! are bound.
+//! are bound. A materialized trait implementation is keyed by the trait, the
+//! concrete receiver, and those resolved trait arguments, so several traits and
+//! several parameterizations of one trait can share a receiver.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -370,48 +372,29 @@ impl Lowerer {
         Ok(())
     }
 
-    /// Materializes every generic impl whose target matches `record`, once.
+    /// Materializes every generic impl whose target matches `record`.
     ///
     /// One record may have an inherent template plus a template per trait. The
     /// target mapping binds the impl parameters from the record's own concrete
     /// arguments; each method then becomes an ordinary function whose symbol
     /// names the receiver, so method lookup continues to see plain
     /// [`super::MethodInfo`] values and calls stay direct calls.
+    ///
+    /// A materialized impl is remembered by concrete receiver plus trait
+    /// identity and resolved trait arguments, so several traits, and several
+    /// parameterizations of one trait, can coexist on one receiver.
     pub(super) fn instantiate_generic_impl(&mut self, record: TypeId) -> Result<(), Diagnostic> {
-        if self.generic_impl_instances.contains(&record) {
-            return Ok(());
-        }
         let Some(key) = self.record_instance_key(record) else {
             return Ok(());
         };
         let Some(templates) = self.generic_impls.get(&key.name).cloned() else {
             return Ok(());
         };
-        if self.instantiation_depth >= MAX_INSTANTIATION_DEPTH {
-            return Err(Diagnostic::new(
-                templates[0].block.span,
-                format!(
-                    "generic impl instantiation is nested more than \
-                     {MAX_INSTANTIATION_DEPTH} levels deep"
-                ),
-            ));
+        for template in &templates {
+            let env = self.bind_generic_impl_target(&key, template)?;
+            self.materialize_generic_impl(record, &key.name, template, env)?;
         }
-        // Mark first: collecting the methods resolves their signatures, which
-        // must find this record's impl already present instead of recursing.
-        self.generic_impl_instances.insert(record);
-        self.instantiation_depth += 1;
-        let result = (|| {
-            for template in &templates {
-                let env = self.bind_generic_impl_target(&key, template)?;
-                self.materialize_generic_impl(record, &key.name, template, env)?;
-            }
-            Ok(())
-        })();
-        self.instantiation_depth -= 1;
-        if result.is_err() {
-            self.generic_impl_instances.remove(&record);
-        }
-        result
+        Ok(())
     }
 
     /// Binds each impl parameter to the concrete receiver argument at the
@@ -525,54 +508,110 @@ impl Lowerer {
                             &template.block.trait_args,
                         )?
                     };
-                    if self.trait_impls.contains(&(
-                        trait_name.text.clone(),
-                        trait_args.clone(),
-                        record,
-                    )) {
-                        return Err(Diagnostic::new(
-                            template.block.span,
-                            format!(
-                                "trait '{}' is already implemented for this instantiation of \
-                                 '{}'",
-                                trait_name.text, record_name
-                            ),
-                        ));
-                    }
                     Some((trait_name.clone(), info, trait_args))
                 }
                 None => None,
             };
+            let trait_impl =
+                trait_info
+                    .as_ref()
+                    .map(|(trait_name, _, trait_args)| super::TraitImplKey {
+                        name: trait_name.text.clone(),
+                        args: trait_args.clone(),
+                    });
+            let instance_key = super::GenericImplInstanceKey {
+                receiver: record,
+                trait_impl: trait_impl.clone(),
+            };
+            // A recursive lookup reaches this same template again; its own
+            // key with its own span means the body is already being collected.
+            if let Some(previous) = self.generic_impl_instances.get(&instance_key) {
+                if *previous == template.block.span {
+                    return Ok(None);
+                }
+                return Err(Diagnostic::new(
+                    template.block.span,
+                    format!(
+                        "trait '{}' is already implemented for this instantiation of '{}'",
+                        trait_impl
+                            .as_ref()
+                            .map_or("<inherent>", |key| key.name.as_str()),
+                        record_name
+                    ),
+                ));
+            }
+            if let Some((trait_name, _, trait_args)) = &trait_info
+                && self
+                    .trait_impls
+                    .contains(&(trait_name.text.clone(), trait_args.clone(), record))
+            {
+                return Err(Diagnostic::new(
+                    template.block.span,
+                    format!(
+                        "trait '{}' is already implemented for this instantiation of '{}'",
+                        trait_name.text, record_name
+                    ),
+                ));
+            }
+            if self.instantiation_depth >= MAX_INSTANTIATION_DEPTH {
+                return Err(Diagnostic::new(
+                    template.block.span,
+                    format!(
+                        "generic impl instantiation is nested more than \
+                         {MAX_INSTANTIATION_DEPTH} levels deep"
+                    ),
+                ));
+            }
+            // Mark first: collecting the methods resolves their signatures,
+            // which must find this impl already present instead of recursing.
+            self.generic_impl_instances
+                .insert(instance_key.clone(), template.block.span);
+            self.instantiation_depth += 1;
             if let Some((_, info, trait_args)) = &trait_info {
                 self.bind_generic_args(&info.params, trait_args);
             }
-            let instance = super::ImplInstance {
-                params: template.params.clone(),
-                args,
-            };
-            for method in &template.block.methods {
-                self.collect_function(
-                    method,
-                    Some(super::ImplTarget {
-                        ty: record,
-                        name: record_name.to_string(),
-                        instance: Some(instance.clone()),
-                    }),
-                )?;
+            let collected = (|| {
+                let instance = super::ImplInstance {
+                    params: template.params.clone(),
+                    args,
+                };
+                for method in &template.block.methods {
+                    self.collect_function(
+                        method,
+                        Some(super::ImplTarget {
+                            ty: record,
+                            name: record_name.to_string(),
+                            instance: Some(instance.clone()),
+                            trait_impl: trait_impl.clone(),
+                        }),
+                    )?;
+                }
+                if let Some((trait_name, info, _)) = &trait_info {
+                    self.check_impl_method_names(&template.block, trait_name, info, record_name)?;
+                    self.check_impl_signatures(
+                        &template.block,
+                        trait_name,
+                        info,
+                        record,
+                        trait_impl.as_ref(),
+                    )?;
+                }
+                Ok(())
+            })();
+            self.instantiation_depth -= 1;
+            if collected.is_err() {
+                self.generic_impl_instances.remove(&instance_key);
             }
-            if let Some((trait_name, info, _)) = &trait_info {
-                self.check_impl_method_names(&template.block, trait_name, info, record_name)?;
-                self.check_impl_signatures(&template.block, trait_name, info, record)?;
-            }
-            Ok(trait_info)
+            collected?;
+            Ok(Some(trait_info))
         })();
         self.impl_context = saved;
         self.pop_type_scope();
         let trait_info = result?;
-        if let Some((trait_name, _, trait_args)) = trait_info {
-            self.register_from_conversion(&trait_name, &trait_args, record);
+        if let Some(Some((trait_name, _, trait_args))) = trait_info {
             self.trait_impls
-                .insert((trait_name.text.clone(), trait_args, record));
+                .insert((trait_name.text.clone(), trait_args.clone(), record));
+            self.register_from_conversion(&trait_name, &trait_args, record)?;
         }
         Ok(())
     }
@@ -811,23 +850,62 @@ impl Lowerer {
 
     /// The generic method template of one concrete record, materializing the
     /// record's impl templates first.
+    ///
+    /// An inherent generic method wins over a trait one. Several traits may
+    /// declare a generic method with the same name, and then a receiver call
+    /// has no unambiguous template.
     pub(super) fn generic_method_template(
         &mut self,
         record: TypeId,
         name: &ast::Name,
     ) -> Result<GenericMethod, Diagnostic> {
         self.instantiate_generic_impl(record)?;
-        if let Some(template) = self
-            .impls
-            .get(&record)
-            .and_then(|info| info.generic_methods.get(&name.text))
-        {
+        let info = self.impls.get(&record);
+        if let Some(template) = info.and_then(|info| info.generic_methods.get(&name.text)) {
             return Ok(template.clone());
+        }
+        let mut matches: Vec<(super::TraitImplKey, GenericMethod)> = info
+            .into_iter()
+            .flat_map(|info| info.trait_methods.iter())
+            .filter_map(|(key, set)| {
+                set.generic_methods
+                    .get(&name.text)
+                    .cloned()
+                    .map(|template| (key.clone(), template))
+            })
+            .collect();
+        match matches.len() {
+            0 => {}
+            1 => return Ok(matches.remove(0).1),
+            _ => {
+                let mut traits: Vec<String> =
+                    matches.into_iter().map(|(key, _)| key.name).collect();
+                traits.sort();
+                traits.dedup();
+                return Err(Diagnostic::new(
+                    name.span,
+                    format!(
+                        "generic method '{}' is ambiguous: it is implemented by traits {}; \
+                         an inherent method is needed",
+                        name.text,
+                        traits
+                            .iter()
+                            .map(|trait_name| format!("'{trait_name}'"))
+                            .collect::<Vec<_>>()
+                            .join(" and ")
+                    ),
+                ));
+            }
         }
         if self
             .impls
             .get(&record)
             .is_some_and(|info| info.methods.contains_key(&name.text))
+            || self.impls.get(&record).is_some_and(|info| {
+                info.trait_methods
+                    .values()
+                    .any(|set| set.methods.contains_key(&name.text))
+            })
         {
             return Err(Diagnostic::new(
                 name.span,
@@ -848,10 +926,13 @@ impl Lowerer {
         name: &str,
     ) -> Result<bool, Diagnostic> {
         self.instantiate_generic_impl(record)?;
-        Ok(self
-            .impls
-            .get(&record)
-            .is_some_and(|info| info.generic_methods.contains_key(name)))
+        Ok(self.impls.get(&record).is_some_and(|info| {
+            info.generic_methods.contains_key(name)
+                || info
+                    .trait_methods
+                    .values()
+                    .any(|set| set.generic_methods.contains_key(name))
+        }))
     }
 
     /// The shared instantiation tail for one generic method.
@@ -872,13 +953,27 @@ impl Lowerer {
             ));
         }
         let (_, impl_name) = &template.impl_context;
+        let trait_part = template.trait_impl.as_ref().map(|trait_impl| {
+            let mut part = Self::sanitize_ident(&trait_impl.name);
+            super::push_symbol_args(&mut part, &trait_impl.args);
+            part
+        });
         let key = InstanceKey {
-            name: format!(
-                "method.{}::{}.{}",
-                record.index(),
-                Self::sanitize_ident(impl_name),
-                Self::sanitize_ident(&name.text)
-            ),
+            name: match &trait_part {
+                Some(trait_part) => format!(
+                    "method.{}::{}::{}.{}",
+                    record.index(),
+                    Self::sanitize_ident(impl_name),
+                    trait_part,
+                    Self::sanitize_ident(&name.text)
+                ),
+                None => format!(
+                    "method.{}::{}.{}",
+                    record.index(),
+                    Self::sanitize_ident(impl_name),
+                    Self::sanitize_ident(&name.text)
+                ),
+            },
             args: concrete,
         };
         if let Some(instance) = self.function_instances.get(&key) {
@@ -890,7 +985,13 @@ impl Lowerer {
                 function.generics.clear();
             }
         }
-        let symbol = self.generic_method_symbol(record, impl_name, &name.text, &key.args);
+        let symbol = self.generic_method_symbol(
+            record,
+            impl_name,
+            &name.text,
+            template.trait_impl.as_ref(),
+            &key.args,
+        );
         let ty = self.resolve_generic_method_type(template, &key.args, &decl)?;
         let instance = FunctionInstance {
             symbol: symbol.clone(),
@@ -966,6 +1067,7 @@ impl Lowerer {
         record: TypeId,
         impl_name: &str,
         method: &str,
+        trait_impl: Option<&super::TraitImplKey>,
         args: &[GenericArgKey],
     ) -> String {
         let mut mangled = format!(
@@ -974,6 +1076,11 @@ impl Lowerer {
             Self::sanitize_ident(impl_name),
             Self::sanitize_ident(method)
         );
+        if let Some(trait_impl) = trait_impl {
+            mangled.push('.');
+            mangled.push_str(&Self::sanitize_ident(&trait_impl.name));
+            super::push_symbol_args(&mut mangled, &trait_impl.args);
+        }
         for arg in args {
             mangled.push('.');
             match arg {

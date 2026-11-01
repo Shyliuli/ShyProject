@@ -342,9 +342,20 @@ impl Lowerer {
         // differs for `static`.
         let (key, symbol) = match &target {
             Some(target) => {
-                let symbol = match &target.instance {
-                    Some(_) => self.generic_impl_method_symbol(&target.name, &name, target.ty),
-                    None => format!(
+                let symbol = match (&target.instance, &target.trait_impl) {
+                    (Some(_), Some(trait_impl)) => self.generic_trait_impl_method_symbol(
+                        trait_impl,
+                        &target.name,
+                        &name,
+                        target.ty,
+                    ),
+                    (Some(_), None) => {
+                        self.generic_impl_method_symbol(&target.name, &name, target.ty)
+                    }
+                    (None, Some(trait_impl)) => {
+                        self.trait_impl_method_symbol(trait_impl, &target.name, &name)
+                    }
+                    (None, None) => format!(
                         "____{}__{}",
                         Self::sanitize_ident(&target.name),
                         Self::sanitize_ident(&name)
@@ -379,25 +390,43 @@ impl Lowerer {
             let info = self
                 .impls
                 .entry(target.ty)
-                .or_insert_with(|| super::ImplInfo {
-                    name: target.name.clone(),
-                    methods: Default::default(),
-                    generic_methods: Default::default(),
-                });
-            if info.methods.contains_key(&name) || info.generic_methods.contains_key(&name) {
-                return Err(Diagnostic::new(
-                    declaration.span,
-                    format!("redefinition of method '{name}'"),
-                ));
+                .or_insert_with(|| super::ImplInfo::new(target.name.clone()));
+            match &target.trait_impl {
+                Some(trait_impl) => {
+                    let set = info.trait_methods.entry(trait_impl.clone()).or_default();
+                    if set.methods.contains_key(&name) || set.generic_methods.contains_key(&name) {
+                        return Err(Diagnostic::new(
+                            declaration.span,
+                            format!("redefinition of method '{name}'"),
+                        ));
+                    }
+                    set.methods.insert(
+                        name,
+                        super::MethodInfo {
+                            symbol: symbol.clone(),
+                            ty: resolved.ty,
+                            deferred,
+                        },
+                    );
+                }
+                None => {
+                    if info.methods.contains_key(&name) || info.generic_methods.contains_key(&name)
+                    {
+                        return Err(Diagnostic::new(
+                            declaration.span,
+                            format!("redefinition of method '{name}'"),
+                        ));
+                    }
+                    info.methods.insert(
+                        name,
+                        super::MethodInfo {
+                            symbol: symbol.clone(),
+                            ty: resolved.ty,
+                            deferred,
+                        },
+                    );
+                }
             }
-            info.methods.insert(
-                name,
-                super::MethodInfo {
-                    symbol: symbol.clone(),
-                    ty: resolved.ty,
-                    deferred,
-                },
-            );
         }
         if plain {
             self.pending.push(PendingFunction {
@@ -481,24 +510,31 @@ impl Lowerer {
         let info = self
             .impls
             .entry(target.ty)
-            .or_insert_with(|| super::ImplInfo {
-                name: target.name.clone(),
-                methods: Default::default(),
-                generic_methods: Default::default(),
-            });
-        if info.methods.contains_key(&name.text) || info.generic_methods.contains_key(&name.text) {
+            .or_insert_with(|| super::ImplInfo::new(target.name.clone()));
+        let generic_methods = match &target.trait_impl {
+            Some(trait_impl) => {
+                &mut info
+                    .trait_methods
+                    .entry(trait_impl.clone())
+                    .or_default()
+                    .generic_methods
+            }
+            None => &mut info.generic_methods,
+        };
+        if generic_methods.contains_key(&name.text) {
             return Err(Diagnostic::new(
                 declaration.span,
                 format!("redefinition of method '{}'", name.text),
             ));
         }
-        info.generic_methods.insert(
+        generic_methods.insert(
             name.text.clone(),
             super::GenericMethod {
                 params: function.generics.clone(),
                 decl: declaration.clone(),
                 env,
                 impl_context: (target.ty, target.name),
+                trait_impl: target.trait_impl,
             },
         );
         Ok(())
