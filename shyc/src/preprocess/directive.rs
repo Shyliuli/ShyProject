@@ -20,7 +20,12 @@ impl Preprocessor<'_> {
     ) -> Result<(), Diagnostic> {
         match name {
             "include" => self.handle_include(file, arguments, hash_span),
-            "define" => self.define_directive(arguments, hash_span),
+            "define" => {
+                if file == self.root {
+                    self.defines.push(define_line(arguments));
+                }
+                self.define_directive(arguments, hash_span)
+            }
             "undef" => self.undef_directive(arguments, hash_span),
             "error" => {
                 let text = arguments.iter().map(spelling).collect::<Vec<_>>().join(" ");
@@ -79,6 +84,13 @@ impl Preprocessor<'_> {
                 }
             }
         };
+
+        if current == self.root {
+            self.includes.push(super::Include {
+                path: name.path.clone(),
+                quoted: name.quoted,
+            });
+        }
 
         let relative = PathBuf::from(&name.path);
         let mut found = None;
@@ -206,6 +218,24 @@ struct IncludeName {
     path: String,
     span: Span,
     quoted: bool,
+}
+
+/// Rebuild a main-file `#define` directive as one line of C text.
+///
+/// The lexer keeps a `leading_space` flag on every token, so the printer can
+/// preserve the only whitespace that changes meaning: `#define F(x)` stays
+/// function-like, while `#define F (x)` stays object-like. Everything else is
+/// separated by the space the source had. A replacement list continued with
+/// backslashes comes out on one line, which is still one C definition.
+fn define_line(arguments: &[Token]) -> String {
+    let mut text = String::from("#define");
+    for (index, token) in arguments.iter().enumerate() {
+        if index == 0 || token.leading_space {
+            text.push(' ');
+        }
+        text.push_str(&spelling(token));
+    }
+    text
 }
 
 /// Parses `"file"` or `<file>` without macro expansion. `None` means the

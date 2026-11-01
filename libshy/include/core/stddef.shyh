@@ -1,13 +1,4 @@
-#ifndef __SHY_STDDEF_H
-#define __SHY_STDDEF_H
-
-#define NULL ((void *)0)
-
-typedef unsigned int size_t;
-typedef int ptrdiff_t;
-typedef unsigned int wchar_t;
-typedef long max_align_t;
-
-#define offsetof(type, member) ((size_t)&(((type *)0)->member))
-
+#ifndef __SHY_PATH_CORE_STDDEF_H_SHYH
+#define __SHY_PATH_CORE_STDDEF_H_SHYH
+#include "../../core/stddef.shyh"
 #endif

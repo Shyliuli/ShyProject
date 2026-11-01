@@ -1,16 +1,4 @@
-#ifndef __SHY_CTYPE_H
-#define __SHY_CTYPE_H
-
-int isalnum(int c);
-int isalpha(int c);
-int isdigit(int c);
-int isxdigit(int c);
-int islower(int c);
-int isupper(int c);
-int isspace(int c);
-int isprint(int c);
-int ispunct(int c);
-int tolower(int c);
-int toupper(int c);
-
+#ifndef __SHY_PATH_C_CTYPE_H_SHYH
+#define __SHY_PATH_C_CTYPE_H_SHYH
+#include "../../c/ctype.shyh"
 #endif

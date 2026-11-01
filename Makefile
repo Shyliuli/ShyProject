@@ -7,9 +7,29 @@ BIN_DIR := target/bin
 TOOL_BINS := shyasm shyemu shyld shycc
 CHIBICC := third_party/chibicc/chibicc
 
-.PHONY: bin install-bin clean-bin test cargo-test test-chibicc-shy os-build os-run
+# C headers generated from the native ShyC headers. Order matters: stddef and
+# stdint are included by the others, so they are generated first. The list is
+# also the recipe order when make runs without -j; the explicit prerequisites
+# below keep the order under -j.
+LIBSHY_HEADERS := \
+	libshy/core/stddef.h \
+	libshy/core/stdint.h \
+	libshy/core/stdtype.h \
+	libshy/c/ctype.h \
+	libshy/c/stdio.h \
+	libshy/c/stdlib.h \
+	libshy/c/string.h \
+	libshy/c/unistd.h
+LIBSHY_C_HEADERS := $(filter libshy/c/%.h,$(LIBSHY_HEADERS))
+# `include/` stays the only search root; its wrappers route the flat names and
+# the explicit c/ and core/ spellings to the real files with relative includes.
+LIBSHY_INCLUDES := -Ilibshy/include
+SHYC_RELEASE := target/release/shyc
+SHYC_SOURCES := $(wildcard shyc/src/*.rs shyc/src/*/*.rs) shyc/Cargo.toml
 
-bin: $(BIN_DIR)
+.PHONY: bin install-bin clean-bin test cargo-test test-chibicc-shy os-build os-run libshy-headers
+
+bin: libshy-headers $(BIN_DIR)
 	$(CARGO) build --release -p asm -p emu -p linker -p shycc -p shyc
 	$(MAKE) -C third_party/chibicc chibicc
 	$(INSTALL) -m 0755 target/release/asm $(BIN_DIR)/shyasm
@@ -18,6 +38,20 @@ bin: $(BIN_DIR)
 	$(INSTALL) -m 0755 target/release/shycc $(BIN_DIR)/shycc
 	$(INSTALL) -m 0755 target/release/shyc $(BIN_DIR)/shyc
 	$(INSTALL) -m 0755 $(CHIBICC) $(BIN_DIR)/chibicc
+
+libshy-headers: $(LIBSHY_HEADERS)
+
+# The generated headers are committed, so this rule only runs after a native
+# header changed. shyc is the only tool needed, which keeps the target free of
+# a bin -> headers -> bin bootstrap cycle.
+$(SHYC_RELEASE): $(SHYC_SOURCES)
+	$(CARGO) build --release -p shyc
+
+libshy/%.h: libshy/%.shyh $(SHYC_RELEASE)
+	$(SHYC_RELEASE) --emit=c-header $(LIBSHY_INCLUDES) -o $@ $<
+
+libshy/core/stdtype.h: libshy/core/stddef.h libshy/core/stdint.h
+$(LIBSHY_C_HEADERS): libshy/core/stddef.h
 
 install-bin: bin
 	$(INSTALL) -d $(DESTDIR)$(PREFIX)/bin
@@ -28,7 +62,7 @@ install-bin: bin
 clean-bin:
 	rm -rf $(BIN_DIR)
 
-test: cargo-test test-chibicc-shy
+test: libshy-headers cargo-test test-chibicc-shy
 
 cargo-test:
 	$(CARGO) test
@@ -36,10 +70,10 @@ cargo-test:
 test-chibicc-shy:
 	test/chibicc-shy/run.sh
 
-os-build:
+os-build: libshy-headers
 	$(MAKE) -C projects/os build
 
-os-run:
+os-run: libshy-headers
 	$(MAKE) -C projects/os run
 
 $(BIN_DIR):

@@ -412,6 +412,14 @@ fn run_compiler(
     }
 }
 
+/// Add the libshy layers in lookup order: C headers first, then explicit
+/// `c/`/`core/` paths, then compatibility wrappers.
+fn add_libshy_includes(cmd: &mut Command, repo: &Path) {
+    for layer in ["libshy/c", "libshy", "libshy/include"] {
+        cmd.arg(format!("-I{}", repo.join(layer).display()));
+    }
+}
+
 /// Drive the independent compiler. It has no equivalent of chibicc's extra
 /// flags: the runtime is linked as a normal object and source lines are not
 /// emitted yet.
@@ -428,7 +436,7 @@ fn run_shyc(
     } else {
         cmd.arg("-S");
     }
-    cmd.arg(format!("-I{}", repo.join("libshy/include").display()));
+    add_libshy_includes(&mut cmd, repo);
     for arg in &opts.compile_args {
         // Only the options the new driver understands are forwarded.
         if arg.starts_with("-I") || arg.starts_with("-D") || arg.starts_with("-U") {
@@ -498,7 +506,7 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
                 if bare_target(&opts.target) {
                     cmd.arg("-ffreestanding");
                 }
-                cmd.arg(format!("-I{}", repo.join("libshy/include").display()));
+                add_libshy_includes(&mut cmd, repo);
                 for arg in &opts.compile_args {
                     if arg.starts_with("-I") || arg.starts_with("-D") || arg.starts_with("-U") {
                         cmd.arg(arg);
@@ -596,7 +604,7 @@ fn run_chibicc(
     if link_runtime {
         cmd.arg("--shy-link-runtime");
     }
-    cmd.arg(format!("-I{}", repo.join("libshy/include").display()));
+    add_libshy_includes(&mut cmd, repo);
     cmd.args(&opts.compile_args);
     if let Some(output) = output {
         cmd.arg("-o").arg(output);

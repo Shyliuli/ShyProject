@@ -102,6 +102,20 @@ pub struct Attributes {
     pub disable_rustic_mut: bool,
 }
 
+/// One `#include` directive written in the main input file.
+///
+/// `--emit=c-header` carries these lines into the generated header so a C
+/// consumer sees the same dependencies, in the same order, as the Shy source.
+/// Includes of included files are not recorded: they are an implementation
+/// detail of the header that was included, not of the main file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Include {
+    /// Header name exactly as written: `stddef.h` or `c/stdio.shyh`.
+    pub path: String,
+    /// True for `#include "file"`, false for `#include <file>`.
+    pub quoted: bool,
+}
+
 /// The result of preprocessing one translation unit.
 #[derive(Debug)]
 pub struct Output {
@@ -109,6 +123,10 @@ pub struct Output {
     pub tokens: Vec<Token>,
     /// Shy metadata from the main input file.
     pub attributes: Attributes,
+    /// `#include` directives of the main input file, in source order.
+    pub includes: Vec<Include>,
+    /// `#define` lines of the main input file, in source order, as C text.
+    pub defines: Vec<String>,
 }
 
 /// Preprocesses `file` and returns its expanded token stream and metadata.
@@ -125,6 +143,8 @@ pub fn preprocess(
         macros: MacroTable::default(),
         output: Vec::new(),
         attributes: Attributes::default(),
+        includes: Vec::new(),
+        defines: Vec::new(),
         include_stack: Vec::new(),
         file_ids: HashMap::from([(root_key.clone(), file)]),
         file_keys: HashMap::from([(file, root_key)]),
@@ -152,6 +172,8 @@ pub fn preprocess(
     Ok(Output {
         tokens: preprocessor.output,
         attributes: preprocessor.attributes,
+        includes: preprocessor.includes,
+        defines: preprocessor.defines,
     })
 }
 
@@ -163,6 +185,10 @@ pub(crate) struct Preprocessor<'a> {
     pub(crate) macros: MacroTable,
     pub(crate) output: Vec<Token>,
     pub(crate) attributes: Attributes,
+    /// Main-file `#include` directives, filled by [`directive`].
+    pub(crate) includes: Vec<Include>,
+    /// Main-file `#define` lines, filled by [`directive`].
+    pub(crate) defines: Vec<String>,
     pub(crate) include_stack: Vec<FileId>,
     /// Canonical path -> source id, so the same header has one [`FileId`].
     pub(crate) file_ids: HashMap<PathBuf, FileId>,

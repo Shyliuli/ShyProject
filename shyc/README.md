@@ -52,12 +52,17 @@ target/bin/shyc --emit=c       api.shyc -o api.c    # the TU as plain C
 `--emit=c-header` walks the parsed translation unit and prints an include-guarded
 header: file-scope typedefs, record and enum definitions, prototypes for every
 non-`static` function, and `extern` declarations for objects (initializers are
-dropped). `static` declarations and `impl` blocks are not exported; methods need
-a concrete symbol before they can be declared. A `trait` is exported as a
-forward `typedef` plus the `struct` of function pointers that its value type
-uses. `--emit=c` prints the preprocessed unit as plain C and drops the `#![...]`
-attribute lines. A `let` declaration has no C spelling, so a unit that uses one
-is rejected with a diagnostic instead of being printed as invalid C.
+dropped). The guard comes from the output path, and the header carries the main
+file's `#include` lines and `#define` macros before the declarations, which are
+wrapped in `#ifdef __cplusplus` / `extern "C"`. Declarations that came from an
+included header are not repeated, so the generated header describes exactly one
+source header and leaves its dependencies to the carried includes. `static`
+declarations and `impl` blocks are not exported; methods need a concrete symbol
+before they can be declared. A `trait` is exported as a forward `typedef` plus
+the `struct` of function pointers that its value type uses. `--emit=c` prints the
+preprocessed unit as plain C and drops the `#![...]` attribute lines. A `let`
+declaration has no C spelling, so a unit that uses one is rejected with a
+diagnostic instead of being printed as invalid C.
 
 Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `-O0`..`-O3`
 (`-O1` promotes slots and cleans up, `-O2` repeats that to a fixed point, and

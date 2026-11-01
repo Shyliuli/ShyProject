@@ -251,7 +251,7 @@ impl FnWriter<'_> {
     // Prologue
     // -----------------------------------------------------------------------
 
-    /// Build the `__va_area__` descriptor described in `libshy/include/stdarg.shyh`.
+    /// Build the `__va_area__` descriptor described in `libshy/core/stdarg.shyh`.
     ///
     /// Layout: `+0` next register slot, `+4` pointer to the saved register
     /// area, `+8` descending stack cursor, `+12` eight saved 32-bit registers.

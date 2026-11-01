@@ -82,7 +82,18 @@ fn run() -> Result<(), String> {
                 .map_err(|error| sources.render(&error))?;
             let unit =
                 parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
-            export::render_c_header(&unit)
+            // The output path names the include guard. Without `-o` the header
+            // goes to stdout, so the input path names it instead.
+            let guard_path = options.output.as_deref().unwrap_or(options.input.as_path());
+            export::render_c_header(
+                &unit,
+                &export::HeaderOptions {
+                    guard: export::header_guard(guard_path),
+                    root: file,
+                    includes: preprocessed.includes,
+                    defines: preprocessed.defines,
+                },
+            )
         }
         Stage::Ast => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)

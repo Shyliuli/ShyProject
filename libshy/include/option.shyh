@@ -1,5 +1,5 @@
-/* Compatibility wrapper: core language/runtime headers live in core/. */
+/* Compatibility wrapper: the native ShyC header lives in ../core/. */
 #ifndef __SHY_COMPAT_CORE_OPTION_SHYH
 #define __SHY_COMPAT_CORE_OPTION_SHYH
-#include <core/option.shyh>
+#include "../core/option.shyh"
 #endif

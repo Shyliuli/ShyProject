@@ -1,5 +1,5 @@
-/* Compatibility wrapper: C headers live in c/. */
+/* Compatibility wrapper: the native ShyC header lives in ../c/. */
 #ifndef __SHY_COMPAT_C_STDIO_SHYH
 #define __SHY_COMPAT_C_STDIO_SHYH
-#include <c/stdio.shyh>
+#include "../c/stdio.shyh"
 #endif

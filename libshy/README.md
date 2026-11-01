@@ -6,17 +6,45 @@ without an OS, file descriptors, files, processes, locale, signals, or threads.
 
 Header layout:
 
-- `include/c/` is the C compatibility layer: `ctype`, `stdio`, `stdlib`,
-  `string`, and `unistd`.
-- `include/core/` is the language/runtime foundation: `stddef`, `stdint`,
-  `stdarg`, `stdtype`, `option`, and `result`.
-- `include/*.h` and `include/*.shyh` are compatibility wrappers. They keep the
-  flat names such as `<stdio.h>` and `<stdint.shyh>` working with
-  `-Ilibshy/include`, and route them into `c/` or `core/`.
+- `c/` is the default C library layer: the native ShyC headers `ctype`,
+  `stdio`, `stdlib`, `string`, and `unistd`, together with their generated C
+  counterparts `c/*.h`. Both `<stdio.h>` and `<c/stdio.h>` name the same file.
+- `core/` is the language/runtime layer: `stddef`, `stdint`, `stdtype`,
+  `stdarg`, `option`, and `result`. `stddef`, `stdint`, and `stdtype` have
+  generated `.h` files; `stdarg.h`, `option.h`, and `result.h` stay
+  hand-written routers because the Shy `va_arg` expansion and generic payload
+  enums have no C spelling yet. `core/` is not a default search layer: core
+  basics stay available through the flat names (`<stddef.h>`, `<stdint.h>`,
+  `<stdtype.h>`) while `<core/xxx.shyh>` is the explicit spelling.
+- `include/` contains only compatibility wrappers. The flat names keep the
+  pre-split spellings such as `<stdio.h>` and `<stdint.shyh>` working; the
+  `c/` and `core/` subdirectories add the explicit path spellings
+  `<c/stdio.h>` and `<core/stddef.shyh>`. All wrappers use relative includes.
 
 `.shyh` is the native ShyC header suffix; `.h` is the C-compatible spelling.
-`shycc` adds only `libshy/include` to the search path, so existing sources and
-ShyOS builds do not need to change their includes.
+`shycc` still searches only `libshy/include`, and that root resolves both the
+flat and the path spellings:
+
+- `<stdio.h>` and `<c/stdio.h>` both reach `c/stdio.h`; `c/` is the default C
+  library layer, so the ordinary libc names need no prefix.
+- `<stddef.h>` and `<core/stddef.h>` both reach `core/stddef.h`; the flat name
+  keeps core basics available, while the `core/` path is the explicit spelling
+  and nothing in `core/` is reachable under a bare name.
+
+The `.h` files in `c/` and `core/` are generated with
+`shyc --emit=c-header`, never edited by hand:
+
+```sh
+make libshy-headers
+```
+
+The target generates `core/stddef.h`, `core/stdint.h`, and `core/stdtype.h`
+before the `c/` headers, because the C headers include them. A generated header
+carries the source header's main-file `#include` lines and `#define` macros,
+derives its include guard from the output path, and prints only declarations
+that belong to that source header; declarations from included files stay with
+their own includes. The generated headers are committed, so a bare `cargo run
+-p shycc` or `cargo test` works without running the target first.
 
 `<stdarg.h>` is target-routed: a Shy build gets the native `core/stdarg.shyh`
 descriptor, while a hosted LLVM build gets `stdarg-hosted.h` from the compiler

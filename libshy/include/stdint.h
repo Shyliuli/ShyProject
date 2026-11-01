@@ -1,5 +1,5 @@
-/* Compatibility wrapper: core language/runtime headers live in core/. */
+/* Compatibility wrapper: the C header lives in ../core/. */
 #ifndef __SHY_COMPAT_CORE_STDINT_H
 #define __SHY_COMPAT_CORE_STDINT_H
-#include <core/stdint.h>
+#include "../core/stdint.h"
 #endif

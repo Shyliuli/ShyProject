@@ -158,9 +158,12 @@ The compiler already renders both directions for the plain-C subset:
 `shyc --emit=c-header` prints an include-guarded header of the translation unit's
 typedefs, record and enum definitions, non-`static` prototypes, and `extern`
 object declarations, and `shyc --emit=c` prints the preprocessed unit as plain C
-without the `#![...]` attribute lines. `static` declarations and `impl` blocks
-are not exported yet: a method needs a concrete instantiated symbol before it can
-appear in a C header.
+without the `#![...]` attribute lines. A generated header carries the main
+file's `#include` lines and `#define` macros, takes its include guard from the
+output path, and omits declarations that came from an included file, so it
+describes exactly one header. `static` declarations and `impl` blocks are not
+exported yet: a method needs a concrete instantiated symbol before it can appear
+in a C header.
 
 ## Backend boundary
 
