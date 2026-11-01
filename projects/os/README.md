@@ -193,7 +193,13 @@ segment.
 
 - ShyC currently has no function pointers, so dispatch is explicit rather than table-driven in several places.
 - Plain locals use `let`/`let mut` inference when the initializer determines the type; declarations without an initializer stay C.
-- ABI-facing and machine-facing code keeps explicit C declarations: syscall dispatch, trap frames, page tables and segments, the allocator, MMIO, inline assembly, and raw byte copies.
+- Ordinary non-static functions and prototypes use `fn name(params) -> ReturnType`,
+  with the arrow omitted for `void`. `static` helpers, `_start`, assembly-defined
+  entry points, C library functions, the macro-shadowed kernel `exit`, and the
+  RISC-V syscall wrappers keep C function syntax because `fn` has no storage
+  class and those are ABI or machine boundaries.
+- Record types are written with their bare names (`proc`, `fs_file`, `Args`) in ShyC code; `struct` stays on the definitions and in the C headers.
+- ABI-facing and machine-facing code keeps concrete, explicit types: syscall dispatch, trap frames, page tables and segments, the allocator, MMIO, inline assembly, and raw byte copies.
 - `Option`/`Result` and generic declarations are not used; boundaries stay C integers, pointers, and syscall numbers so the ABI remains visible at every call site.
 - User syscall wrappers are raw Shy assembly in `user/usys.shy`.
 - Trap entry, context save/restore, and scheduler return paths are handwritten assembly.

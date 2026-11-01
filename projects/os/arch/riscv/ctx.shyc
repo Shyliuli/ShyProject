@@ -12,18 +12,18 @@
 
 void arch_scheduler(void);
 
-void ctx_set_current_ret(int value) {
+fn ctx_set_current_ret(int value) {
     current->ctx.regs[10] = (unsigned long)value;
 }
 
-void ctx_reset_current(unsigned int stack_base) {
+fn ctx_reset_current(unsigned int stack_base) {
     for (int i = 0; i < NREG; i++) current->ctx.regs[i] = 0;
     current->ctx.epc = USER_ENTRY;
     current->ctx.sp = arch_user_sp(stack_base);
     current->ctx.valid = 0;
 }
 
-void ctx_retry_current_syscall(void) {
+fn ctx_retry_current_syscall(void) {
     current->ctx.epc = current->ctx.epc - 4;
 }
 
@@ -34,7 +34,7 @@ static void put_hex(unsigned long value) {
     }
 }
 
-static void report_trap(struct trapframe *tf, const char *mode) {
+static void report_trap(trapframe *tf, const char *mode) {
     for (int i = 0; mode[i]; i++) arch_uart_putc(mode[i]);
     put_hex(tf->cause);
     arch_uart_putc(' ');
@@ -44,7 +44,7 @@ static void report_trap(struct trapframe *tf, const char *mode) {
     arch_uart_putc('\n');
 }
 
-void riscv_trap(struct trapframe *tf) {
+fn riscv_trap(trapframe *tf) {
     if (tf->status & SSTATUS_SPP) {
         report_trap(tf, "ShyOS kernel trap: ");
         arch_shutdown(1);

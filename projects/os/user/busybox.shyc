@@ -18,29 +18,29 @@ struct Text {
 };
 
 impl Args {
-    void clear(self *a) {
+    fn clear(self *a) {
         a.argc = 0;
     }
 
-    void add(self *a, char *s) {
+    fn add(self *a, char *s) {
         if (a.argc < MAXARGS) {
             a.argv[a.argc] = s;
             a.argc = a.argc + 1;
         }
     }
 
-    char *get(self *a, int i) {
+    fn get(self *a, int i) -> char * {
         if (i < 0 || i >= a.argc) {
             return (char *)0;
         }
         return a.argv[i];
     }
 
-    int empty(self *a) {
+    fn empty(self *a) -> int {
         return a.argc <= 0;
     }
 
-    char *shift(self *a) {
+    fn shift(self *a) -> char * {
         let first = a.get(0);
 
         if (first == 0) {
@@ -53,7 +53,7 @@ impl Args {
         return first;
     }
 
-    int parse(self *a, char *s) {
+    fn parse(self *a, char *s) -> int {
         let mut i = 0;
 
         a.clear();
@@ -78,7 +78,7 @@ impl Args {
 };
 
 impl Text {
-    int len(self *t) {
+    fn len(self *t) -> int {
         let mut n = 0;
 
         while (t.data[n]) {
@@ -87,9 +87,9 @@ impl Text {
         return n;
     }
 
-    int contains(self *t, const char *needle) {
+    fn contains(self *t, const char *needle) -> int {
         let mut i = 0;
-        struct Text pat;
+        Text pat;
 
         pat.data = needle;
         let n = pat.len();
@@ -111,7 +111,7 @@ impl Text {
     }
 };
 
-static char *arg_at(struct Args *a, int i) {
+static char *arg_at(Args *a, int i) {
     if (i < 0 || i >= a->argc) {
         return (char *)0;
     }
@@ -138,7 +138,7 @@ static void trim_right(char *s) {
 }
 
 static int strlen2(const char *s) {
-    struct Text text;
+    Text text;
 
     text.data = s;
     return text.len();
@@ -188,7 +188,7 @@ static int parse_int(const char *s) {
 }
 
 static int contains(const char *s, const char *needle) {
-    struct Text text;
+    Text text;
 
     text.data = s;
     return text.contains(needle);
@@ -231,7 +231,7 @@ static int wait_one(void) {
     return status;
 }
 
-static void exec_argv(struct Args *args) {
+static void exec_argv(Args *args) {
     char path[32];
     char argbuf[LINE_MAX];
     let mut pos = 0;
@@ -256,7 +256,7 @@ static void exec_argv(struct Args *args) {
     exit(1);
 }
 
-static void apply_redirs(struct Args *args) {
+static void apply_redirs(Args *args) {
     let mut i = 0;
 
     while (i < args->argc) {
@@ -285,7 +285,7 @@ static void apply_redirs(struct Args *args) {
 }
 
 static int run_simple(char *cmdline) {
-    struct Args args;
+    Args args;
 
     trim_right(cmdline);
     cmdline = skip_spaces(cmdline);
@@ -316,8 +316,8 @@ static int run_simple(char *cmdline) {
 }
 
 static int run_pipeline(char *left, char *right) {
-    struct Args largs;
-    struct Args rargs;
+    Args largs;
+    Args rargs;
     int fds[2];
 
     trim_right(left);
@@ -719,8 +719,8 @@ static int dispatch(const char *name, int argc, char *argv[]) {
     return 1;
 }
 
-int main(void) {
-    struct Args args;
+fn main(void) -> int {
+    Args args;
     char argbuf[LINE_MAX];
     let src = user_arg();
     let name = user_argv0();

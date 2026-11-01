@@ -7,47 +7,47 @@
 #include "../../kernel/trap.h"
 #include "../../kernel/proc.h"
 
-unsigned int seg_alloc(void);
-void seg_free(unsigned int base);
+fn seg_alloc(void) -> unsigned int;
+fn seg_free(unsigned int base);
 void *memcpy(void *dst, const void *src, unsigned int n);
 
-void *arch_user_ptr(struct proc *p, unsigned int user_addr) {
+fn arch_user_ptr(proc *p, unsigned int user_addr) -> void * {
     return (void *)(p->segbase + user_addr);
 }
 
-void arch_space_alloc(struct proc *p) {
+fn arch_space_alloc(proc *p) {
     p->segbase = seg_alloc();
 }
 
-void arch_space_free(struct proc *p) {
+fn arch_space_free(proc *p) {
     if (p->segbase != 0) {
         seg_free(p->segbase);
     }
 }
 
-int arch_space_copy(struct proc *parent, struct proc *child) {
+fn arch_space_copy(proc *parent, proc *child) -> int {
     memcpy((void *)child->segbase, (void *)parent->segbase, USER_SEG_SIZE);
     return 0;
 }
 
-void arch_space_load(struct proc *p, const void *src, unsigned int n) {
+fn arch_space_load(proc *p, const void *src, unsigned int n) {
     unsigned char *memory = (unsigned char *)p->segbase;
     for (unsigned int i = 0; i < USER_SEG_SIZE; i++) memory[i] = 0;
     arch_space_write(p, 0, src, n);
 }
 
-unsigned int arch_user_sp(unsigned int stack_base) {
+fn arch_user_sp(unsigned int stack_base) -> unsigned int {
     return stack_base; /* ShyISA frames grow upward. */
 }
 
-void arch_space_write(struct proc *p, unsigned int user_addr, const void *src, unsigned int n) {
+fn arch_space_write(proc *p, unsigned int user_addr, const void *src, unsigned int n) {
     memcpy((void *)(p->segbase + user_addr), src, n);
 }
 
-void arch_space_read(struct proc *p, void *dst, unsigned int user_addr, unsigned int n) {
+fn arch_space_read(proc *p, void *dst, unsigned int user_addr, unsigned int n) {
     memcpy(dst, (void *)(p->segbase + user_addr), n);
 }
 
-void ctx_set_ret(struct context *ctx, int value) {
+fn ctx_set_ret(context *ctx, int value) {
     ctx->regs[1] = (unsigned int)value;
 }

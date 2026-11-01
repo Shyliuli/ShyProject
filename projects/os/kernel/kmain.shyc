@@ -8,11 +8,11 @@
 
 #include <string.shyh>
 
-void mem_init(void);
+fn mem_init(void);
 void scheduler(void);
 void trap_entry(void);
 
-extern struct proc *current;
+extern proc *current;
 
 #ifndef SHYOS_RISCV
 // ShyISA 引导栈：入口汇编按符号取它的栈底。
@@ -21,7 +21,7 @@ unsigned char boot_stack[4096];
 unsigned int sched_stack_top = SCHED_STACK_TOP;
 unsigned int user_seg_size = USER_SEG_SIZE;
 
-static void load_init(struct proc *p) {
+static void load_init(proc *p) {
     let file = fs_lookup("init");
     if (!user_image_layout_ok(file)) {
         arch_uart_putc('!');
@@ -43,7 +43,7 @@ static void load_init(struct proc *p) {
     p->name[4] = 0;
 }
 
-void kmain(void) {
+fn kmain(void) {
     let banner = "ShyOS boot\n";
 
     mem_init();

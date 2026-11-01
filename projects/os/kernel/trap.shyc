@@ -9,9 +9,9 @@
 #include "proc.h"
 #include "memlayout.h"
 
-void uart_putc(int c);
-int uart_getc(void);
-struct proc *current;
+fn uart_putc(int c);
+fn uart_getc(void) -> int;
+proc *current;
 
 static int user_range_ok(unsigned int addr, unsigned int n) {
     if (addr > USER_SEG_SIZE) {
@@ -116,7 +116,7 @@ static void exit_if_killed(void) {
     }
 }
 
-int syscall_dispatch(int number, unsigned int a0, unsigned int a1, unsigned int a2) {
+fn syscall_dispatch(int number, unsigned int a0, unsigned int a1, unsigned int a2) -> int {
     if (number == 1) {
         int pid = fork();
         proc_set_current_state(RUNNABLE);
@@ -233,7 +233,7 @@ int syscall_dispatch(int number, unsigned int a0, unsigned int a1, unsigned int 
     return -1;
 }
 
-void trap_handler(uint32_t cause, uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3) {
+fn trap_handler(uint32_t cause, uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3) {
     if (cause == 1) {
         ctx_set_current_ret((uint32_t)syscall_dispatch((int)r0, r1, r2, r3));
         exit_if_killed();

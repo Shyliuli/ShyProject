@@ -42,7 +42,7 @@ static void child_work(void) {
     exit(0);
 }
 
-int main(void) {
+fn main(void) -> int {
     let status = 0;
     let mut done = 0;
 

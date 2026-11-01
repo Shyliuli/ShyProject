@@ -9,33 +9,33 @@ static Lock p3_counter_lock;
 static int p3_counter;
 
 impl Lock {
-    void init(self *lock) {
+    fn init(self *lock) {
         lock.locked = 0;
     }
 
-    void acquire(self *lock) {
+    fn acquire(self *lock) {
         while (arch_atomic_exchange(&lock.locked, 1) != 0) {
         }
     }
 
-    void release(self *lock) {
+    fn release(self *lock) {
         lock.locked = 0;
     }
 }
 
-void lock_init(Lock *lock) {
+fn lock_init(Lock *lock) {
     lock.init();
 }
 
-void lock_acquire(Lock *lock) {
+fn lock_acquire(Lock *lock) {
     lock.acquire();
 }
 
-void lock_release(Lock *lock) {
+fn lock_release(Lock *lock) {
     lock.release();
 }
 
-int p3_counter_op(int op) {
+fn p3_counter_op(int op) -> int {
     p3_counter_lock.acquire();
     if (op == 0) {
         p3_counter = 0;

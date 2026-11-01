@@ -3,7 +3,7 @@
 #include "memlayout.h"
 #include "lock.h"
 
-void panic(char *msg);
+fn panic(char *msg);
 
 static Lock mem_lock;
 static unsigned int kheap;
@@ -11,7 +11,7 @@ static int seg_free_list[USER_SEG_COUNT];
 static unsigned int kpage_free_list[4096];
 static int kpage_free_count;
 
-void mem_init(void) {
+fn mem_init(void) {
     lock_init(&mem_lock);
     kheap = KERN_HEAP_START;
     kpage_free_count = 0;
@@ -21,7 +21,7 @@ void mem_init(void) {
     }
 }
 
-void *kalloc(unsigned int n) {
+fn kalloc(unsigned int n) -> void * {
     unsigned int old = kheap;
 
     n = (n + 3) & ~3;
@@ -47,7 +47,7 @@ static void *kalloc_page_aligned(void) {
     return page;
 }
 
-void *kalloc_page(void) {
+fn kalloc_page(void) -> void * {
     lock_acquire(&mem_lock);
     if (kpage_free_count > 0) {
         kpage_free_count = kpage_free_count - 1;
@@ -60,7 +60,7 @@ void *kalloc_page(void) {
     return kalloc_page_aligned();
 }
 
-void kfree_page(void *p) {
+fn kfree_page(void *p) {
     unsigned int pa = (unsigned int)p;
 
     if (pa < KERN_HEAP_START || pa >= KERN_HEAP_END) {
@@ -80,7 +80,7 @@ void kfree_page(void *p) {
     lock_release(&mem_lock);
 }
 
-unsigned int seg_alloc(void) {
+fn seg_alloc(void) -> unsigned int {
     lock_acquire(&mem_lock);
     for (int i = 0; i < USER_SEG_COUNT; i++) {
         if (seg_free_list[i]) {
@@ -96,7 +96,7 @@ unsigned int seg_alloc(void) {
     return 0;
 }
 
-void seg_free(unsigned int pa) {
+fn seg_free(unsigned int pa) {
     unsigned int offset = 0;
     unsigned int i = 0;
 

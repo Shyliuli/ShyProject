@@ -24,8 +24,8 @@
 #define PTE_ADDR(pa) (((pa) >> 12) << 10)
 #define PTE_PA(pte) (((pte) >> 10) << 12)
 
-void *kalloc_page(void);
-void kfree_page(void *p);
+fn kalloc_page(void) -> void *;
+fn kfree_page(void *p);
 void *memcpy(void *dst, const void *src, unsigned int n);
 
 static unsigned long kernel_root;
@@ -107,14 +107,14 @@ static void share_kernel(unsigned long root) {
     }
 }
 
-unsigned long arch_vm_kernel_root(void) {
+fn arch_vm_kernel_root(void) -> unsigned long {
     return kernel_root;
 }
 
 extern unsigned long boot_root[512];
 extern unsigned long boot_t0[512];
 
-void arch_vm_init(void) {
+fn arch_vm_init(void) {
     unsigned long *root = boot_root;
     unsigned long *t0 = boot_t0;
     zero_page(root);
@@ -131,16 +131,16 @@ void arch_vm_init(void) {
 }
 
 /* A process's own root, or the kernel root for the idle process. */
-static unsigned long root_for(struct proc *p) {
+static unsigned long root_for(proc *p) {
     return p->segbase == 0 ? kernel_root : (unsigned long)p->segbase;
 }
 
-void *arch_user_ptr(struct proc *p, unsigned int user_addr) {
+fn arch_user_ptr(proc *p, unsigned int user_addr) -> void * {
     unsigned long pa = translate(root_for(p), user_addr);
     return pa == 0 ? (void *)0 : (void *)pa;
 }
 
-void arch_space_alloc(struct proc *p) {
+fn arch_space_alloc(proc *p) {
     unsigned long root = (unsigned long)new_page();
 
     p->segbase = 0;
@@ -156,7 +156,7 @@ void arch_space_alloc(struct proc *p) {
     p->segbase = (unsigned int)root;
 }
 
-void arch_space_free(struct proc *p) {
+fn arch_space_free(proc *p) {
     unsigned long *table;
     unsigned long root = root_for(p);
     if (root == kernel_root) return;
@@ -181,7 +181,7 @@ void arch_space_free(struct proc *p) {
     p->segbase = 0;
 }
 
-int arch_space_copy(struct proc *parent, struct proc *child) {
+fn arch_space_copy(proc *parent, proc *child) -> int {
     unsigned long src_root = root_for(parent);
     unsigned long dst_root = root_for(child);
 
@@ -197,19 +197,19 @@ int arch_space_copy(struct proc *parent, struct proc *child) {
     return 0;
 }
 
-void arch_space_load(struct proc *p, const void *src, unsigned int n) {
+fn arch_space_load(proc *p, const void *src, unsigned int n) {
     for (unsigned int va = 0; va < USER_SEG_SIZE; va = va + 4096) {
         zero_page((unsigned long *)translate(root_for(p), va));
     }
     arch_space_write(p, 0, src, n);
 }
 
-unsigned int arch_user_sp(unsigned int stack_base) {
+fn arch_user_sp(unsigned int stack_base) -> unsigned int {
     (void)stack_base;
     return USER_STACK_LIMIT & ~15U; /* RV64 frames grow downward. */
 }
 
-void arch_space_write(struct proc *p, unsigned int user_addr, const void *src, unsigned int n) {
+fn arch_space_write(proc *p, unsigned int user_addr, const void *src, unsigned int n) {
     unsigned int done = 0;
 
     while (done < n) {
@@ -225,7 +225,7 @@ void arch_space_write(struct proc *p, unsigned int user_addr, const void *src, u
     }
 }
 
-void arch_space_read(struct proc *p, void *dst, unsigned int user_addr, unsigned int n) {
+fn arch_space_read(proc *p, void *dst, unsigned int user_addr, unsigned int n) {
     unsigned int done = 0;
     while (done < n) {
         unsigned int va = user_addr + done;
@@ -238,6 +238,6 @@ void arch_space_read(struct proc *p, void *dst, unsigned int user_addr, unsigned
     }
 }
 
-void ctx_set_ret(struct context *ctx, int value) {
+fn ctx_set_ret(context *ctx, int value) {
     ctx->regs[10] = (unsigned long)value;
 }

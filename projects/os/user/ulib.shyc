@@ -14,7 +14,7 @@ struct Buffer {
 };
 
 impl String {
-    int len(self *s) {
+    fn len(self *s) -> int {
         let mut n = 0;
 
         while (s.data[n]) {
@@ -23,7 +23,7 @@ impl String {
         return n;
     }
 
-    int eq(self *s, const char *other) {
+    fn eq(self *s, const char *other) -> int {
         let mut i = 0;
 
         while (s.data[i] && other[i]) {
@@ -35,7 +35,7 @@ impl String {
         return s.data[i] == other[i];
     }
 
-    int starts_with(self *s, const char *prefix) {
+    fn starts_with(self *s, const char *prefix) -> int {
         let mut i = 0;
 
         while (prefix[i]) {
@@ -47,9 +47,9 @@ impl String {
         return 1;
     }
 
-    int find(self *s, const char *needle) {
+    fn find(self *s, const char *needle) -> int {
         let mut i = 0;
-        struct String pat;
+        String pat;
 
         pat.data = needle;
         let n = pat.len();
@@ -72,34 +72,34 @@ impl String {
 }
 
 impl Buffer {
-    void init(self *b, char *data, int max) {
+    fn init(self *b, char *data, int max) {
         b.data = data;
         b.max = max;
         b.len = 0;
     }
 
-    int has_room(self *b) {
+    fn has_room(self *b) -> int {
         return b.len < b.max - 1;
     }
 }
 
-char *user_argv0(void) {
+fn user_argv0(void) -> char * {
     return (char *)USER_ARG0_ADDR;
 }
 
-char *user_arg(void) {
+fn user_arg(void) -> char * {
     return (char *)USER_ARG_ADDR;
 }
 
-int streq(const char *a, const char *b) {
-    struct String s;
+fn streq(const char *a, const char *b) -> int {
+    String s;
 
     s.data = a;
     return s.eq(b);
 }
 
-void puts(const char *s) {
-    struct String text;
+fn puts(const char *s) {
+    String text;
 
     text.data = s;
     let n = text.len();
@@ -108,8 +108,8 @@ void puts(const char *s) {
     }
 }
 
-int read_line(char *buf, int max) {
-    struct Buffer line;
+fn read_line(char *buf, int max) -> int {
+    Buffer line;
 
     if (max <= 0) {
         return 0;
@@ -133,7 +133,7 @@ int read_line(char *buf, int max) {
     return line.len;
 }
 
-void *malloc(int n) {
+fn malloc(int n) -> void * {
     if (n <= 0) {
         return (void *)0;
     }
@@ -150,6 +150,6 @@ void *malloc(int n) {
     return p;
 }
 
-void free(void *p) {
+fn free(void *p) {
     (void)p;
 }
