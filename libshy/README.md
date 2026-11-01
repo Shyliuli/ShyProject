@@ -19,17 +19,25 @@ Header layout:
 - `include/` contains only compatibility wrappers. The flat names keep the
   pre-split spellings such as `<stdio.h>` and `<stdint.shyh>` working; the
   `c/` and `core/` subdirectories add the explicit path spellings
-  `<c/stdio.h>` and `<core/stddef.shyh>`. All wrappers use relative includes.
+  `<c/stdio.h>` and `<core/stddef.shyh>`. All wrappers use relative includes,
+  so the historical `-Ilibshy/include`-only setup still resolves every name.
 
 `.shyh` is the native ShyC header suffix; `.h` is the C-compatible spelling.
-`shycc` still searches only `libshy/include`, and that root resolves both the
-flat and the path spellings:
+`shycc` searches three roots, in this order:
 
-- `<stdio.h>` and `<c/stdio.h>` both reach `c/stdio.h`; `c/` is the default C
-  library layer, so the ordinary libc names need no prefix.
-- `<stddef.h>` and `<core/stddef.h>` both reach `core/stddef.h`; the flat name
-  keeps core basics available, while the `core/` path is the explicit spelling
-  and nothing in `core/` is reachable under a bare name.
+```text
+libshy/c       # default C library layer
+libshy         # explicit <c/...> and <core/...> spellings only
+libshy/include # flat and path compatibility wrappers
+```
+
+- `<stdio.h>` resolves directly from the default `c/` layer, and `<c/stdio.h>`
+  names the same file through the explicit path. `c/` is the ordinary libc
+  layer, so its names need no prefix.
+- `<stddef.h>` and `<stdint.h>` are the flat core-basics spellings, kept by the
+  `include/` wrappers. `<core/xxx.h>` and `<core/xxx.shyh>` use the explicit
+  path. `libshy/core` is never a search root, so no core header is reachable
+  under a bare name by accident.
 
 The `.h` files in `c/` and `core/` are generated with
 `shyc --emit=c-header`, never edited by hand:

@@ -21,9 +21,9 @@ LIBSHY_HEADERS := \
 	libshy/c/string.h \
 	libshy/c/unistd.h
 LIBSHY_C_HEADERS := $(filter libshy/c/%.h,$(LIBSHY_HEADERS))
-# `include/` stays the only search root; its wrappers route the flat names and
-# the explicit c/ and core/ spellings to the real files with relative includes.
-LIBSHY_INCLUDES := -Ilibshy/include
+# Same lookup order as shycc: c/ is the default layer, libshy/ only for the
+# explicit c/ and core/ spellings, include/ for the flat compatibility wrappers.
+LIBSHY_INCLUDES := -Ilibshy/c -Ilibshy -Ilibshy/include
 SHYC_RELEASE := target/release/shyc
 SHYC_SOURCES := $(wildcard shyc/src/*.rs shyc/src/*/*.rs) shyc/Cargo.toml
 
