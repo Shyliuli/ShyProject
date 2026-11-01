@@ -173,6 +173,7 @@
     ]
   },
   "scripts": {
+    "vscode:prepublish": "npm run bundle:server && npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "build:server": "cargo build --manifest-path server/Cargo.toml",
