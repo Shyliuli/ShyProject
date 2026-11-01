@@ -1,4 +1,4 @@
-//! Top-level declarations, initializers, and Shy `impl` and `trait` blocks.
+//! Top-level declarations, initializers, and Shy `impl`, `trait`, and `use` items.
 //!
 //! One [`TranslationUnit`] is one preprocessed source file. The parser fills
 //! [`TranslationUnit::items`] in source order; semantic analysis later decides
@@ -30,6 +30,22 @@ pub enum Item {
     Impl(ImplBlock),
     /// Shy's `trait Name { ... }` declaration containing method signatures.
     Trait(TraitDecl),
+    /// Shy's `use path::Name;` import of a file-scope name.
+    Use(UseDecl),
+}
+
+/// A file-scope `use path::Name;` import.
+///
+/// The last path segment is the imported name; the segments before it are the
+/// namespace it is written to come from. The node is kept whole so diagnostics
+/// can print the path as written and `--emit=c-header` can leave the import out
+/// of the C view of the unit. Resolution, including whether the name exists,
+/// belongs to semantic analysis; the parser only checks the syntax.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UseDecl {
+    pub span: Span,
+    /// The path as written, at least two segments: namespace plus name.
+    pub path: Vec<Name>,
 }
 
 /// A declaration with its specifiers and declarators.
@@ -115,11 +131,19 @@ pub struct TraitDecl {
 /// it, so `self` can be resolved against the implementing type when the
 /// implementation is checked. There is no [`Block`] because a trait method is
 /// never defined here.
+///
+/// `generics` are the parameters written between the method name and `(`, as
+/// in `fn convert<T>(self *value, T value) -> T`. They are method-local: an
+/// implementation binds its own parameters by position when the signatures are
+/// compared. The same list is still present on the function declarator,
+/// because that is where the syntax stores it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraitMethod {
     pub span: Span,
     pub specs: DeclSpecs,
     pub declarator: Declarator,
+    /// Method-local generic parameters, empty for an ordinary method.
+    pub generics: Vec<GenericParam>,
 }
 
 // ---------------------------------------------------------------------------

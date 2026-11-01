@@ -14,6 +14,12 @@
 //! implementation's symbols. The only erased part of a signature is `self`,
 //! which becomes `void *`, so the table is plain C data with no hidden data
 //! pointer, vtable header, or allocation.
+//!
+//! A method may declare its own type parameters. Its signature is compared
+//! with the implementation after both sides bind a fresh placeholder, and each
+//! concrete call instantiates the implementation as an ordinary function. Such
+//! a method has no single function pointer, so a trait with a generic method
+//! stays static-only and is rejected when used as a value type.
 
 use super::{ExprKind, ExprVal, FnLower, Resolved, ResolvedSpecs, TraitInfo};
 use crate::ast;
@@ -74,14 +80,53 @@ impl super::Lowerer {
                         "a trait method cannot have a storage class",
                     ));
                 }
-                if let Some(ast::DerivedDeclarator::Function(function)) =
-                    method.declarator.derived.first()
-                    && !function.generics.is_empty()
-                {
-                    return Err(Diagnostic::new(
-                        function.span,
-                        "generic trait methods are not implemented yet",
-                    ));
+                for (index, parameter) in method.generics.iter().enumerate() {
+                    if method.generics[..index]
+                        .iter()
+                        .any(|previous| previous.name.text == parameter.name.text)
+                    {
+                        return Err(Diagnostic::new(
+                            parameter.span,
+                            format!(
+                                "redefinition of generic method parameter '{}'",
+                                parameter.name.text
+                            ),
+                        ));
+                    }
+                    if let Some(bound) = parameter.bounds.first() {
+                        return Err(Diagnostic::new(
+                            bound.span,
+                            format!(
+                                "trait bounds on generic trait method '{}' are not \
+                                 implemented yet",
+                                name.text
+                            ),
+                        ));
+                    }
+                    if parameter.kind == ast::GenericParamKind::Const {
+                        return Err(Diagnostic::new(
+                            parameter.span,
+                            format!(
+                                "const generic parameters on trait method '{}' are not \
+                                 implemented yet",
+                                name.text
+                            ),
+                        ));
+                    }
+                    if declaration
+                        .generics
+                        .iter()
+                        .any(|trait_parameter| trait_parameter.name.text == parameter.name.text)
+                    {
+                        return Err(Diagnostic::new(
+                            parameter.span,
+                            format!(
+                                "generic method parameter '{}' shadows a parameter of trait \
+                                 '{}'",
+                                parameter.name.text, declaration.name.text
+                            ),
+                        ));
+                    }
                 }
                 let duplicate = declaration.methods[..index].iter().any(|previous| {
                     previous
@@ -198,7 +243,7 @@ impl super::Lowerer {
                 };
                 if self
                     .trait_impls
-                    .contains(&(trait_name.text.clone(), args.clone(), name.clone()))
+                    .contains(&(trait_name.text.clone(), args.clone(), ty))
                 {
                     return Err(Diagnostic::new(
                         block.span,
@@ -243,7 +288,7 @@ impl super::Lowerer {
             && let Some((trait_name, _, args)) = &trait_info
         {
             self.trait_impls
-                .insert((trait_name.text.clone(), args.clone(), name.clone()));
+                .insert((trait_name.text.clone(), args.clone(), ty));
             self.register_from_conversion(trait_name, args, ty);
         }
         result
@@ -255,7 +300,7 @@ impl super::Lowerer {
     /// The conversion is ordinary trait metadata: the implementation is
     /// checked like any other, and only the resulting symbol and function type
     /// are kept. There is no compiler-invented method or hidden conversion.
-    fn register_from_conversion(
+    pub(super) fn register_from_conversion(
         &mut self,
         trait_name: &ast::Name,
         args: &[super::GenericArgKey],
@@ -285,7 +330,7 @@ impl super::Lowerer {
 
     /// Checks that the implementation defines exactly the trait's methods.
     /// Signatures are checked later, after each method has a resolved type.
-    fn check_impl_method_names(
+    pub(super) fn check_impl_method_names(
         &self,
         block: &ast::ImplBlock,
         trait_name: &ast::Name,
@@ -342,7 +387,12 @@ impl super::Lowerer {
 
     /// Resolves each trait method against the implemented type (`self`) and
     /// compares it with the implementation's function type.
-    fn check_impl_signatures(
+    ///
+    /// A generic trait method is compared after both sides bind the same
+    /// placeholder arguments: only the parameter count and kinds matter at this
+    /// point, because every call later instantiates the implementation with
+    /// concrete arguments and checks the call against that instance.
+    pub(super) fn check_impl_signatures(
         &mut self,
         block: &ast::ImplBlock,
         trait_name: &ast::Name,
@@ -353,25 +403,124 @@ impl super::Lowerer {
             let Some(trait_method_name) = &trait_method.declarator.name else {
                 continue;
             };
-            let expected = self.trait_method_type(trait_method)?;
-            let actual = self
-                .impls
-                .get(&implemented)
-                .and_then(|info| info.methods.get(&trait_method_name.text))
-                .map(|method| method.ty)
-                .expect("every trait method was collected");
-            if !self.types.is_compatible(expected, actual) {
-                let span = block
-                    .methods
+            let span = block
+                .methods
+                .iter()
+                .find(|method| {
+                    method
+                        .declarator
+                        .name
+                        .as_ref()
+                        .is_some_and(|name| name.text == trait_method_name.text)
+                })
+                .map_or(block.span, |method| method.declarator.span);
+            // Both signatures bind the same fresh placeholder per parameter,
+            // so a concrete return type cannot hide behind a placeholder that
+            // happens to be `int` on both sides.
+            let placeholders = self.method_placeholder_args(&trait_method.generics)?;
+            let expected = self.trait_method_type_with_args(trait_method, &placeholders)?;
+            let actual = if trait_method.generics.is_empty() {
+                if let Some(method) = self
+                    .impls
+                    .get(&implemented)
+                    .and_then(|info| info.methods.get(&trait_method_name.text))
+                {
+                    method.ty
+                } else {
+                    if self.impls.get(&implemented).is_some_and(|info| {
+                        info.generic_methods.contains_key(&trait_method_name.text)
+                    }) {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "method '{}' is generic in the implementation but not in \
+                                 trait '{}'",
+                                trait_method_name.text, trait_name.text
+                            ),
+                        ));
+                    }
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "method '{}' signature does not match trait '{}'",
+                            trait_method_name.text, trait_name.text
+                        ),
+                    ));
+                }
+            } else {
+                let Some(generic) = self
+                    .impls
+                    .get(&implemented)
+                    .and_then(|info| info.generic_methods.get(&trait_method_name.text))
+                    .cloned()
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "method '{}' must declare {} generic parameter(s) to match \
+                             trait '{}'",
+                            trait_method_name.text,
+                            trait_method.generics.len(),
+                            trait_name.text
+                        ),
+                    ));
+                };
+                if generic.params.len() != trait_method.generics.len() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "method '{}' declares {} generic parameter(s), but trait '{}' \
+                             declares {}",
+                            trait_method_name.text,
+                            generic.params.len(),
+                            trait_name.text,
+                            trait_method.generics.len()
+                        ),
+                    ));
+                }
+                if let Some(parameter) = generic.params.iter().find(|parameter| {
+                    info.params
+                        .iter()
+                        .any(|trait_parameter| trait_parameter.name.text == parameter.name.text)
+                }) {
+                    return Err(Diagnostic::new(
+                        parameter.span,
+                        format!(
+                            "generic method parameter '{}' shadows a parameter of trait '{}'",
+                            parameter.name.text, trait_name.text
+                        ),
+                    ));
+                }
+                for (index, (trait_parameter, impl_parameter)) in trait_method
+                    .generics
                     .iter()
-                    .find(|method| {
-                        method
-                            .declarator
-                            .name
-                            .as_ref()
-                            .is_some_and(|name| name.text == trait_method_name.text)
-                    })
-                    .map_or(block.span, |method| method.declarator.span);
+                    .zip(&generic.params)
+                    .enumerate()
+                {
+                    if trait_parameter.kind != impl_parameter.kind {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "generic parameter {} of method '{}' is a {} in trait '{}' \
+                                 but a {} in the implementation",
+                                index + 1,
+                                trait_method_name.text,
+                                match trait_parameter.kind {
+                                    ast::GenericParamKind::Type => "type parameter",
+                                    ast::GenericParamKind::Const => "const parameter",
+                                },
+                                trait_name.text,
+                                match impl_parameter.kind {
+                                    ast::GenericParamKind::Type => "type parameter",
+                                    ast::GenericParamKind::Const => "const parameter",
+                                }
+                            ),
+                        ));
+                    }
+                }
+                self.generic_method_signature(&generic.decl, &generic.params, &placeholders)?
+            };
+            if !self.types.is_compatible(expected, actual) {
                 return Err(Diagnostic::new(
                     span,
                     format!(
@@ -448,6 +597,26 @@ impl super::Lowerer {
                 ),
             ));
         }
+        if let Some(method) = info
+            .methods
+            .iter()
+            .find(|method| !method.generics.is_empty())
+        {
+            let name = method
+                .declarator
+                .name
+                .as_ref()
+                .map_or("<unnamed>", |name| name.text.as_str());
+            return Err(Diagnostic::new(
+                trait_name.span,
+                format!(
+                    "trait '{}' cannot be used as a value: generic method '{}' is \
+                     static-only, so it has no single function pointer; call it on a \
+                     concrete type instead",
+                    trait_name.text, name
+                ),
+            ));
+        }
         let saved = self.impl_context.clone();
         self.impl_context = Some((self.types.builtin(Builtin::Void), String::new()));
         let result = (|| {
@@ -511,6 +680,9 @@ impl super::Lowerer {
         };
         let value_ty = self.trait_value_type(trait_name)?;
         let concrete = self.resolve_type_name(concrete_name)?;
+        // A generic trait impl materializes on first use; the table is built
+        // from concrete method symbols like any other implementation.
+        self.instantiate_generic_impl(concrete)?;
         let Some(impl_info) = self.impls.get(&concrete) else {
             return Err(Diagnostic::new(
                 concrete_name.span,
@@ -523,7 +695,7 @@ impl super::Lowerer {
         let impl_name = impl_info.name.clone();
         if !self
             .trait_impls
-            .contains(&(trait_name.text.clone(), Vec::new(), impl_name.clone()))
+            .contains(&(trait_name.text.clone(), Vec::new(), concrete))
         {
             return Err(Diagnostic::new(
                 concrete_name.span,
@@ -544,11 +716,9 @@ impl super::Lowerer {
             let Some(name) = &method.declarator.name else {
                 continue;
             };
-            let Some(found) = self
-                .impls
-                .get(&concrete)
-                .and_then(|info| info.methods.get(&name.text))
-            else {
+            // `method_of` also queues a deferred generic impl body, which the
+            // table's symbol needs before the lowerer emits any function.
+            let Some(found) = self.method_of(concrete, &name.text)? else {
                 return Err(Diagnostic::new(
                     concrete_name.span,
                     format!(
@@ -564,19 +734,104 @@ impl super::Lowerer {
 
     /// The function type of a trait method with `self` bound to the
     /// implementing type currently in `impl_context`.
+    ///
+    /// A generic method's own parameters are bound to placeholders: the
+    /// signature shape is checked once, and every concrete call instantiates
+    /// the implementation through the generic method machinery.
     pub(super) fn trait_method_type(
         &mut self,
         method: &ast::TraitMethod,
     ) -> Result<TypeId, Diagnostic> {
-        let ResolvedSpecs { ty, qualifiers } = self.resolve_specs(&method.specs)?;
-        let resolved = self.resolve_declarator(ty, qualifiers, &method.declarator)?;
-        if !self.types.is_function(resolved.ty) {
+        let args = self.method_placeholder_args(&method.generics)?;
+        self.trait_method_type_with_args(method, &args)
+    }
+
+    /// The function type of a trait method with explicit method arguments.
+    fn trait_method_type_with_args(
+        &mut self,
+        method: &ast::TraitMethod,
+        args: &[super::GenericArgKey],
+    ) -> Result<TypeId, Diagnostic> {
+        let ty =
+            self.resolve_method_type(&method.specs, &method.declarator, &method.generics, args)?;
+        if !self.types.is_function(ty) {
             return Err(Diagnostic::new(
                 method.span,
                 "trait member is not a method declaration",
             ));
         }
-        Ok(resolved.ty)
+        Ok(ty)
+    }
+
+    /// The function type of one implementation method with its own generic
+    /// parameters bound to the shared comparison placeholders.
+    fn generic_method_signature(
+        &mut self,
+        declaration: &ast::FunctionDecl,
+        params: &[ast::GenericParam],
+        args: &[super::GenericArgKey],
+    ) -> Result<TypeId, Diagnostic> {
+        self.resolve_method_type(&declaration.specs, &declaration.declarator, params, args)
+    }
+
+    /// Resolve one method signature with the method's own generic parameters
+    /// bound. The declarator's own generics are cleared: they are represented
+    /// by `params`, which are bound before the return and parameter types are
+    /// resolved.
+    fn resolve_method_type(
+        &mut self,
+        specs: &ast::DeclSpecs,
+        declarator: &ast::Declarator,
+        params: &[ast::GenericParam],
+        args: &[super::GenericArgKey],
+    ) -> Result<TypeId, Diagnostic> {
+        self.push_type_scope();
+        self.bind_generic_args(params, args);
+        let mut declarator = declarator.clone();
+        for derived in &mut declarator.derived {
+            if let ast::DerivedDeclarator::Function(function) = derived {
+                function.generics.clear();
+            }
+        }
+        let resolved = (|| {
+            let ResolvedSpecs { ty, qualifiers } = self.resolve_specs(specs)?;
+            self.resolve_declarator(ty, qualifiers, &declarator)
+        })();
+        self.pop_type_scope();
+        resolved.map(|resolved| resolved.ty)
+    }
+
+    /// Placeholder concrete arguments for a signature-shape comparison.
+    ///
+    /// Each type parameter gets its own fresh empty record, so two different
+    /// parameters are never compatible and a concrete type cannot accidentally
+    /// equal a placeholder. Const parameters get distinct integers. None of
+    /// these values escapes the comparison.
+    fn method_placeholder_args(
+        &mut self,
+        params: &[ast::GenericParam],
+    ) -> Result<Vec<super::GenericArgKey>, Diagnostic> {
+        let mut args = Vec::with_capacity(params.len());
+        for (index, parameter) in params.iter().enumerate() {
+            match parameter.kind {
+                ast::GenericParamKind::Type => {
+                    let ty = self
+                        .types
+                        .define_record(RecordKind::Struct, Vec::new())
+                        .map_err(|error| {
+                            Diagnostic::new(
+                                parameter.span,
+                                format!("cannot create a signature placeholder: {error}"),
+                            )
+                        })?;
+                    args.push(super::GenericArgKey::Type(ty));
+                }
+                ast::GenericParamKind::Const => {
+                    args.push(super::GenericArgKey::Int(index as i64 + 1));
+                }
+            }
+        }
+        Ok(args)
     }
 
     fn impl_name(&self, type_name: &ast::TypeName) -> Result<String, Diagnostic> {

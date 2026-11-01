@@ -6,6 +6,8 @@
 //! `let` local is the same kind of slot; only the inferred type and the
 //! read-only flag differ.
 
+use std::collections::HashSet;
+
 use super::const_eval::ConstKind;
 use super::generics::generic_declarator;
 use super::types::ResolvedSpecsWithName;
@@ -31,12 +33,76 @@ impl Lowerer {
                 ast::Item::Impl(block) => self.collect_impl(block)?,
                 // Registered by `register_traits`; nothing to emit.
                 ast::Item::Trait(_) => {}
+                // Checked after the loop, once every file-scope name exists.
+                ast::Item::Use(_) => {}
             }
         }
+        self.check_imports(unit)?;
         // Every file-scope type is known now, so trait signatures that never
         // met an implementation still get their types checked.
         self.check_trait_signatures(unit)?;
         Ok(())
+    }
+
+    /// Checks every file-scope `use` import.
+    ///
+    /// ShyC has no module system: headers are included textually, so the set of
+    /// file-scope names is already one flat namespace. An import therefore
+    /// introduces no second name and no symbol; it records that the last path
+    /// segment names a declaration that is really there. The check runs after
+    /// the collection loop, so an import may precede the declaration it names
+    /// and it sees names from included headers as well as from this file.
+    ///
+    /// A name that is not a file-scope typedef, tag, trait, enumerator, generic
+    /// template, object, or function is reported as unknown, and importing the
+    /// same final name twice is a duplicate. The namespace segments themselves
+    /// are not checked against include provenance: headers carry no module path,
+    /// so there is nothing this stage could compare them with.
+    fn check_imports(&self, unit: &ast::TranslationUnit) -> Result<(), Diagnostic> {
+        let mut imported: HashSet<&str> = HashSet::new();
+        for item in &unit.items {
+            let ast::Item::Use(import) = item else {
+                continue;
+            };
+            let Some(name) = import.path.last() else {
+                continue;
+            };
+            if !imported.insert(name.text.as_str()) {
+                return Err(Diagnostic::new(
+                    import.span,
+                    format!("duplicate import of '{}'", name.text),
+                ));
+            }
+            if !self.is_file_scope_name(&name.text) {
+                let path = import
+                    .path
+                    .iter()
+                    .map(|segment| segment.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                return Err(Diagnostic::new(
+                    import.span,
+                    format!(
+                        "cannot import '{path}': no file-scope declaration named '{}' is visible",
+                        name.text
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `name` is declared at file scope: a type name, tag, trait,
+    /// enumerator, generic template, object, or function.
+    fn is_file_scope_name(&self, name: &str) -> bool {
+        self.lookup_typedef(name).is_some()
+            || self.lookup_tag(name).is_some()
+            || self.traits.contains_key(name)
+            || self.enum_consts.contains_key(name)
+            || self.generic_records.contains_key(name)
+            || self.generic_enums.contains_key(name)
+            || self.generic_functions.contains_key(name)
+            || self.globals.contains_key(name)
     }
 
     /// Registers every generic record definition before anything is resolved.
@@ -248,15 +314,12 @@ impl Lowerer {
         target: Option<super::ImplTarget>,
     ) -> Result<(), Diagnostic> {
         if generic_declarator(&declaration.declarator).is_some() {
-            if target.is_some() {
-                return Err(Diagnostic::new(
-                    declaration.declarator.span,
-                    "an impl method cannot declare its own generic parameters",
-                ));
-            }
-            // A file-scope template was registered by the collection pre-pass;
-            // only an instantiation creates a concrete function.
-            return Ok(());
+            let Some(target) = target else {
+                // A file-scope template was registered by the collection
+                // pre-pass; only an instantiation creates a concrete function.
+                return Ok(());
+            };
+            return self.collect_generic_method(declaration, target);
         }
         self.reject_generic_declarator(&declaration.declarator)?;
         let ResolvedSpecs { ty, qualifiers } = self.resolve_specs(&declaration.specs)?;
@@ -319,8 +382,9 @@ impl Lowerer {
                 .or_insert_with(|| super::ImplInfo {
                     name: target.name.clone(),
                     methods: Default::default(),
+                    generic_methods: Default::default(),
                 });
-            if info.methods.contains_key(&name) {
+            if info.methods.contains_key(&name) || info.generic_methods.contains_key(&name) {
                 return Err(Diagnostic::new(
                     declaration.span,
                     format!("redefinition of method '{name}'"),
@@ -347,6 +411,96 @@ impl Lowerer {
                 internal: false,
             });
         }
+        Ok(())
+    }
+
+    /// Registers one generic method of an impl as a template.
+    ///
+    /// A generic method has no single concrete signature, so it is not entered
+    /// in the ordinary method table. The first call that names or infers its
+    /// arguments instantiates it through the generic function machinery.
+    fn collect_generic_method(
+        &mut self,
+        declaration: &ast::FunctionDecl,
+        target: super::ImplTarget,
+    ) -> Result<(), Diagnostic> {
+        let Some(function) = generic_declarator(&declaration.declarator) else {
+            return Ok(());
+        };
+        let Some(name) = &declaration.declarator.name else {
+            return Err(Diagnostic::new(
+                declaration.span,
+                "method definition needs a name",
+            ));
+        };
+        for (index, parameter) in function.generics.iter().enumerate() {
+            if function.generics[..index]
+                .iter()
+                .any(|previous| previous.name.text == parameter.name.text)
+            {
+                return Err(Diagnostic::new(
+                    parameter.span,
+                    format!(
+                        "redefinition of generic method parameter '{}'",
+                        parameter.name.text
+                    ),
+                ));
+            }
+            if let Some(bound) = parameter.bounds.first() {
+                return Err(Diagnostic::new(
+                    bound.span,
+                    format!(
+                        "trait bounds on generic method '{}' are not implemented yet",
+                        name.text
+                    ),
+                ));
+            }
+            if target.instance.as_ref().is_some_and(|instance| {
+                instance
+                    .params
+                    .iter()
+                    .any(|outer| outer.name.text == parameter.name.text)
+            }) {
+                return Err(Diagnostic::new(
+                    parameter.span,
+                    format!(
+                        "generic method parameter '{}' shadows an impl parameter of the same \
+                         name",
+                        parameter.name.text
+                    ),
+                ));
+            }
+        }
+        let env = match &target.instance {
+            Some(instance) => self.generic_env(&instance.params, &instance.args),
+            None => super::GenericEnv {
+                types: Default::default(),
+                consts: Default::default(),
+            },
+        };
+        let info = self
+            .impls
+            .entry(target.ty)
+            .or_insert_with(|| super::ImplInfo {
+                name: target.name.clone(),
+                methods: Default::default(),
+                generic_methods: Default::default(),
+            });
+        if info.methods.contains_key(&name.text) || info.generic_methods.contains_key(&name.text) {
+            return Err(Diagnostic::new(
+                declaration.span,
+                format!("redefinition of method '{}'", name.text),
+            ));
+        }
+        info.generic_methods.insert(
+            name.text.clone(),
+            super::GenericMethod {
+                params: function.generics.clone(),
+                decl: declaration.clone(),
+                env,
+                impl_context: (target.ty, target.name),
+            },
+        );
         Ok(())
     }
 

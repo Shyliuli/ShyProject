@@ -126,17 +126,52 @@ Several bounds may be written with `+`. The check is compile-time only: the call
 still becomes the ordinary monomorphized function, with no dispatch or ABI
 change. A bound on a `const` parameter, a generic record, a generic enum, or a
 generic trait, a bound that writes trait arguments such as `T: From<int>`, and
-a generic trait method each get an explicit diagnostic instead.
+a bound on a generic method's own parameter each get an explicit diagnostic
+instead.
 
 A generic record takes methods through a template `impl`:
 `impl<T> Box<T> { T get(self *b) { return b->value; } }`, where the short
 `impl Box<T>` form writes the same parameters. A method lookup on one concrete
 instance binds the impl parameters to that instance's own arguments and lowers
 every method it uses to an ordinary function with a translation-unit internal
-symbol, so `Box<int> b; b.get();` stays a direct call. The target must list the
-impl's parameters in order, and a method cannot declare generic parameters of
-its own. A generic trait implementation, a trait bound on an impl parameter, and
-a second generic impl of the same record each get an explicit diagnostic.
+symbol, so `Box<int> b; b.get();` stays a direct call. A target may reorder or
+repeat its parameters: `impl<T, U> Trait for Pair<U, T>` binds `U` from the
+first receiver argument and `T` from the second. Every target argument must be
+a bare impl parameter; a nested or concrete target argument such as
+`Pair<T, int>` is rejected with a diagnostic, as is an impl parameter that
+never appears in the target. Repeating a parameter is checked against the
+concrete receiver, so `Pair<T, T>` accepts `Pair<int, int>` and rejects
+`Pair<int, long>`.
+
+A generic impl may implement a trait: `impl<T> Show for Box<T> { ... }`, or
+with reordered bindings `impl<T, U> Convert<T> for Pair<U, T> { ... }`. The
+trait arguments resolve after the impl parameters bind, and a duplicate is
+detected by concrete trait + concrete receiver type, so `Show for Box<int>` and
+`Show for Box<long>` are distinct implementations. One record has at most one
+generic inherent impl; it may have generic impls of several different traits.
+A trait bound on an impl parameter still gets an explicit diagnostic, and a
+second generic impl of the same trait and concrete receiver is reported when
+the receiver is instantiated.
+
+A method may declare generic parameters of its own:
+`fn identity<U>(self *b, U value) -> U`. Such a method is a template inside its
+impl and instantiates through the same cache as a generic function, with the
+receiver bindings and method arguments merged. A call may write them
+(`b.identity<int>(1)`, `Box<int>::identity<int>(&b, 1)`) or let them be
+inferred from the value arguments (`b.identity(1)`). A method parameter that
+shadows an impl parameter is rejected.
+
+`trait Convert { fn convert<T>(self *x, T value) -> T; }` declares a generic
+trait method. The implementation must declare the same number and kinds of
+method parameters. The two signatures are compared with one fresh placeholder
+type per parameter, so a concrete type cannot stand in for a parameter and two
+different parameters can never be confused. Static dispatch works: a concrete
+receiver call, a `Circle::convert<int>(&c, value)` static call, and a call
+inside a generic function bounded by the trait all instantiate the ordinary
+implementation method. A generic trait method has no single function pointer,
+so a trait that declares one cannot be used as a value type; that use gets a
+diagnostic naming the method. Trait bounds on a generic method parameter and
+const generic parameters on a trait method are not implemented yet.
 
 `trait Drawable { void draw(self *value); }` declares method signatures, and
 `impl Drawable for Circle { ... }` checks that the implementation defines exactly
@@ -171,9 +206,10 @@ symbol. The method signature is erased only at `self`: `self *` becomes
 other parameter and the return type stay as written. This is why a trait method
 that takes or returns `self` by value still works for static dispatch but is
 rejected when the trait is used as a value type. A second implementation of the
-same trait for one type, a duplicate method name across two traits on one type,
-and generic trait methods also get an explicit diagnostic. Construction at file
-scope must follow the `impl` in source order;
+same trait for one concrete type, a duplicate method name across two traits on
+one type, and a trait with a generic method used as a value type each get an
+explicit diagnostic. Construction at file scope must follow the `impl` in
+source order;
 function bodies are lowered after the whole unit is collected, so their
 construction does not depend on declaration order. There is no other dynamic
 dispatch mechanism.
@@ -235,6 +271,18 @@ niche Result is diagnosed because its cases would compare the `Err` tag with an
 error code; switch on `result.tag` and the error enumerators instead. Global
 initialisers keep the payload-enum restriction, and `?` needs the same error
 enum because `impl` targets must be records, not enums.
+
+A file-scope `use` writes the namespace a name comes from and imports its last
+segment: `use core::Option;` and `use c::stdio::printf;` make `Option` and
+`printf` available under exactly the names the includes already declared. An
+import is a compile-time check, not a new declaration: it emits no symbol, adds
+no module or runtime object, and changes no C ABI. The last segment must be a
+visible file-scope typedef, tag, trait, enumerator, generic template, object, or
+function, otherwise the import is rejected; importing one name twice is a
+duplicate. Since headers are included textually, the namespace segments are
+descriptive and are not resolved against the include path yet. `use` is a soft
+keyword, so C code that uses `use` as an ordinary identifier still parses, and
+`--emit=c-header` and `--emit=c` omit imports from the C view of the unit.
 
 Floating point on the Shy target needs the runtime object linked in; build it
 once with the existing toolchain:

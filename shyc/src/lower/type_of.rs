@@ -251,22 +251,27 @@ impl Lowerer {
                 // the call will later use. A call that writes no type arguments
                 // infers them from the same argument expressions.
                 let function_ty = if type_args.is_empty() {
-                    match callee.as_ref() {
-                        ast::Expr::Name(name)
-                            if local(&name.text).is_none()
-                                && self.is_inferred_generic_call(&name.text) =>
-                        {
-                            let mut arguments = Vec::with_capacity(args.len());
-                            for argument in args {
-                                let ty = self.type_of(argument, local)?;
-                                arguments.push((argument.span(), ty));
+                    if let Some(instance) = self.inferred_method_instance(callee, args, local)? {
+                        instance.ty
+                    } else {
+                        match callee.as_ref() {
+                            ast::Expr::Name(name)
+                                if local(&name.text).is_none()
+                                    && self.is_inferred_generic_call(&name.text) =>
+                            {
+                                let mut arguments = Vec::with_capacity(args.len());
+                                for argument in args {
+                                    let ty = self.type_of(argument, local)?;
+                                    arguments.push((argument.span(), ty));
+                                }
+                                self.infer_generic_function(name, &arguments)?.ty
                             }
-                            self.infer_generic_function(name, &arguments)?.ty
+                            _ => self.callee_function_type(callee, local)?,
                         }
-                        _ => self.callee_function_type(callee, local)?,
                     }
                 } else {
-                    self.generic_call_target(callee, type_args, *span)?.ty
+                    self.generic_callee_instance(callee, type_args, *span, local)?
+                        .ty
                 };
                 match self.types.kind(function_ty) {
                     TypeKind::Function { result, .. } => Ok(*result),
@@ -526,7 +531,9 @@ impl Lowerer {
         match self.field_of(record, &name.text, name.span) {
             Ok((ty, _)) => Ok(ty),
             Err(error) => {
-                if self.method_of(record, &name.text)?.is_some() {
+                if self.method_of(record, &name.text)?.is_some()
+                    || self.has_generic_method(record, &name.text)?
+                {
                     Err(Diagnostic::new(
                         span,
                         format!("method '{}' must be called", name.text),
@@ -656,6 +663,130 @@ impl Lowerer {
                 return None;
             };
             ty = pointee.ty;
+        }
+    }
+
+    /// Instantiate a generic method from value-argument types during type-only
+    /// analysis. The lowerer's matching helper does the same at call lowering,
+    /// and both share the instance cache.
+    fn inferred_method_instance(
+        &mut self,
+        callee: &ast::Expr,
+        args: &[ast::Expr],
+        local: LocalLookup<'_>,
+    ) -> Result<Option<super::FunctionInstance>, Diagnostic> {
+        let (record, name, skip_params) = match callee {
+            ast::Expr::Member { object, name, .. } => {
+                let object_ty = self.type_of(object, local)?;
+                let Some(record) = self.record_of(object_ty) else {
+                    return Ok(None);
+                };
+                (record, name, 1)
+            }
+            ast::Expr::ScopedName {
+                qualifier, name, ..
+            } => {
+                let Some(ty) = self.lookup_named_type(&qualifier.text) else {
+                    return Ok(None);
+                };
+                let Some(record) = self.record_of(ty) else {
+                    return Ok(None);
+                };
+                (record, name, 0)
+            }
+            ast::Expr::GenericScopedName {
+                qualifier,
+                args: type_args,
+                name,
+                ..
+            } => {
+                let ty = self.generic_qualifier_type(qualifier, type_args)?;
+                let Some(record) = self.record_of(ty) else {
+                    return Ok(None);
+                };
+                (record, name, 0)
+            }
+            _ => return Ok(None),
+        };
+        if self.method_of(record, &name.text)?.is_some()
+            || !self.has_generic_method(record, &name.text)?
+        {
+            return Ok(None);
+        }
+        let mut arguments = Vec::with_capacity(args.len());
+        for argument in args {
+            let ty = self.type_of(argument, local)?;
+            arguments.push((argument.span(), ty));
+        }
+        Ok(Some(self.infer_generic_method(
+            record,
+            name,
+            &arguments,
+            skip_params,
+        )?))
+    }
+
+    /// Instantiate the callee of a call that writes explicit generic arguments
+    /// during type-only analysis.
+    fn generic_callee_instance(
+        &mut self,
+        callee: &ast::Expr,
+        type_args: &[ast::GenericArg],
+        span: Span,
+        local: LocalLookup<'_>,
+    ) -> Result<super::FunctionInstance, Diagnostic> {
+        match callee {
+            ast::Expr::Name(name) => self.instantiate_generic_function(name, type_args),
+            ast::Expr::Member { object, name, .. } => {
+                let object_ty = self.type_of(object, local)?;
+                let Some(record) = self.record_of(object_ty) else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "method call needs a struct, union, or pointer receiver",
+                    ));
+                };
+                if self.method_of(record, &name.text)?.is_some() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("method '{}' is not generic", name.text),
+                    ));
+                }
+                self.instantiate_generic_method(record, name, type_args)
+            }
+            ast::Expr::ScopedName {
+                qualifier, name, ..
+            } => {
+                let Some(record) = self.lookup_named_type(&qualifier.text) else {
+                    self.scoped_method(qualifier, name)?;
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("unknown type name '{}'", qualifier.text),
+                    ));
+                };
+                if self.method_of(record, &name.text)?.is_some() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("method '{}' is not generic", name.text),
+                    ));
+                }
+                self.instantiate_generic_method(record, name, type_args)
+            }
+            ast::Expr::GenericScopedName {
+                qualifier,
+                args,
+                name,
+                ..
+            } => {
+                let ty = self.generic_qualifier_type(qualifier, args)?;
+                if self.method_of(ty, &name.text)?.is_some() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("method '{}' is not generic", name.text),
+                    ));
+                }
+                self.instantiate_generic_method(ty, name, type_args)
+            }
+            _ => self.generic_call_target(callee, type_args, span),
         }
     }
 

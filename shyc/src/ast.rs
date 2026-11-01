@@ -41,10 +41,11 @@
 //! - runtime trait objects: a `trait` declares compile-time method signatures
 //!   only, and using a trait name as a value type is rejected by semantic
 //!   analysis;
-//! - generic traits, bounds on generic records, enums, and traits, and trait
+//! - bounds on generic records, enums, traits, and generic methods, and trait
 //!   bounds that write type arguments. A generic function may write static
 //!   trait bounds (`fn render<T: Drawable>(T *value)`); they are kept on
-//!   [`ty::GenericParam::bounds`] and checked at instantiation;
+//!   [`ty::GenericParam::bounds`] and checked at instantiation. A generic
+//!   trait method keeps its parameters on [`decl::TraitMethod::generics`];
 //! - scoped names with more than two segments (`A::B::m`).
 //!
 //! `_Atomic` is represented in both of its spellings: a qualifier

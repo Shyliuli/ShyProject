@@ -177,9 +177,24 @@ pub fn reject_let(tokens: &[Token]) -> Result<(), Diagnostic> {
 ///
 /// The output ends with a newline. [`TokenKind::Eof`] and the preprocessor's
 /// newline markers are not tokens of the C text, so they are skipped.
+///
+/// ShyC `use` imports are dropped: C has no import syntax, and an import only
+/// checks a name that the includes already make visible. `use` is a soft
+/// keyword, so only the import shape (`use name (:: name)* ;`) is removed and an
+/// ordinary C declaration spelled with the identifier `use` is kept.
 pub fn render_c_source(tokens: &[Token]) -> String {
     let mut output = String::new();
-    for token in tokens {
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        index += 1;
+        if let Some(end) = use_declaration_end(tokens, index - 1) {
+            if token.at_line_start && !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            index = end + 1;
+            continue;
+        }
         let spelling = match &token.kind {
             TokenKind::Ident(text) | TokenKind::Number(text) | TokenKind::Punct(text) => {
                 text.clone()
@@ -197,6 +212,30 @@ pub fn render_c_source(tokens: &[Token]) -> String {
     }
     output.push('\n');
     output
+}
+
+/// The index of the `;` ending the import that starts at `start`, if the tokens
+/// there have the `use name :: ...` shape.
+fn use_declaration_end(tokens: &[Token], start: usize) -> Option<usize> {
+    if !matches!(&tokens[start].kind, TokenKind::Ident(word) if word == "use") {
+        return None;
+    }
+    let name = next_significant(tokens, start + 1)?;
+    if !matches!(tokens[name].kind, TokenKind::Ident(_)) {
+        return None;
+    }
+    let separator = next_significant(tokens, name + 1)?;
+    if !matches!(&tokens[separator].kind, TokenKind::Punct(punct) if punct == "::") {
+        return None;
+    }
+    // The parser already validated the path, so the first `;` closes it.
+    (separator..tokens.len())
+        .find(|&index| matches!(&tokens[index].kind, TokenKind::Punct(punct) if punct == ";"))
+}
+
+/// The first index at or after `from` whose token is not a newline marker.
+fn next_significant(tokens: &[Token], from: usize) -> Option<usize> {
+    (from..tokens.len()).find(|&index| !matches!(tokens[index].kind, TokenKind::Newline))
 }
 
 /// Render the exported interface of `unit` as one C header.
@@ -266,8 +305,9 @@ pub fn render_c_header(unit: &TranslationUnit, options: &HeaderOptions) -> Strin
             Item::Decl(declaration) => declaration_text(declaration),
             Item::Function(function) => prototype_text(function),
             // Methods need a symbol of their own before they can be declared;
-            // a trait value record was printed above.
-            Item::Impl(_) | Item::Trait(_) => String::new(),
+            // a trait value record was printed above. An import is a
+            // compile-time check with no C spelling.
+            Item::Impl(_) | Item::Trait(_) | Item::Use(_) => String::new(),
         };
         if text.is_empty() {
             continue;
@@ -287,6 +327,7 @@ fn item_span(item: &Item) -> Span {
         Item::Function(function) => function.span,
         Item::Impl(block) => block.span,
         Item::Trait(declaration) => declaration.span,
+        Item::Use(import) => import.span,
     }
 }
 
@@ -313,6 +354,21 @@ fn trait_value_text(declaration: &TraitDecl) -> String {
         return format!(
             "/* trait '{}' cannot be a value type: it has no methods */",
             declaration.name.text
+        );
+    }
+    if let Some(method) = declaration
+        .methods
+        .iter()
+        .find(|method| !method.generics.is_empty())
+    {
+        let name = method
+            .declarator
+            .name
+            .as_ref()
+            .map_or("<unnamed>", |name| name.text.as_str());
+        return format!(
+            "/* trait '{}' cannot be a value type: generic method '{}' is static-only */",
+            declaration.name.text, name
         );
     }
     let mut fields = Vec::new();

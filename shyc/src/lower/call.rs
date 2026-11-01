@@ -406,7 +406,13 @@ impl FnLower<'_> {
                 }
                 return self.lower_trait_table(qualifier, type_args, span);
             }
-            let instance = self.l.generic_call_target(callee, type_args, span)?;
+            let instance = self.generic_callee_instance(callee, type_args, span)?;
+            if let ast::Expr::Member {
+                object, name, op, ..
+            } = callee
+            {
+                return self.lower_generic_method_call(object, name, *op, instance, args, span);
+            }
             return self.lower_instance_call(instance, args, span);
         }
         // A template name with no written type arguments infers them from the
@@ -430,6 +436,18 @@ impl FnLower<'_> {
             {
                 return self.lower_method_call(object, name, *op, method, args, span);
             }
+        }
+        // A call with no written arguments instantiates a generic method from
+        // the value arguments, exactly as `name(value)` does for a generic
+        // function. A concrete method of the same name already returned above.
+        if let Some(instance) = self.inferred_method_instance(callee, args)? {
+            if let ast::Expr::Member {
+                object, name, op, ..
+            } = callee
+            {
+                return self.lower_generic_method_call(object, name, *op, instance, args, span);
+            }
+            return self.lower_instance_call(instance, args, span);
         }
         if let ast::Expr::ScopedName {
             qualifier,
@@ -510,6 +528,131 @@ impl FnLower<'_> {
         self.emit_call(target, function_ty, operands, span)
     }
 
+    /// Instantiate the callee of a call that writes explicit generic
+    /// arguments, accepting a generic function name or a generic method.
+    pub(super) fn generic_callee_instance(
+        &mut self,
+        callee: &ast::Expr,
+        type_args: &[ast::GenericArg],
+        span: Span,
+    ) -> Result<FunctionInstance, Diagnostic> {
+        match callee {
+            ast::Expr::Name(name) => self.l.instantiate_generic_function(name, type_args),
+            ast::Expr::Member { object, name, .. } => {
+                let object_ty = self.type_of(object)?;
+                let Some(record) = self.l.record_of(object_ty) else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "method call needs a struct, union, or pointer receiver",
+                    ));
+                };
+                if self.l.method_of(record, &name.text)?.is_some() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("method '{}' is not generic", name.text),
+                    ));
+                }
+                self.l.instantiate_generic_method(record, name, type_args)
+            }
+            ast::Expr::ScopedName {
+                qualifier, name, ..
+            } => {
+                let Some(record) = self.l.lookup_named_type(&qualifier.text) else {
+                    // Reuse the ordinary static-call diagnostics: a trait name,
+                    // a generic type without arguments, or an unknown type.
+                    self.l.scoped_method(qualifier, name)?;
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("unknown type name '{}'", qualifier.text),
+                    ));
+                };
+                if self.l.method_of(record, &name.text)?.is_some() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("method '{}' is not generic", name.text),
+                    ));
+                }
+                self.l.instantiate_generic_method(record, name, type_args)
+            }
+            ast::Expr::GenericScopedName {
+                qualifier,
+                args,
+                name,
+                ..
+            } => {
+                let ty = self.l.generic_qualifier_type(qualifier, args)?;
+                if self.l.method_of(ty, &name.text)?.is_some() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("method '{}' is not generic", name.text),
+                    ));
+                }
+                self.l.instantiate_generic_method(ty, name, type_args)
+            }
+            _ => self.l.generic_call_target(callee, type_args, span),
+        }
+    }
+
+    /// Instantiate a generic method from the value arguments of a call that
+    /// writes no type arguments.
+    ///
+    /// A receiver call skips its receiver parameter, which is lowered
+    /// separately; a static call includes it as its first argument.
+    pub(super) fn inferred_method_instance(
+        &mut self,
+        callee: &ast::Expr,
+        args: &[ast::Expr],
+    ) -> Result<Option<FunctionInstance>, Diagnostic> {
+        let (record, name, skip_params) = match callee {
+            ast::Expr::Member { object, name, .. } => {
+                let object_ty = self.type_of(object)?;
+                let Some(record) = self.l.record_of(object_ty) else {
+                    return Ok(None);
+                };
+                (record, name, 1)
+            }
+            ast::Expr::ScopedName {
+                qualifier, name, ..
+            } => {
+                let Some(ty) = self.l.lookup_named_type(&qualifier.text) else {
+                    return Ok(None);
+                };
+                let Some(record) = self.l.record_of(ty) else {
+                    return Ok(None);
+                };
+                (record, name, 0)
+            }
+            ast::Expr::GenericScopedName {
+                qualifier,
+                args,
+                name,
+                ..
+            } => {
+                let ty = self.l.generic_qualifier_type(qualifier, args)?;
+                let Some(record) = self.l.record_of(ty) else {
+                    return Ok(None);
+                };
+                (record, name, 0)
+            }
+            _ => return Ok(None),
+        };
+        if self.l.method_of(record, &name.text)?.is_some()
+            || !self.l.has_generic_method(record, &name.text)?
+        {
+            return Ok(None);
+        }
+        let mut arguments = Vec::with_capacity(args.len());
+        for argument in args {
+            arguments.push((argument.span(), self.type_of(argument)?));
+        }
+        Ok(Some(self.l.infer_generic_method(
+            record,
+            name,
+            &arguments,
+            skip_params,
+        )?))
+    }
+
     /// Lower a call through one already instantiated generic function.
     fn lower_instance_call(
         &mut self,
@@ -550,6 +693,42 @@ impl FnLower<'_> {
     }
 
     fn lower_method_call(
+        &mut self,
+        object: &ast::Expr,
+        name: &ast::Name,
+        op: ast::MemberOp,
+        method: super::MethodInfo,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<ExprVal, Diagnostic> {
+        self.lower_method_call_target(object, name, op, method, args, span)
+    }
+
+    /// Lower a receiver call through one instantiated generic method.
+    fn lower_generic_method_call(
+        &mut self,
+        object: &ast::Expr,
+        name: &ast::Name,
+        op: ast::MemberOp,
+        instance: FunctionInstance,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<ExprVal, Diagnostic> {
+        self.lower_method_call_target(
+            object,
+            name,
+            op,
+            super::MethodInfo {
+                symbol: instance.symbol,
+                ty: instance.ty,
+                deferred: None,
+            },
+            args,
+            span,
+        )
+    }
+
+    fn lower_method_call_target(
         &mut self,
         object: &ast::Expr,
         name: &ast::Name,

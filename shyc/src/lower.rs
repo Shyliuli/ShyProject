@@ -152,6 +152,26 @@ pub(super) struct DeferredMethod {
 pub(super) struct ImplInfo {
     pub name: String,
     pub methods: HashMap<String, MethodInfo>,
+    /// Methods that declare their own generic parameters. A generic method has
+    /// no single concrete signature, so it is instantiated like a generic
+    /// function when a call names concrete arguments or when they are inferred
+    /// from the value arguments.
+    pub generic_methods: HashMap<String, GenericMethod>,
+}
+
+/// One generic method of an impl, kept as the AST template it is.
+///
+/// The receiver's bindings (`env`) come from the surrounding impl: an ordinary
+/// `impl Circle` contributes none, and a materialized `impl<T> Box<T>`
+/// contributes its concrete arguments. Instantiation adds the method's own
+/// arguments on top and lowers one ordinary function through the generic
+/// function machinery.
+#[derive(Clone)]
+pub(super) struct GenericMethod {
+    pub params: Vec<ast::GenericParam>,
+    pub decl: ast::FunctionDecl,
+    pub env: GenericEnv,
+    pub impl_context: (TypeId, String),
 }
 
 /// One `trait` declaration: the method signatures an implementation must
@@ -223,16 +243,24 @@ pub(super) struct GenericFunction {
 
 /// One generic `impl` block, kept as the AST template it is.
 ///
-/// `impl<T> Box<T> { ... }` is instantiated when a concrete `Box<int>` needs one
-/// of its methods: the parameters bind to the receiver's own concrete
-/// arguments, and each method is lowered as an ordinary function with a
-/// translation-unit internal symbol. Registration checks that the target's
-/// argument list is exactly the parameters in order, so instantiation never
-/// has to unify a partial target type.
+/// `impl<T> Box<T>` and `impl<T, U> Trait for Pair<U, T>` are instantiated when
+/// a concrete receiver needs one of their methods. Registration resolves the
+/// target's argument list into a mapping from each concrete receiver argument
+/// to an impl parameter, so a reordered target binds the same parameter names
+/// the method signatures use. Each method becomes an ordinary function with a
+/// translation-unit internal symbol.
 #[derive(Clone)]
 pub(super) struct GenericImpl {
     pub params: Vec<ast::GenericParam>,
     pub block: ast::ImplBlock,
+    /// One impl parameter index per target argument, in target order. A
+    /// reordered target such as `Pair<U, T>` stores the indices of `U` and `T`
+    /// in `params`, so instantiation binds each receiver argument to the
+    /// parameter that target position names.
+    pub target_args: Vec<usize>,
+    /// Whether this template declares an inherent `impl`, which keeps the old
+    /// rule that a record has at most one of them.
+    pub inherent: bool,
 }
 
 /// The concrete bindings of one materialized generic impl, carried by each of
@@ -320,8 +348,9 @@ pub(super) struct Lowerer {
     pub generic_functions: HashMap<String, GenericFunction>,
     /// Instantiated generic functions, keyed by name and concrete arguments.
     pub function_instances: HashMap<InstanceKey, FunctionInstance>,
-    /// Every generic impl template, by the record name it targets.
-    pub generic_impls: HashMap<String, GenericImpl>,
+    /// Every generic impl template, by the record name it targets. One record
+    /// may have an inherent template plus one template per implemented trait.
+    pub generic_impls: HashMap<String, Vec<GenericImpl>>,
     /// Concrete records whose generic impl has already been materialized.
     pub generic_impl_instances: HashSet<TypeId>,
     /// Nesting level of the generic instantiation currently being resolved.
@@ -329,9 +358,11 @@ pub(super) struct Lowerer {
     /// Every trait declaration, by name. Registered before any `impl` is
     /// checked.
     pub traits: HashMap<String, TraitInfo>,
-    /// `(trait, trait arguments, type)` triples already implemented, to
-    /// reject a second implementation of the same pair.
-    pub trait_impls: HashSet<(String, Vec<GenericArgKey>, String)>,
+    /// `(trait, trait arguments, concrete receiver)` triples already
+    /// implemented, to reject a second implementation of the same pair. The
+    /// receiver is a resolved type, so `Box<int>` and `Box<long>` never collide
+    /// just because both instances came from `Box`.
+    pub trait_impls: HashSet<(String, Vec<GenericArgKey>, TypeId)>,
     /// Concrete `impl From<Source> for Target` conversions, used by `?` when
     /// the propagated error types are not identical.
     pub from_conversions: HashMap<(TypeId, TypeId), MethodInfo>,
@@ -520,14 +551,9 @@ impl Lowerer {
         record: TypeId,
         name: &str,
     ) -> Result<Option<MethodInfo>, Diagnostic> {
-        if self
-            .impls
-            .get(&record)
-            .and_then(|info| info.methods.get(name))
-            .is_none()
-        {
-            self.instantiate_generic_impl(record)?;
-        }
+        // Materialize every generic impl template for this receiver once, so
+        // both ordinary and generic method lookups see the same method set.
+        self.instantiate_generic_impl(record)?;
         let Some(method) = self
             .impls
             .get(&record)

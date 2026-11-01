@@ -403,6 +403,34 @@ that local value.
 
 `goto` out of a scope containing active RAII locals is rejected.
 
+### Imports
+
+A file-scope `use` names the namespace a declaration comes from and imports its
+last segment:
+
+```c
+#include <core/option.shyh>
+#include <stdio.shyh>
+
+use core::Option;
+use c::stdio::printf;
+
+int main(void) {
+  Option<int> value = Option<int>::Some(1);
+  printf("%d\n", value.payload.Some);
+  return 0;
+}
+```
+
+An import is a compile-time check rather than a second declaration. The last
+segment must already name a file-scope typedef, tag, trait, enumerator, generic
+template, object, or function in the translation unit, from this file or an
+included header, and it keeps its ordinary meaning. The earlier segments are
+written for the reader and are not resolved against the include path yet, so
+the import only rejects an unknown final name and a duplicate import of the same
+name. Imports add no symbol, storage, or ABI surface; `--emit=c-header` and
+`--emit=c` leave them out.
+
 ## Floating Point
 
 Floating point is implemented through software helper calls where needed. The

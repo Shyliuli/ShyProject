@@ -21,15 +21,25 @@
 //! record's own arguments and registers one ordinary function per method with
 //! an internal symbol naming the receiver. A method body is only lowered when
 //! a lookup asks for it, so an instance compiles exactly the methods it uses.
-//! A method cannot declare generic parameters of its own, and a trait
-//! implementation cannot be generic yet.
+//! A generic impl target may reorder or repeat its parameters, as in
+//! `impl<T, U> Trait for Pair<U, T>`: registration records which parameter
+//! each target position names, and instantiation binds the receiver's own
+//! arguments through that mapping. Every target argument must be a bare impl
+//! parameter.
+//!
+//! A method may declare generic parameters of its own. The method is stored as
+//! a template inside its impl and instantiated through the same cache as a
+//! generic function; the receiver bindings and the method's arguments are
+//! merged into the environment its body resolves under. A trait implementation
+//! may be generic too, and its trait arguments resolve once the impl parameters
+//! are bound.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use super::{
-    FunctionInstance, GenericArgKey, GenericEnv, GenericFunction, InstanceKey, Lowerer,
-    PendingFunction, ResolvedSpecs,
+    FunctionInstance, GenericArgKey, GenericEnv, GenericFunction, GenericMethod, InstanceKey,
+    Lowerer, PendingFunction, ResolvedSpecs,
 };
 use crate::ast;
 use crate::sema::types::{Builtin, IntegerRank, TypeId, TypeKind};
@@ -119,8 +129,8 @@ impl Lowerer {
                     }
                 }
                 // A generic method has no file-scope template yet, and a trait
-                // method is only a signature.
-                ast::Item::Impl(_) | ast::Item::Trait(_) => {}
+                // method is only a signature. An import declares no function.
+                ast::Item::Impl(_) | ast::Item::Trait(_) | ast::Item::Use(_) => {}
             }
         }
         Ok(())
@@ -208,12 +218,6 @@ impl Lowerer {
     }
 
     fn register_generic_impl(&mut self, block: &ast::ImplBlock) -> Result<(), Diagnostic> {
-        if block.trait_name.is_some() {
-            return Err(Diagnostic::new(
-                block.span,
-                "generic trait implementations are not implemented yet",
-            ));
-        }
         if let Some(bound) = block
             .generics
             .iter()
@@ -262,23 +266,93 @@ impl Lowerer {
                 ),
             ));
         }
-        let in_order = generic.args.len() == block.generics.len()
-            && generic
-                .args
-                .iter()
-                .zip(&block.generics)
-                .all(|(arg, parameter)| argument_names_parameter(arg, parameter));
-        if !in_order {
+        if let Some(trait_name) = &block.trait_name {
+            let Some(info) = self.traits.get(&trait_name.text) else {
+                return Err(Diagnostic::new(
+                    trait_name.span,
+                    format!("unknown trait '{}'", trait_name.text),
+                ));
+            };
+            if block.trait_args.len() != info.params.len() {
+                return Err(Diagnostic::new(
+                    block.span,
+                    format!(
+                        "trait '{}' expects {} type argument(s)",
+                        trait_name.text,
+                        info.params.len()
+                    ),
+                ));
+            }
+        }
+        // Each target argument must name one impl parameter. A bare parameter
+        // may still appear twice, which is valid only when the receiver's two
+        // arguments agree; a nested or concrete target argument would need
+        // unification that this monomorphizer deliberately does not perform.
+        let mut target_args = Vec::with_capacity(generic.args.len());
+        for argument in &generic.args {
+            let parameter =
+                target_argument_parameter(argument, &block.generics).ok_or_else(|| {
+                    Diagnostic::new(
+                        argument.span,
+                        format!(
+                            "generic impl target for '{}' must name one of the impl's parameters; \
+                         '{}' is not supported",
+                            generic.name.text,
+                            target_argument_text(argument)
+                        ),
+                    )
+                })?;
+            let kind_matches = matches!(
+                (
+                    &block.generics[parameter].kind,
+                    &record.params[target_args.len()].kind
+                ),
+                (ast::GenericParamKind::Type, ast::GenericParamKind::Type)
+                    | (ast::GenericParamKind::Const, ast::GenericParamKind::Const)
+            );
+            if !kind_matches {
+                return Err(Diagnostic::new(
+                    argument.span,
+                    format!(
+                        "generic impl parameter '{}' is a {}, but target position {} of '{}' \
+                         is a {}",
+                        block.generics[parameter].name.text,
+                        match block.generics[parameter].kind {
+                            ast::GenericParamKind::Type => "type parameter",
+                            ast::GenericParamKind::Const => "const parameter",
+                        },
+                        target_args.len() + 1,
+                        generic.name.text,
+                        match record.params[target_args.len()].kind {
+                            ast::GenericParamKind::Type => "type parameter",
+                            ast::GenericParamKind::Const => "const parameter",
+                        }
+                    ),
+                ));
+            }
+            target_args.push(parameter);
+        }
+        if let Some((_index, parameter)) = block
+            .generics
+            .iter()
+            .enumerate()
+            .find(|(index, _)| !target_args.contains(index))
+        {
             return Err(Diagnostic::new(
-                block.self_type.span,
+                parameter.span,
                 format!(
-                    "generic impl target must list the impl's parameters in order, as in \
-                     'impl<T> {}<T>'",
-                    generic.name.text
+                    "generic impl parameter '{}' is not used in the target for '{}'; every \
+                     parameter must appear in the target",
+                    parameter.name.text, generic.name.text
                 ),
             ));
         }
-        if self.generic_impls.contains_key(&generic.name.text) {
+        let inherent = block.trait_name.is_none();
+        let existing = self
+            .generic_impls
+            .entry(generic.name.text.clone())
+            .or_default();
+        if inherent && existing.iter().any(|template| template.inherent) {
             return Err(Diagnostic::new(
                 block.span,
                 format!(
@@ -287,22 +361,22 @@ impl Lowerer {
                 ),
             ));
         }
-        self.generic_impls.insert(
-            generic.name.text.clone(),
-            super::GenericImpl {
-                params: block.generics.clone(),
-                block: block.clone(),
-            },
-        );
+        existing.push(super::GenericImpl {
+            params: block.generics.clone(),
+            block: block.clone(),
+            target_args,
+            inherent,
+        });
         Ok(())
     }
 
-    /// Materializes the generic impl whose receiver is `record`, once.
+    /// Materializes every generic impl whose target matches `record`, once.
     ///
-    /// The record's own concrete arguments bind the impl parameters, and every
-    /// method becomes an ordinary function whose symbol names the receiver, so
-    /// method lookup continues to see plain [`super::MethodInfo`] values and
-    /// calls keep going through the direct-call machinery.
+    /// One record may have an inherent template plus a template per trait. The
+    /// target mapping binds the impl parameters from the record's own concrete
+    /// arguments; each method then becomes an ordinary function whose symbol
+    /// names the receiver, so method lookup continues to see plain
+    /// [`super::MethodInfo`] values and calls stay direct calls.
     pub(super) fn instantiate_generic_impl(&mut self, record: TypeId) -> Result<(), Diagnostic> {
         if self.generic_impl_instances.contains(&record) {
             return Ok(());
@@ -310,38 +384,12 @@ impl Lowerer {
         let Some(key) = self.record_instance_key(record) else {
             return Ok(());
         };
-        let Some(template) = self.generic_impls.get(&key.name).cloned() else {
+        let Some(templates) = self.generic_impls.get(&key.name).cloned() else {
             return Ok(());
         };
-        for (parameter, argument) in template.params.iter().zip(&key.args) {
-            let kind_matches = matches!(
-                (&parameter.kind, argument),
-                (ast::GenericParamKind::Type, GenericArgKey::Type(_))
-                    | (ast::GenericParamKind::Const, GenericArgKey::Int(_))
-            );
-            if !kind_matches {
-                return Err(Diagnostic::new(
-                    parameter.span,
-                    format!(
-                        "generic impl for '{}' takes '{}' as a {} parameter, but the record's \
-                         argument is a {}; write the impl parameters before the target",
-                        key.name,
-                        parameter.name.text,
-                        match parameter.kind {
-                            ast::GenericParamKind::Type => "type",
-                            ast::GenericParamKind::Const => "const",
-                        },
-                        match argument {
-                            GenericArgKey::Type(_) => "type",
-                            GenericArgKey::Int(_) => "constant",
-                        }
-                    ),
-                ));
-            }
-        }
         if self.instantiation_depth >= MAX_INSTANTIATION_DEPTH {
             return Err(Diagnostic::new(
-                template.block.span,
+                templates[0].block.span,
                 format!(
                     "generic impl instantiation is nested more than \
                      {MAX_INSTANTIATION_DEPTH} levels deep"
@@ -352,34 +400,189 @@ impl Lowerer {
         // must find this record's impl already present instead of recursing.
         self.generic_impl_instances.insert(record);
         self.instantiation_depth += 1;
-        self.push_type_scope();
-        self.bind_generic_args(&template.params, &key.args);
-        let saved = self.impl_context.clone();
-        self.impl_context = Some((record, key.name.clone()));
         let result = (|| {
+            for template in &templates {
+                let env = self.bind_generic_impl_target(&key, template)?;
+                self.materialize_generic_impl(record, &key.name, template, env)?;
+            }
+            Ok(())
+        })();
+        self.instantiation_depth -= 1;
+        if result.is_err() {
+            self.generic_impl_instances.remove(&record);
+        }
+        result
+    }
+
+    /// Binds each impl parameter to the concrete receiver argument at the
+    /// target position that names it.
+    fn bind_generic_impl_target(
+        &self,
+        key: &InstanceKey,
+        template: &super::GenericImpl,
+    ) -> Result<Vec<GenericArgKey>, Diagnostic> {
+        let mut bindings: Vec<Option<GenericArgKey>> = vec![None; template.params.len()];
+        for (position, &parameter) in template.target_args.iter().enumerate() {
+            let Some(argument) = key.args.get(position).copied() else {
+                break;
+            };
+            let kind_matches = matches!(
+                (&template.params[parameter].kind, argument),
+                (ast::GenericParamKind::Type, GenericArgKey::Type(_))
+                    | (ast::GenericParamKind::Const, GenericArgKey::Int(_))
+            );
+            if !kind_matches {
+                return Err(Diagnostic::new(
+                    template.params[parameter].span,
+                    format!(
+                        "generic impl for '{}' takes '{}' as a {} parameter, but the record's \
+                         argument is a {}",
+                        key.name,
+                        template.params[parameter].name.text,
+                        match template.params[parameter].kind {
+                            ast::GenericParamKind::Type => "type",
+                            ast::GenericParamKind::Const => "const",
+                        },
+                        match argument {
+                            GenericArgKey::Type(_) => "type",
+                            GenericArgKey::Int(_) => "constant",
+                        }
+                    ),
+                ));
+            }
+            match bindings[parameter] {
+                None => bindings[parameter] = Some(argument),
+                Some(previous) if previous == argument => {}
+                Some(previous) => {
+                    return Err(Diagnostic::new(
+                        template.block.self_type.span,
+                        format!(
+                            "generic impl for '{}' binds parameter '{}' to both {} and {}; \
+                             the target repeats a parameter that this receiver cannot satisfy \
+                             consistently",
+                            key.name,
+                            template.params[parameter].name.text,
+                            self.generic_arg_text(previous),
+                            self.generic_arg_text(argument)
+                        ),
+                    ));
+                }
+            }
+        }
+        let mut env = Vec::with_capacity(bindings.len());
+        for (index, binding) in bindings.into_iter().enumerate() {
+            let Some(argument) = binding else {
+                return Err(Diagnostic::new(
+                    template.params[index].span,
+                    format!(
+                        "generic impl parameter '{}' is not bound by the target for '{}'",
+                        template.params[index].name.text, key.name
+                    ),
+                ));
+            };
+            env.push(argument);
+        }
+        Ok(env)
+    }
+
+    /// Collects one instantiated impl block under its concrete bindings.
+    fn materialize_generic_impl(
+        &mut self,
+        record: TypeId,
+        record_name: &str,
+        template: &super::GenericImpl,
+        args: Vec<GenericArgKey>,
+    ) -> Result<(), Diagnostic> {
+        self.push_type_scope();
+        self.bind_generic_args(&template.params, &args);
+        let saved = self.impl_context.clone();
+        self.impl_context = Some((record, record_name.to_string()));
+        let result = (|| {
+            let trait_info = match &template.block.trait_name {
+                Some(trait_name) => {
+                    let Some(info) = self.traits.get(&trait_name.text).cloned() else {
+                        return Err(Diagnostic::new(
+                            trait_name.span,
+                            format!("unknown trait '{}'", trait_name.text),
+                        ));
+                    };
+                    if template.block.trait_args.len() != info.params.len() {
+                        return Err(Diagnostic::new(
+                            template.block.span,
+                            format!(
+                                "trait '{}' expects {} type argument(s)",
+                                trait_name.text,
+                                info.params.len()
+                            ),
+                        ));
+                    }
+                    let trait_args = if info.params.is_empty() {
+                        Vec::new()
+                    } else {
+                        self.resolve_generic_args(
+                            &trait_name.text,
+                            &info.params,
+                            &template.block.trait_args,
+                        )?
+                    };
+                    if self.trait_impls.contains(&(
+                        trait_name.text.clone(),
+                        trait_args.clone(),
+                        record,
+                    )) {
+                        return Err(Diagnostic::new(
+                            template.block.span,
+                            format!(
+                                "trait '{}' is already implemented for this instantiation of \
+                                 '{}'",
+                                trait_name.text, record_name
+                            ),
+                        ));
+                    }
+                    Some((trait_name.clone(), info, trait_args))
+                }
+                None => None,
+            };
+            if let Some((_, info, trait_args)) = &trait_info {
+                self.bind_generic_args(&info.params, trait_args);
+            }
             let instance = super::ImplInstance {
                 params: template.params.clone(),
-                args: key.args.clone(),
+                args,
             };
             for method in &template.block.methods {
                 self.collect_function(
                     method,
                     Some(super::ImplTarget {
                         ty: record,
-                        name: key.name.clone(),
+                        name: record_name.to_string(),
                         instance: Some(instance.clone()),
                     }),
                 )?;
             }
-            Ok(())
+            if let Some((trait_name, info, _)) = &trait_info {
+                self.check_impl_method_names(&template.block, trait_name, info, record_name)?;
+                self.check_impl_signatures(&template.block, trait_name, info, record)?;
+            }
+            Ok(trait_info)
         })();
         self.impl_context = saved;
         self.pop_type_scope();
-        self.instantiation_depth -= 1;
-        if result.is_err() {
-            self.generic_impl_instances.remove(&record);
+        let trait_info = result?;
+        if let Some((trait_name, _, trait_args)) = trait_info {
+            self.register_from_conversion(&trait_name, &trait_args, record);
+            self.trait_impls
+                .insert((trait_name.text.clone(), trait_args, record));
         }
-        result
+        Ok(())
+    }
+
+    /// A readable spelling of one concrete generic argument for a diagnostic.
+    fn generic_arg_text(&self, argument: GenericArgKey) -> String {
+        match argument {
+            GenericArgKey::Type(ty) => format!("'{}'", self.concrete_type_name(ty)),
+            GenericArgKey::Int(value) => value.to_string(),
+        }
     }
 
     /// The instantiation key of a concrete record, when it came from a generic
@@ -430,20 +633,6 @@ impl Lowerer {
         arguments: &[(Span, TypeId)],
     ) -> Result<FunctionInstance, Diagnostic> {
         let template = self.generic_function_template(name)?;
-        if let Some(parameter) = template
-            .params
-            .iter()
-            .find(|parameter| parameter.kind == ast::GenericParamKind::Const)
-        {
-            return Err(Diagnostic::new(
-                name.span,
-                format!(
-                    "generic function '{}' needs explicit generic arguments: its const \
-                     parameter '{}' cannot be inferred from a value argument",
-                    name.text, parameter.name.text
-                ),
-            ));
-        }
         let Some(decl) = template.decl.as_ref() else {
             return Err(Diagnostic::new(
                 name.span,
@@ -454,13 +643,75 @@ impl Lowerer {
                 ),
             ));
         };
+        let subject = format!("generic function '{}'", name.text);
+        let concrete = self.infer_generic_arguments(
+            &subject,
+            name.span,
+            &template.params,
+            decl,
+            arguments,
+            0,
+        )?;
+        self.instantiate_concrete(name, &template, concrete)
+    }
+
+    /// Instantiates the generic method `name` of `record`, inferring its
+    /// arguments from the call's value arguments.
+    ///
+    /// `skip_params` is one for a receiver call (`value.convert(x)`), whose
+    /// receiver is lowered separately, and zero for a static call
+    /// (`Circle::convert(value, x)`), whose first argument is the receiver.
+    pub(super) fn infer_generic_method(
+        &mut self,
+        record: TypeId,
+        name: &ast::Name,
+        arguments: &[(Span, TypeId)],
+        skip_params: usize,
+    ) -> Result<FunctionInstance, Diagnostic> {
+        let template = self.generic_method_template(record, name)?;
+        let subject = format!("generic method '{}'", name.text);
+        let concrete = self.infer_generic_arguments(
+            &subject,
+            name.span,
+            &template.params,
+            &template.decl,
+            arguments,
+            skip_params,
+        )?;
+        self.instantiate_concrete_method(record, name, &template, concrete)
+    }
+
+    /// The shared inference pass for generic functions and generic methods.
+    ///
+    /// `skip_params` lets a receiver call ignore the receiver parameter that it
+    /// lowers separately, while the argument numbering in diagnostics still
+    /// follows the call's own argument list.
+    fn infer_generic_arguments(
+        &mut self,
+        subject: &str,
+        span: Span,
+        params: &[ast::GenericParam],
+        decl: &ast::FunctionDecl,
+        arguments: &[(Span, TypeId)],
+        skip_params: usize,
+    ) -> Result<Vec<GenericArgKey>, Diagnostic> {
+        if let Some(parameter) = params
+            .iter()
+            .find(|parameter| parameter.kind == ast::GenericParamKind::Const)
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "{subject} needs explicit generic arguments: its const parameter \
+                     '{}' cannot be inferred from a value argument",
+                    parameter.name.text
+                ),
+            ));
+        }
         let Some(function) = generic_declarator(&decl.declarator) else {
             return Err(Diagnostic::new(
                 decl.declarator.span,
-                format!(
-                    "generic function '{}' is not a generic function declaration",
-                    name.text
-                ),
+                format!("{subject} is not a generic declaration"),
             ));
         };
         let mut patterns = Vec::with_capacity(function.params.len());
@@ -473,10 +724,13 @@ impl Lowerer {
             {
                 continue;
             }
-            patterns.push(self.parameter_pattern(parameter, &template.params));
+            if index < skip_params {
+                continue;
+            }
+            patterns.push(self.parameter_pattern(parameter, params));
         }
-        let mut bindings: Vec<Option<(TypeId, usize)>> = vec![None; template.params.len()];
-        for (index, (span, ty)) in arguments.iter().enumerate() {
+        let mut bindings: Vec<Option<(TypeId, usize)>> = vec![None; params.len()];
+        for (index, (argument_span, ty)) in arguments.iter().enumerate() {
             let Some(pattern) = patterns.get(index) else {
                 break;
             };
@@ -485,12 +739,11 @@ impl Lowerer {
                 Ok(()) => {}
                 Err(UnifyError::Mismatch) => {
                     return Err(Diagnostic::new(
-                        *span,
+                        *argument_span,
                         format!(
-                            "cannot infer the generic arguments of '{}' from argument {}: \
-                             the argument does not match the parameter type; write \
+                            "cannot infer the generic arguments of {subject} from argument \
+                             {}: the argument does not match the parameter type; write \
                              explicit generic arguments",
-                            name.text,
                             index + 1
                         ),
                     ));
@@ -500,13 +753,12 @@ impl Lowerer {
                     first_argument,
                 }) => {
                     return Err(Diagnostic::new(
-                        *span,
+                        *argument_span,
                         format!(
-                            "cannot infer generic parameter '{}' of '{}': argument {} \
+                            "cannot infer generic parameter '{}' of {subject}: argument {} \
                              needs a different type than argument {}; write explicit \
                              generic arguments",
-                            template.params[parameter].name.text,
-                            name.text,
+                            params[parameter].name.text,
                             index + 1,
                             first_argument + 1
                         ),
@@ -514,21 +766,224 @@ impl Lowerer {
                 }
             }
         }
-        let mut concrete = Vec::with_capacity(template.params.len());
-        for (index, parameter) in template.params.iter().enumerate() {
+        let mut concrete = Vec::with_capacity(params.len());
+        for (index, parameter) in params.iter().enumerate() {
             let Some((ty, _)) = bindings[index] else {
                 return Err(Diagnostic::new(
-                    name.span,
+                    span,
                     format!(
-                        "cannot infer generic parameter '{}' of '{}' from the arguments; \
+                        "cannot infer generic parameter '{}' of {subject} from the arguments; \
                          write explicit generic arguments",
-                        parameter.name.text, name.text
+                        parameter.name.text
                     ),
                 ));
             };
             concrete.push(GenericArgKey::Type(ty));
         }
-        self.instantiate_concrete(name, &template, concrete)
+        Ok(concrete)
+    }
+
+    /// Instantiates the generic method `name` of `record` with written generic
+    /// arguments.
+    pub(super) fn instantiate_generic_method(
+        &mut self,
+        record: TypeId,
+        name: &ast::Name,
+        args: &[ast::GenericArg],
+    ) -> Result<FunctionInstance, Diagnostic> {
+        let template = self.generic_method_template(record, name)?;
+        if args.len() != template.params.len() {
+            return Err(Diagnostic::new(
+                name.span,
+                format!(
+                    "generic method '{}' expects {} argument(s), but {} were given",
+                    name.text,
+                    template.params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        // Arguments resolve in the caller's scope, never the template's.
+        let concrete =
+            self.resolve_generic_args(&format!("method '{}'", name.text), &template.params, args)?;
+        self.instantiate_concrete_method(record, name, &template, concrete)
+    }
+
+    /// The generic method template of one concrete record, materializing the
+    /// record's impl templates first.
+    pub(super) fn generic_method_template(
+        &mut self,
+        record: TypeId,
+        name: &ast::Name,
+    ) -> Result<GenericMethod, Diagnostic> {
+        self.instantiate_generic_impl(record)?;
+        if let Some(template) = self
+            .impls
+            .get(&record)
+            .and_then(|info| info.generic_methods.get(&name.text))
+        {
+            return Ok(template.clone());
+        }
+        if self
+            .impls
+            .get(&record)
+            .is_some_and(|info| info.methods.contains_key(&name.text))
+        {
+            return Err(Diagnostic::new(
+                name.span,
+                format!("method '{}' is not generic", name.text),
+            ));
+        }
+        Err(Diagnostic::new(
+            name.span,
+            format!("no method '{}' on this type", name.text),
+        ))
+    }
+
+    /// Whether `record` has a generic method called `name`, without producing a
+    /// diagnostic when it has no method at all.
+    pub(super) fn has_generic_method(
+        &mut self,
+        record: TypeId,
+        name: &str,
+    ) -> Result<bool, Diagnostic> {
+        self.instantiate_generic_impl(record)?;
+        Ok(self
+            .impls
+            .get(&record)
+            .is_some_and(|info| info.generic_methods.contains_key(name)))
+    }
+
+    /// The shared instantiation tail for one generic method.
+    fn instantiate_concrete_method(
+        &mut self,
+        record: TypeId,
+        name: &ast::Name,
+        template: &GenericMethod,
+        concrete: Vec<GenericArgKey>,
+    ) -> Result<FunctionInstance, Diagnostic> {
+        if self.instantiation_depth >= MAX_INSTANTIATION_DEPTH {
+            return Err(Diagnostic::new(
+                name.span,
+                format!(
+                    "generic method instantiation is nested more than \
+                     {MAX_INSTANTIATION_DEPTH} levels deep"
+                ),
+            ));
+        }
+        let (_, impl_name) = &template.impl_context;
+        let key = InstanceKey {
+            name: format!(
+                "method.{}::{}.{}",
+                record.index(),
+                Self::sanitize_ident(impl_name),
+                Self::sanitize_ident(&name.text)
+            ),
+            args: concrete,
+        };
+        if let Some(instance) = self.function_instances.get(&key) {
+            return Ok(instance.clone());
+        }
+        let mut decl = template.decl.clone();
+        for derived in &mut decl.declarator.derived {
+            if let ast::DerivedDeclarator::Function(function) = derived {
+                function.generics.clear();
+            }
+        }
+        let symbol = self.generic_method_symbol(record, impl_name, &name.text, &key.args);
+        let ty = self.resolve_generic_method_type(template, &key.args, &decl)?;
+        let instance = FunctionInstance {
+            symbol: symbol.clone(),
+            ty,
+        };
+        // Cache before the body is lowered, so a recursive generic method call
+        // finds its own instance.
+        self.function_instances
+            .insert(key.clone(), instance.clone());
+        let mut env = template.env.clone();
+        let method_env = self.generic_env(&template.params, &key.args);
+        env.types.extend(method_env.types);
+        env.consts.extend(method_env.consts);
+        self.pending.push(PendingFunction {
+            decl,
+            symbol,
+            ty,
+            impl_context: Some(template.impl_context.clone()),
+            env: Some(env),
+            internal: true,
+        });
+        Ok(instance)
+    }
+
+    /// Resolves one generic method's signature with the receiver bindings and
+    /// the method's own arguments in scope.
+    fn resolve_generic_method_type(
+        &mut self,
+        template: &GenericMethod,
+        method_args: &[GenericArgKey],
+        decl: &ast::FunctionDecl,
+    ) -> Result<TypeId, Diagnostic> {
+        self.instantiation_depth += 1;
+        self.push_type_scope();
+        let saved = self.impl_context.clone();
+        self.impl_context = Some(template.impl_context.clone());
+        let resolved = (|| {
+            self.bind_generic_env(&template.env);
+            self.bind_generic_args(&template.params, method_args);
+            let ResolvedSpecs { ty, qualifiers } = self.resolve_specs(&decl.specs)?;
+            let resolved = self.resolve_declarator(ty, qualifiers, &decl.declarator)?;
+            Ok::<TypeId, Diagnostic>(resolved.ty)
+        })();
+        self.impl_context = saved;
+        self.pop_type_scope();
+        self.instantiation_depth -= 1;
+        let ty = resolved?;
+        if self.types.is_function(ty) {
+            Ok(ty)
+        } else {
+            Err(Diagnostic::new(
+                decl.span,
+                "generic method declaration is not a function",
+            ))
+        }
+    }
+
+    /// Installs one already-concrete receiver environment into the innermost
+    /// type scope.
+    fn bind_generic_env(&mut self, env: &GenericEnv) {
+        let scope = self.type_scopes.last_mut().expect("type scope stack");
+        for (name, ty) in &env.types {
+            scope.typedefs.insert(name.clone(), *ty);
+        }
+        for (name, binding) in &env.consts {
+            scope.consts.insert(name.clone(), *binding);
+        }
+    }
+
+    /// Deterministic internal symbol for one generic method instance.
+    fn generic_method_symbol(
+        &self,
+        record: TypeId,
+        impl_name: &str,
+        method: &str,
+        args: &[GenericArgKey],
+    ) -> String {
+        let mut mangled = format!(
+            "generic.method.{}.{}.{}",
+            record.index(),
+            Self::sanitize_ident(impl_name),
+            Self::sanitize_ident(method)
+        );
+        for arg in args {
+            mangled.push('.');
+            match arg {
+                GenericArgKey::Type(ty) => mangled.push_str(&ty.index().to_string()),
+                GenericArgKey::Int(value) => {
+                    mangled.push_str(&format!("n{:016x}", *value as u64));
+                }
+            }
+        }
+        self.internal_symbol(&mangled)
     }
 
     /// The template a call names, or the diagnostic for a name that is not one.
@@ -555,7 +1010,7 @@ impl Lowerer {
     /// implementation answers the check. Only a bound that writes no type
     /// arguments is supported, matching the AST's `Vec<Name>` bounds.
     fn check_generic_bounds(
-        &self,
+        &mut self,
         function: &str,
         span: Span,
         params: &[ast::GenericParam],
@@ -566,7 +1021,7 @@ impl Lowerer {
                 continue;
             };
             for bound in &parameter.bounds {
-                let Some(info) = self.traits.get(&bound.text) else {
+                let Some(info) = self.traits.get(&bound.text).cloned() else {
                     return Err(Diagnostic::new(
                         bound.span,
                         format!(
@@ -586,13 +1041,14 @@ impl Lowerer {
                         ),
                     ));
                 }
-                let implemented = self.impls.get(ty).is_some_and(|implementation| {
-                    self.trait_impls.contains(&(
-                        bound.text.clone(),
-                        Vec::new(),
-                        implementation.name.clone(),
-                    ))
-                });
+                // The bound may be satisfied by a generic trait impl that this
+                // concrete type argument has not needed until now.
+                if !self.impls.contains_key(ty) {
+                    self.instantiate_generic_impl(*ty)?;
+                }
+                let implemented = self
+                    .trait_impls
+                    .contains(&(bound.text.clone(), Vec::new(), *ty));
                 if !implemented {
                     return Err(Diagnostic::new(
                         span,
@@ -1111,21 +1567,65 @@ fn generic_impl_target(type_name: &ast::TypeName) -> Option<&ast::GenericSpec> {
     }
 }
 
-/// Whether one target argument is exactly the impl parameter it binds.
-fn argument_names_parameter(arg: &ast::GenericArg, parameter: &ast::GenericParam) -> bool {
-    match (&arg.kind, &parameter.kind) {
-        (ast::GenericArgKind::Type(type_name), ast::GenericParamKind::Type) => {
-            type_name.declarator.is_none()
-                && matches!(
-                    type_name.specs.type_specs.as_slice(),
-                    [ast::TypeSpecifier::TypedefName(name)]
-                        if name.text == parameter.name.text
-                )
+/// The impl parameter index one target argument names, when it is a bare
+/// parameter. Anything else needs unification against the receiver, which this
+/// monomorphizer does not perform.
+fn target_argument_parameter(
+    argument: &ast::GenericArg,
+    params: &[ast::GenericParam],
+) -> Option<usize> {
+    let name = match &argument.kind {
+        ast::GenericArgKind::Type(type_name) => {
+            if type_name.declarator.is_some() {
+                return None;
+            }
+            let [ast::TypeSpecifier::TypedefName(name)] = type_name.specs.type_specs.as_slice()
+            else {
+                return None;
+            };
+            (name, ast::GenericParamKind::Type)
         }
-        (ast::GenericArgKind::Const(ast::Expr::Name(name)), ast::GenericParamKind::Const) => {
-            name.text == parameter.name.text
-        }
-        _ => false,
+        ast::GenericArgKind::Const(ast::Expr::Name(name)) => (name, ast::GenericParamKind::Const),
+        ast::GenericArgKind::Const(_) => return None,
+    };
+    params
+        .iter()
+        .position(|parameter| parameter.kind == name.1 && parameter.name.text == name.0.text)
+}
+
+/// A built-in type keyword for a diagnostic.
+fn builtin_type_text(builtin: &ast::BuiltinType) -> &'static str {
+    match builtin {
+        ast::BuiltinType::Void => "void",
+        ast::BuiltinType::Bool => "_Bool",
+        ast::BuiltinType::Char => "char",
+        ast::BuiltinType::Short => "short",
+        ast::BuiltinType::Int => "int",
+        ast::BuiltinType::Long => "long",
+        ast::BuiltinType::Float => "float",
+        ast::BuiltinType::Double => "double",
+        ast::BuiltinType::Signed => "signed",
+        ast::BuiltinType::Unsigned => "unsigned",
+    }
+}
+
+/// A short spelling of an unsupported target argument for a diagnostic.
+fn target_argument_text(argument: &ast::GenericArg) -> String {
+    match &argument.kind {
+        ast::GenericArgKind::Type(type_name) => match type_name.specs.type_specs.as_slice() {
+            [ast::TypeSpecifier::TypedefName(name)] if type_name.declarator.is_none() => {
+                name.text.clone()
+            }
+            [ast::TypeSpecifier::Generic(generic)] if type_name.declarator.is_none() => {
+                generic.name.text.clone()
+            }
+            [ast::TypeSpecifier::Builtin(builtin)] if type_name.declarator.is_none() => {
+                builtin_type_text(builtin).to_string()
+            }
+            _ => "a type expression".to_string(),
+        },
+        ast::GenericArgKind::Const(ast::Expr::Name(name)) => name.text.clone(),
+        ast::GenericArgKind::Const(_) => "a constant expression".to_string(),
     }
 }
 

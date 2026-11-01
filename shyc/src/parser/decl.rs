@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use crate::ast::{
     BuiltinType, DeclSpecs, Declaration, Declarator, DerivedDeclarator, FunctionDecl,
     GenericArgKind, GenericParam, GenericParamKind, ImplBlock, InitDeclarator, Item, StorageClass,
-    TraitDecl, TraitMethod, TypeName, TypeSpecifier,
+    TraitDecl, TraitMethod, TypeName, TypeSpecifier, UseDecl,
 };
 use crate::lexer::{Token, TokenKind};
 use crate::source::{Diagnostic, Span};
@@ -40,8 +40,11 @@ impl Parser {
     // -- top-level items --------------------------------------------------
 
     /// Parses one file-scope item: a declaration, a function definition, an
-    /// `impl` block, or a `trait` declaration.
+    /// `impl` block, a `trait` declaration, or a `use` import.
     pub(crate) fn item(&mut self) -> Result<Item, Diagnostic> {
+        if self.at_use_declaration() {
+            return Ok(Item::Use(self.use_declaration()?));
+        }
         if self.at_ident("trait") {
             return Ok(Item::Trait(self.trait_decl()?));
         }
@@ -103,6 +106,51 @@ impl Parser {
             specs,
             declarators,
         }))
+    }
+
+    /// Whether the cursor starts a file-scope `use` import.
+    ///
+    /// `use` is a soft keyword, like `let`: a visible typedef with that
+    /// spelling keeps its ordinary C meaning, so old C code still parses.
+    fn at_use_declaration(&self) -> bool {
+        self.at_ident("use") && !self.is_type_name("use")
+    }
+
+    /// Parses `use path::Name;` and returns the import.
+    ///
+    /// The supported syntax is deliberately small: a plain path of at least two
+    /// identifiers. Brace lists, globs, `as` renames, and a leading `::` get a
+    /// diagnostic instead of being parsed as a declaration. Resolution of the
+    /// path is semantic analysis' job.
+    fn use_declaration(&mut self) -> Result<UseDecl, Diagnostic> {
+        let keyword = self.bump().span;
+        let mut path = vec![self.expect_ident()?];
+        while self.eat_punct("::") {
+            if self.at_punct("{") || self.at_punct("*") {
+                return Err(Diagnostic::new(
+                    self.here(),
+                    "only `use path::name;` is supported; `{...}` and `*` imports are not",
+                ));
+            }
+            path.push(self.expect_ident()?);
+        }
+        if self.at_ident("as") {
+            return Err(Diagnostic::new(
+                self.here(),
+                "renaming an import with `as` is not supported; the last path segment is the imported name",
+            ));
+        }
+        if path.len() < 2 {
+            return Err(Diagnostic::new(
+                keyword,
+                "an import needs a path with at least two segments, as in `use core::Option;`",
+            ));
+        }
+        let semicolon = self.expect_punct(";")?;
+        Ok(UseDecl {
+            span: keyword.join(semicolon),
+            path,
+        })
     }
 
     /// A declaration used inside a block or as a `for` initializer.
@@ -403,8 +451,8 @@ impl Parser {
     /// Only an argument that no type or value in scope can name becomes a type
     /// parameter, so `impl Box<int>` and `impl Box<Alias>` keep their concrete
     /// meaning and are resolved as ordinary type uses. A header that mixes
-    /// parameters with concrete arguments still reaches the lowering check that
-    /// asks for the parameters in order.
+    /// parameters with concrete arguments still reaches lowering, which rejects
+    /// a target argument that is not a bare impl parameter.
     fn implicit_impl_params(&mut self) -> Result<Vec<GenericParam>, Diagnostic> {
         if !matches!(&self.peek().kind, TokenKind::Ident(_)) || !self.at_punct_ahead(1, "<") {
             return Ok(Vec::new());
@@ -522,10 +570,12 @@ impl Parser {
             }
             let semicolon = self.expect_punct(";")?;
             self.pop_scope();
+            let generics = method_generics(&declarator);
             return Ok(TraitMethod {
                 span: start.join(semicolon),
                 specs,
                 declarator,
+                generics,
             });
         }
 
@@ -546,6 +596,7 @@ impl Parser {
         let semicolon = self.expect_punct(";")?;
         Ok(TraitMethod {
             span: specs.span.join(semicolon),
+            generics: method_generics(&declarator),
             specs,
             declarator,
         })
@@ -590,6 +641,12 @@ impl Parser {
     }
 
     fn prescan_item(&mut self) -> Result<(), Diagnostic> {
+        if self.at_use_declaration() {
+            // An import declares no type, tag, or trait, so the pre-scan only
+            // has to step over it.
+            self.skip_to_semicolon();
+            return Ok(());
+        }
         if self.at_ident("trait") {
             self.bump();
             let name = self.expect_ident()?;
@@ -819,4 +876,16 @@ fn bare_type_name(type_name: &TypeName) -> Option<&crate::ast::Name> {
         [TypeSpecifier::TypedefName(name)] => Some(name),
         _ => None,
     }
+}
+
+/// The method-local generic parameters written on a trait method declarator.
+fn method_generics(declarator: &Declarator) -> Vec<GenericParam> {
+    declarator
+        .derived
+        .iter()
+        .find_map(|derived| match derived {
+            DerivedDeclarator::Function(function) => Some(function.generics.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
