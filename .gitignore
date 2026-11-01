@@ -11,3 +11,5 @@ projects/os/tasktree*.json
 vscode-shyc/node_modules/
 vscode-shyc/out/
 vscode-shyc/*.vsix
+
+vscode-shyc/server/bin/

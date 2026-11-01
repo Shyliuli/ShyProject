@@ -1,5 +1,11 @@
-node_modules/
 server/target/
+server/src/
+server/Cargo.toml
+server/Cargo.lock
 src/
 tsconfig.json
+package-lock.json
 *.vsix
+node_modules/@types/
+node_modules/typescript/
+node_modules/.bin/

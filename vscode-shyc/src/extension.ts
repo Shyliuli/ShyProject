@@ -131,8 +131,9 @@ function serverCommand(context: vscode.ExtensionContext): {
     );
   }
   candidates.push(
-    path.join(context.extensionPath, "server", "target", "debug", `shyc-lsp${suffix}`),
     path.join(context.extensionPath, "server", "target", "release", `shyc-lsp${suffix}`),
+    path.join(context.extensionPath, "server", "target", "debug", `shyc-lsp${suffix}`),
+    path.join(context.extensionPath, "server", "bin", `shyc-lsp${suffix}`),
   );
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {

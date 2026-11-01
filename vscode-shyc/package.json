@@ -176,7 +176,8 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "build:server": "cargo build --manifest-path server/Cargo.toml",
-    "build": "npm run build:server && npm run compile"
+    "build": "npm run build:server && npm run compile",
+    "bundle:server": "cargo build --release --manifest-path server/Cargo.toml && mkdir -p server/bin && cp server/target/release/shyc-lsp server/bin/shyc-lsp"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
