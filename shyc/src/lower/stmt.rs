@@ -313,6 +313,15 @@ impl FnLower<'_> {
     ) -> Result<(), Diagnostic> {
         let value = self.lower_expr(condition)?;
         let scrutinee = value.ty;
+        // A niche Result holds the error code, not the `Err` variant tag, so
+        // its cases would only match by accident.
+        if self.l.types.is_niche_enum(scrutinee) {
+            return Err(Diagnostic::new(
+                span,
+                "a `Result<void, E>` niche stores the error code rather than the `Err` tag; \
+                 switch on `result.tag` and the error enumerators instead",
+            ));
+        }
         // A payload enum is an aggregate. Switch on its tag at offset 0; every
         // other scrutinee keeps the ordinary integer rvalue path.
         let (operand, ty) = if self.l.types.is_payload_enum(scrutinee) {

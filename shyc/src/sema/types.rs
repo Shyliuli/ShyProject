@@ -246,11 +246,17 @@ pub enum RecordKind {
 /// while an explicit `enum(type)` stores the chosen type. Enum identity is
 /// still distinct from the underlying type.
 ///
-/// `variants` is empty for a plain (payload-free) enum. A payload enum stores
-/// its tag in the first `size_of(underlying)` bytes and every payload at
-/// `payload_offset`, overlapping in one union of size `payload_size`. That is
-/// the transparent `tag + max-payload` layout: no hidden discriminant, no
-/// pointer indirection.
+/// A plain payload-free enum is an integer and its `variants` only record the
+/// enumerator values. A payload enum stores its tag in the first
+/// `size_of(underlying)` bytes and every payload at `payload_offset`,
+/// overlapping in one union of size `payload_size`. That is the transparent
+/// `tag + max-payload` layout: no hidden discriminant, no pointer indirection.
+///
+/// `niche` marks the one exception: an instantiated `Result<void, E>` whose
+/// `Ok` is payload-free and whose `Err(E)` holds a payload-free enum with no
+/// zero enumerator. It is represented as `E`'s integer, `0` meaning `Ok`, so
+/// `underlying` is `E`'s underlying type rather than the enum's own. The tag
+/// and payload offsets describe the same byte, at offset 0.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumInfo {
     pub underlying: TypeId,
@@ -260,12 +266,16 @@ pub struct EnumInfo {
     pub payload_offset: u32,
     pub payload_size: u32,
     pub payload_align: u32,
+    /// Whether this payload enum uses the `Result<void, E>` zero-value niche.
+    pub niche: bool,
 }
 
-/// One payload enum variant.
+/// One enum variant.
 ///
-/// `value` is the tag written to the object; `payload` is the type stored at
-/// [`EnumInfo::payload_offset`] when the variant is active.
+/// `value` is the enumerator's integer value; for a payload enum it is the tag
+/// stored at offset 0. `payload` is the type stored at
+/// [`EnumInfo::payload_offset`] when the variant is active, and is `None` for a
+/// payload-free variant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumVariant {
     pub name: String,
@@ -505,6 +515,7 @@ impl TypeStore {
             payload_offset: 0,
             payload_size: 0,
             payload_align: 1,
+            niche: false,
         });
         Ok(push_type(
             &mut self.types,
@@ -527,6 +538,7 @@ impl TypeStore {
             payload_offset: 0,
             payload_size: 0,
             payload_align: 1,
+            niche: false,
         });
         Ok(push_type(
             &mut self.types,
@@ -543,10 +555,17 @@ impl TypeStore {
     /// starts at the same offset, aligned for the widest one, and the object is
     /// rounded up to the larger of the tag and payload alignments. A
     /// payload-free variant contributes no bytes to the union.
+    ///
+    /// With `allow_niche`, an instantiated `Result<void, E>` whose `Ok` is
+    /// payload-free and whose error is a zero-free payload-free enum is laid
+    /// out as `E`'s integer instead: `0` is `Ok` and any other value is the
+    /// error. Hand-written enums never take this layout, so the C header and
+    /// the ordinary tagged representation keep their existing shape.
     pub fn complete_payload_enum(
         &mut self,
         ty: TypeId,
         variants: Vec<EnumVariant>,
+        allow_niche: bool,
     ) -> Result<Layout, TypeError> {
         let TypeKind::PayloadEnum(id) = *self.kind(ty) else {
             return Err(TypeError::NotAnEnum);
@@ -555,6 +574,25 @@ impl TypeStore {
             return Err(TypeError::EnumAlreadyComplete);
         }
         let underlying = self.enums[id.index()].underlying;
+
+        if allow_niche && let Some(error) = self.niche_result_error(&variants) {
+            let size = self.size_of(error)?;
+            let align = self.align_of(error)?;
+            let underlying = self.enum_underlying(error).ok_or(TypeError::NotAnEnum)?;
+            self.enums[id.index()] = EnumInfo {
+                underlying,
+                variants,
+                payload_offset: 0,
+                payload_size: size,
+                payload_align: align,
+                niche: true,
+            };
+            let enum_type = &mut self.types[ty.index()];
+            enum_type.size = Some(size);
+            enum_type.align = Some(align);
+            return Ok(Layout { size, align });
+        }
+
         let tag_size = self.size_of(underlying)?;
         let tag_align = self.align_of(underlying)?;
 
@@ -578,11 +616,53 @@ impl TypeStore {
             payload_offset,
             payload_size,
             payload_align,
+            niche: false,
         };
         let enum_type = &mut self.types[ty.index()];
         enum_type.size = Some(size);
         enum_type.align = Some(align);
         Ok(Layout { size, align })
+    }
+
+    /// The error enum of a `Result<void, E>` that can use the zero-value
+    /// niche: `Ok` is payload-free with tag 0, `Err` carries a plain enum `E`,
+    /// and no enumerator of `E` is 0.
+    fn niche_result_error(&self, variants: &[EnumVariant]) -> Option<TypeId> {
+        if variants.len() != 2 {
+            return None;
+        }
+        let ok = variants.iter().find(|variant| variant.name == "Ok")?;
+        if ok.payload.is_some() || ok.value != 0 {
+            return None;
+        }
+        let error = variants.iter().find(|variant| variant.name == "Err")?;
+        let error_ty = error.payload?;
+        let TypeKind::Enum(id) = *self.kind(error_ty) else {
+            return None;
+        };
+        if self.enums[id.index()]
+            .variants
+            .iter()
+            .any(|variant| variant.value == 0)
+        {
+            return None;
+        }
+        Some(error_ty)
+    }
+
+    /// Records the enumerators of a plain enum. The representation stays the
+    /// underlying integer; the variants are kept so the `Result<void, E>`
+    /// niche can reject an error enum that contains 0.
+    pub fn set_enum_variants(
+        &mut self,
+        ty: TypeId,
+        variants: Vec<EnumVariant>,
+    ) -> Result<(), TypeError> {
+        let TypeKind::Enum(id) = *self.kind(ty) else {
+            return Err(TypeError::NotAnEnum);
+        };
+        self.enums[id.index()].variants = variants;
+        Ok(())
     }
 
     pub fn record_info(&self, ty: TypeId) -> Option<&RecordInfo> {
@@ -627,10 +707,12 @@ impl TypeStore {
     }
 
     pub fn is_integer(&self, ty: TypeId) -> bool {
-        matches!(
-            self.kind(ty),
-            TypeKind::Bool | TypeKind::Integer { .. } | TypeKind::Enum(_)
-        )
+        match self.kind(ty) {
+            TypeKind::Bool | TypeKind::Integer { .. } | TypeKind::Enum(_) => true,
+            // A `Result<void, E>` niche is the error enum's integer.
+            TypeKind::PayloadEnum(id) => self.enums[id.index()].niche,
+            _ => false,
+        }
     }
 
     pub fn is_floating(&self, ty: TypeId) -> bool {
@@ -661,12 +743,22 @@ impl TypeStore {
         matches!(self.kind(ty), TypeKind::PayloadEnum(_))
     }
 
+    /// Whether this payload enum is the integer `Result<void, E>` niche.
+    pub fn is_niche_enum(&self, ty: TypeId) -> bool {
+        match self.kind(ty) {
+            TypeKind::PayloadEnum(id) => self.enums[id.index()].niche,
+            _ => false,
+        }
+    }
+
     pub fn is_scalar(&self, ty: TypeId) -> bool {
         self.is_arithmetic(ty) || self.is_pointer(ty)
     }
 
     pub fn is_aggregate(&self, ty: TypeId) -> bool {
-        self.is_array(ty) || self.is_record(ty) || self.is_payload_enum(ty)
+        self.is_array(ty)
+            || self.is_record(ty)
+            || (self.is_payload_enum(ty) && !self.is_niche_enum(ty))
     }
 
     /// A type is complete when its size is known. `void`, function types, and

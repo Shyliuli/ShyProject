@@ -78,11 +78,12 @@ hidden runtime operation.
 
 ## Result, Option, and `?`
 
-`Result<T, E>` and `Option<T>` are library types. `Result<void, E>` may use an
+`Result<T, E>` and `Option<T>` are library types. `Result<void, E>` uses an
 integer niche when `E` is a payload-free enum that does not contain zero; zero
 then represents success. If the condition is not met, the compiler uses the
-ordinary transparent tagged representation and may issue a configurable
-warning.
+ordinary transparent tagged representation. The niche is the error enum's
+integer: `switch` on it is not available because its cases would compare the
+`Err` tag with an error code, so switch on the error value instead.
 
 `?` propagates only when the error types are equal or a later `From<Source>`
 trait implementation explicitly converts the source error to the destination

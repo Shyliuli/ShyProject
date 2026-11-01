@@ -733,7 +733,7 @@ impl Lowerer {
                 Diagnostic::new(template.spec.span, format!("invalid enum layout: {error}"))
             })?;
             self.enum_instances.insert(key.clone(), ty);
-            self.define_enum(ty, underlying, enumerators, template.spec.span, false)?;
+            self.define_enum(ty, underlying, enumerators, template.spec.span, true)?;
             Ok::<TypeId, Diagnostic>(ty)
         })();
         self.pop_type_scope();
@@ -882,26 +882,28 @@ impl Lowerer {
             }
             self.declare_tag(&tag.text, ty, spec.span)?;
         }
-        self.define_enum(ty, underlying, enumerators, spec.span, true)
+        self.define_enum(ty, underlying, enumerators, spec.span, false)
     }
 
     /// Defines an enum's variants and constants.
     ///
-    /// `constants` controls whether payload-free variants also become
-    /// file-scope constants under their bare name. A plain enum and a direct
-    /// payload enum keep that behaviour; an instantiated generic enum does
-    /// not, because two instances would otherwise collide on the same variant
-    /// names. Every generic variant is reached as `Name<args>::Variant`.
+    /// `instantiated` marks a generic enum instance. Such an instance
+    /// registers no file-scope constants under bare variant names, because two
+    /// instances would otherwise collide; every generic variant is reached as
+    /// `Name<args>::Variant`. It is also the only case where a `T` bound to
+    /// `void` makes a variant payload-free, and the only case that may take the
+    /// `Result<void, E>` zero-value niche layout.
     fn define_enum(
         &mut self,
         ty: TypeId,
         underlying: TypeId,
         enumerators: &[ast::Enumerator],
         span: Span,
-        constants: bool,
+        instantiated: bool,
     ) -> Result<TypeId, Diagnostic> {
         let (min, max, bits, unsigned) = self.enum_value_range(underlying);
         let payload_enum = self.types.is_payload_enum(ty);
+        let register_constants = !instantiated;
         let mut variants = Vec::new();
         let mut next: i128 = 0;
         for enumerator in enumerators {
@@ -938,38 +940,46 @@ impl Lowerer {
             let payload = match &enumerator.payload {
                 Some(type_name) => {
                     let payload = self.resolve_type_name(type_name)?;
-                    if self.types.is_void(payload)
-                        || self.types.is_function(payload)
-                        || !self.types.is_complete(payload)
-                    {
+                    // `Result<void, E>` comes from binding `T` to `void`; the
+                    // variant then has no payload at all. Only an instantiated
+                    // generic may spell this, so a hand-written `Ok(void)`
+                    // stays an error.
+                    if self.types.is_void(payload) {
+                        if !instantiated {
+                            return Err(Diagnostic::new(
+                                type_name.span,
+                                "a variant payload must be a complete object type",
+                            ));
+                        }
+                        None
+                    } else if self.types.is_function(payload) || !self.types.is_complete(payload) {
                         return Err(Diagnostic::new(
                             type_name.span,
                             "a variant payload must be a complete object type",
                         ));
+                    } else {
+                        Some(payload)
                     }
-                    Some(payload)
                 }
                 None => None,
             };
-            if payload_enum {
-                if variants
-                    .iter()
-                    .any(|variant: &EnumVariant| variant.name == enumerator.name.text)
-                {
-                    return Err(Diagnostic::new(
-                        enumerator.name.span,
-                        format!("duplicate variant '{}'", enumerator.name.text),
-                    ));
-                }
-                variants.push(EnumVariant {
-                    name: enumerator.name.text.clone(),
-                    value: value as i64,
-                    payload,
-                });
+            if variants
+                .iter()
+                .any(|variant: &EnumVariant| variant.name == enumerator.name.text)
+            {
+                return Err(Diagnostic::new(
+                    enumerator.name.span,
+                    format!("duplicate variant '{}'", enumerator.name.text),
+                ));
             }
+            variants.push(EnumVariant {
+                name: enumerator.name.text.clone(),
+                value: value as i64,
+                payload,
+            });
             // A payload variant has no integer value of its own; it is only
             // constructible as `Enum::Variant(value)`.
-            if payload.is_some() || !constants {
+            if payload.is_some() || !register_constants {
                 continue;
             }
             if self.enum_consts.contains_key(&enumerator.name.text) {
@@ -987,10 +997,14 @@ impl Lowerer {
         }
         if payload_enum {
             self.types
-                .complete_payload_enum(ty, variants)
+                .complete_payload_enum(ty, variants, instantiated)
                 .map_err(|error| {
                     Diagnostic::new(span, format!("invalid payload enum layout: {error}"))
                 })?;
+        } else {
+            self.types
+                .set_enum_variants(ty, variants)
+                .map_err(|error| Diagnostic::new(span, format!("invalid enum layout: {error}")))?;
         }
         Ok(ty)
     }
@@ -1075,6 +1089,10 @@ impl Lowerer {
             TypeKind::Bool => true,
             TypeKind::Integer { unsigned, .. } => *unsigned,
             TypeKind::Enum(_) => self
+                .types
+                .enum_underlying(ty)
+                .is_some_and(|underlying| self.is_unsigned(underlying)),
+            TypeKind::PayloadEnum(_) if self.types.is_niche_enum(ty) => self
                 .types
                 .enum_underlying(ty)
                 .is_some_and(|underlying| self.is_unsigned(underlying)),

@@ -190,6 +190,27 @@ are not supported. `--emit=c-header` prints the equivalent `struct` with a
 union classification, so a float-only payload does not necessarily use the
 same registers as an equivalent C struct.
 
+`Option<T>` and `Result<T, E>` are ordinary payload enums that use the variant
+names `None`/`Some` and `Ok`/`Err`, so postfix `?` is structural: it copies the
+success payload out and returns the enclosing function's failure variant.
+`?` accepts the same error type, or a differing one that has an
+`impl From<Source> for Target`; there is no implicit error-code guess. A
+payload-free `Ok` produces no value, so `?` on it is only usable as a
+statement.
+
+An instantiated `Result<void, E>` whose `E` is a payload-free enum with no
+zero enumerator takes the zero-value niche instead of the tagged aggregate: the
+object is `E`'s integer, `0` means `Ok`, and any other value is the error.
+`Ok` must be the first enumerator so its tag is `0`. The niche is an integer
+(`.tag` reads that value, and arithmetic and integer conversion treat it as
+`E`'s underlying type), has `E`'s size and alignment, and crosses both backends
+as an integer. An instance whose `E` contains `0`, and a hand-written
+`enum { Ok, Err(E) }`, keep the ordinary tagged representation. `switch` on a
+niche Result is diagnosed because its cases would compare the `Err` tag with an
+error code; switch on `result.tag` and the error enumerators instead. Global
+initialisers keep the payload-enum restriction, and `?` needs the same error
+enum because `impl` targets must be records, not enums.
+
 Floating point on the Shy target needs the runtime object linked in; build it
 once with the existing toolchain:
 

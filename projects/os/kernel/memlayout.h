@@ -29,7 +29,9 @@
 #define USER_ARG_ADDR 0x0002f000
 #define PHYSTOP 0x00400000
 #else
-#define KERN_HEAP_START 0x00100000
+// The kernel heap must start above the linked kernel image, which includes
+// the embedded user images. All-ShyC builds are larger than 1 MiB.
+#define KERN_HEAP_START 0x00200000
 #define KERN_HEAP_END 0x01000000
 #define SCHED_STACK_TOP 0x07f00000
 #define USER_SEG_START 0x01000000

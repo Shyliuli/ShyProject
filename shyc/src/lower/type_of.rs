@@ -45,6 +45,8 @@ impl TryFamily {
 /// `Some(payload)` is an Option, and `Err(error)` plus `Ok(payload)` is a
 /// Result. A generic instance such as `Option<int>` is an ordinary concrete
 /// payload enum by the time it reaches here, so both families work the same.
+/// A payload-free `Ok` is the `Result<void, E>` form; it may be the zero-value
+/// niche or the ordinary tagged aggregate.
 #[derive(Clone, Copy)]
 pub(super) struct TryShape {
     pub family: TryFamily,
@@ -168,9 +170,11 @@ impl Lowerer {
                         "`?` needs an Option (`None`/`Some`) or Result (`Err`/`Ok`) payload enum",
                     )
                 })?;
-                shape.success.ok_or_else(|| {
-                    Diagnostic::new(*span, "`?` needs a success payload; this Result has none")
-                })
+                // A payload-free `Ok` is `Result<void, E>`; `?` then yields
+                // no value, so it is only usable as a statement.
+                Ok(shape
+                    .success
+                    .unwrap_or_else(|| self.types.builtin(Builtin::Void)))
             }
             ast::Expr::Binary {
                 op,

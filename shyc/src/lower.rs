@@ -385,6 +385,14 @@ impl Lowerer {
                     .unwrap_or_else(|| self.types.builtin(crate::sema::types::Builtin::Int));
                 self.ir_type(underlying)
             }
+            // The `Result<void, E>` niche is `E`'s integer, so it is one too.
+            TypeKind::PayloadEnum(_) if self.types.is_niche_enum(ty) => {
+                let underlying = self
+                    .types
+                    .enum_underlying(ty)
+                    .unwrap_or_else(|| self.types.builtin(crate::sema::types::Builtin::Int));
+                self.ir_type(underlying)
+            }
             TypeKind::Float32 => ir::Type::F32,
             TypeKind::Float64 => ir::Type::F64,
             TypeKind::Pointer { .. } | TypeKind::Function { .. } => ir::Type::Ptr,

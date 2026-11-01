@@ -1799,7 +1799,11 @@ impl FnLower<'_> {
     ) -> Result<ir::Address, Diagnostic> {
         match value.kind {
             ExprKind::Place(address) => Ok(address),
-            ExprKind::Value(operand) if self.l.types.is_aggregate(value.ty) => {
+            // A niche `Result<void, E>` is a scalar value, but `?` still reads
+            // it through an address, so it spills like an aggregate.
+            ExprKind::Value(operand)
+                if self.l.types.is_aggregate(value.ty) || self.l.types.is_niche_enum(value.ty) =>
+            {
                 let slot = self.temp_slot(value.ty, "");
                 self.store_value(ir::Address::slot(slot), operand, value.ty, Qualifiers::NONE);
                 Ok(ir::Address::slot(slot))

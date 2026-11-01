@@ -384,7 +384,8 @@ impl TypeStore {
 
     /// C integer promotion. `_Bool`, `char`, and `short` become `int`, as
     /// does an enum whose underlying type has a rank below `int`. Wider
-    /// types, including wider enums, are unchanged.
+    /// types, including wider enums, are unchanged. A `Result<void, E>` niche
+    /// promotes as `E`'s underlying integer.
     pub fn integer_promotion(&self, ty: TypeId) -> Result<TypeId, TypeError> {
         match self.kind(ty) {
             TypeKind::Bool => Ok(self.builtin(Builtin::Int)),
@@ -396,6 +397,9 @@ impl TypeStore {
                     }
                     _ => Ok(underlying),
                 }
+            }
+            TypeKind::PayloadEnum(id) if self.enums[id.index()].niche => {
+                self.integer_promotion(self.enums[id.index()].underlying)
             }
             TypeKind::Integer { rank, .. } if *rank < IntegerRank::Int => {
                 Ok(self.builtin(Builtin::Int))
@@ -460,6 +464,9 @@ impl TypeStore {
             TypeKind::Integer { rank, unsigned } => Some((*rank, *unsigned)),
             TypeKind::Bool => Some((IntegerRank::Int, false)),
             TypeKind::Enum(id) => self.integer_parts(self.enums[id.index()].underlying),
+            TypeKind::PayloadEnum(id) if self.enums[id.index()].niche => {
+                self.integer_parts(self.enums[id.index()].underlying)
+            }
             _ => None,
         }
     }

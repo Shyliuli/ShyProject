@@ -7,12 +7,17 @@
 //! success payload is copied out of the union, and a failure builds the
 //! enclosing function's failure variant and returns it. The caller's ordinary
 //! RAII drops run on that early return.
+//!
+//! `Result<void, E>` has two forms. When `E` takes the zero-value niche, the
+//! loaded value is the error code and `0` is `Ok`; a payload-free `Ok` yields
+//! no value at all. Otherwise the ordinary tagged aggregate is used, where a
+//! payload-free `Ok` still yields no value but the tag decides failure.
 
 use super::type_of::TryShape;
 use super::{ExprKind, ExprVal, FnLower, MethodInfo};
 use crate::ast;
 use crate::ir;
-use crate::sema::types::{Qualifiers, TypeId};
+use crate::sema::types::{Builtin, Qualifiers, TypeId};
 use crate::source::{Diagnostic, Span};
 
 impl FnLower<'_> {
@@ -52,9 +57,6 @@ impl FnLower<'_> {
                 ),
             ));
         }
-        let success_ty = source.success.ok_or_else(|| {
-            Diagnostic::new(span, "`?` needs a success payload; this Result has none")
-        })?;
         let conversion = conversion_method(self.l, source, target, span)?;
 
         let address = self.object_address(value, span)?;
@@ -66,11 +68,20 @@ impl FnLower<'_> {
         let offset = payload_offset(&self.l.types, source_ty);
         let displacement = address.offset + i64::from(offset);
         let payload_address = address.with_offset(displacement);
-        let failure_tag = ir::Operand::Constant(ir::Constant::int(tag_ty, source.failure_tag));
+        // A niche `Result<void, E>` stores the error code itself, and `0` is
+        // `Ok`; every other payload enum compares against its `Err` tag.
         let is_failure = self.emit_value(ir::InstKind::ICmp {
-            pred: ir::IntPredicate::Eq,
+            pred: if self.l.types.is_niche_enum(source_ty) {
+                ir::IntPredicate::Ne
+            } else {
+                ir::IntPredicate::Eq
+            },
             lhs: tag,
-            rhs: failure_tag,
+            rhs: if self.l.types.is_niche_enum(source_ty) {
+                ir::Operand::Constant(ir::Constant::zero(tag_ty))
+            } else {
+                ir::Operand::Constant(ir::Constant::int(tag_ty, source.failure_tag))
+            },
             ty: tag_ty,
         });
 
@@ -111,8 +122,16 @@ impl FnLower<'_> {
         self.terminate(ir::Terminator::ret(Some(failure_operand)));
 
         // Success: copy the payload into a temporary and hand it back as a
-        // place, so aggregate payloads keep working without a hidden move.
+        // place, so aggregate payloads keep working without a hidden move. A
+        // payload-free `Ok` produces no value at all.
         self.set_current(success_block);
+        let Some(success_ty) = source.success else {
+            return Ok(ExprVal {
+                ty: self.l.types.builtin(Builtin::Void),
+                qualifiers: Qualifiers::NONE,
+                kind: ExprKind::Void,
+            });
+        };
         let operand = self.load_value(payload_address, success_ty, qualifiers);
         let slot = self.temp_slot(success_ty, "");
         self.store_value(

@@ -143,6 +143,11 @@ pub fn abi_type(types: &TypeStore, ty: TypeId) -> Result<AbiType, AbiError> {
             Some(underlying) => abi_type(types, underlying),
             None => Err(invalid("enum type has no underlying type")),
         },
+        // The `Result<void, E>` niche is `E`'s integer, not an aggregate.
+        TypeKind::PayloadEnum(_) if types.is_niche_enum(ty) => match types.enum_underlying(ty) {
+            Some(underlying) => abi_type(types, underlying),
+            None => Err(invalid("niche Result has no underlying type")),
+        },
         // A payload enum is a visible aggregate in the ABI: a tag followed by
         // one union holding every payload.
         TypeKind::PayloadEnum(_) => payload_enum_type(types, ty),
