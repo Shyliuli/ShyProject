@@ -526,7 +526,7 @@ impl Lowerer {
         match self.field_of(record, &name.text, name.span) {
             Ok((ty, _)) => Ok(ty),
             Err(error) => {
-                if self.method_of(record, &name.text).is_some() {
+                if self.method_of(record, &name.text)?.is_some() {
                     Err(Diagnostic::new(
                         span,
                         format!("method '{}' must be called", name.text),
@@ -539,7 +539,7 @@ impl Lowerer {
     }
 
     pub(super) fn scoped_method(
-        &self,
+        &mut self,
         qualifier: &ast::Name,
         name: &ast::Name,
     ) -> Result<MethodInfo, Diagnostic> {
@@ -550,6 +550,16 @@ impl Lowerer {
                     format!(
                         "trait '{}' has no static methods; call a method on a concrete type",
                         qualifier.text
+                    ),
+                )
+            } else if self.generic_records.contains_key(&qualifier.text)
+                || self.generic_enums.contains_key(&qualifier.text)
+            {
+                Diagnostic::new(
+                    qualifier.span,
+                    format!(
+                        "generic type '{}' needs its type arguments, as in '{}<int>'",
+                        qualifier.text, qualifier.text
                     ),
                 )
             } else {
@@ -563,8 +573,12 @@ impl Lowerer {
     }
 
     /// The method `name` of an already resolved type.
-    pub(super) fn method_on(&self, ty: TypeId, name: &ast::Name) -> Result<MethodInfo, Diagnostic> {
-        self.method_of(ty, &name.text).ok_or_else(|| {
+    pub(super) fn method_on(
+        &mut self,
+        ty: TypeId,
+        name: &ast::Name,
+    ) -> Result<MethodInfo, Diagnostic> {
+        self.method_of(ty, &name.text)?.ok_or_else(|| {
             Diagnostic::new(name.span, format!("no method '{}' on this type", name.text))
         })
     }
@@ -656,7 +670,7 @@ impl Lowerer {
         {
             let object_ty = self.type_of(object, local)?;
             if let Some(record) = self.record_of(object_ty)
-                && let Some(method) = self.method_of(record, &name.text)
+                && let Some(method) = self.method_of(record, &name.text)?
             {
                 return Ok(method.ty);
             }

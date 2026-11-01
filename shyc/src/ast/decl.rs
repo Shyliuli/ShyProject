@@ -76,9 +76,16 @@ pub struct FunctionDecl {
 /// ordinary function definition; the parser does not resolve the implemented
 /// type, the trait, or the method names. `trait_name` is `Some` only for the
 /// two-name form.
+///
+/// `generics` is non-empty for a template impl such as `impl<T> Box<T>` or the
+/// short `impl Box<T>` form: the parameters are bound when one concrete
+/// receiver instantiates the block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImplBlock {
     pub span: Span,
+    /// The parameters written after `impl`, or inferred from the target's
+    /// argument list, empty for an ordinary impl.
+    pub generics: Vec<GenericParam>,
     /// The trait written before `for`, if this is a trait implementation.
     pub trait_name: Option<Name>,
     /// The concrete arguments written after the trait name, empty for an

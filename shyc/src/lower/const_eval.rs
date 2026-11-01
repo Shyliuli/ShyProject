@@ -176,7 +176,7 @@ impl Lowerer {
                     })?;
                     return Ok(ConstValue::int(underlying, value as u64));
                 }
-                let method = self.method_of(record, &name.text).ok_or_else(|| {
+                let method = self.method_of(record, &name.text)?.ok_or_else(|| {
                     Diagnostic::new(name.span, format!("no method '{}' on this type", name.text))
                 })?;
                 let ty = self
@@ -698,7 +698,7 @@ impl Lowerer {
                         format!("unknown type name '{}'", qualifier.text),
                     )
                 })?;
-                let method = self.method_of(record, &name.text).ok_or_else(|| {
+                let method = self.method_of(record, &name.text)?.ok_or_else(|| {
                     Diagnostic::new(name.span, format!("no method '{}' on this type", name.text))
                 })?;
                 Ok((Some(method.symbol), 0))

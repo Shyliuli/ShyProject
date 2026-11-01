@@ -160,6 +160,11 @@ impl super::Lowerer {
     }
 
     pub(super) fn collect_impl(&mut self, block: &ast::ImplBlock) -> Result<(), Diagnostic> {
+        // A template impl is registered by `register_generic_impls`; only a
+        // concrete receiver instantiates its methods.
+        if !block.generics.is_empty() {
+            return Ok(());
+        }
         let ty = self.resolve_type_name(&block.self_type)?;
         if !self.types.is_record(ty) {
             return Err(Diagnostic::new(
@@ -218,7 +223,14 @@ impl super::Lowerer {
         }
         let result = (|| {
             for method in &block.methods {
-                self.collect_function(method, Some((ty, name.clone())))?;
+                self.collect_function(
+                    method,
+                    Some(super::ImplTarget {
+                        ty,
+                        name: name.clone(),
+                        instance: None,
+                    }),
+                )?;
             }
             if let Some((trait_name, info, _)) = &trait_info {
                 self.check_impl_signatures(block, trait_name, info, ty)?;
@@ -694,11 +706,11 @@ impl FnLower<'_> {
 
     /// Emit the `drop` call for one local and mark it moved.
     pub(super) fn emit_drop(&mut self, local: usize) {
-        let (slot, ty, symbol, active) = {
+        let (slot, drop_ty, symbol, active) = {
             let local = &self.locals[local];
             (
                 local.slot,
-                local.ty,
+                local.drop_ty,
                 local.drop_symbol.clone(),
                 local.drop_active,
             )
@@ -711,10 +723,10 @@ impl FnLower<'_> {
         }
         self.locals[local].drop_active = false;
         let argument = self.address_value(ir::Address::slot(slot));
-        let (signature, abi) = match self.l.drop_method(ty) {
-            Some(method) => {
+        let (signature, abi) = match drop_ty {
+            Some(drop_ty) => {
                 let abi =
-                    crate::abi_adapter::plan_target_function(&self.l.types, method.ty, self.l.abi)
+                    crate::abi_adapter::plan_target_function(&self.l.types, drop_ty, self.l.abi)
                         .unwrap_or_else(|_| {
                             abi_plan::plan(
                                 self.l.abi,
@@ -728,7 +740,7 @@ impl FnLower<'_> {
                             )
                             .expect("a pointer parameter always plans")
                         });
-                (self.l.ir_signature(method.ty), abi)
+                (self.l.ir_signature(drop_ty), abi)
             }
             None => (
                 ir::Signature::new(ir::Type::Void, vec![ir::Type::Ptr]),

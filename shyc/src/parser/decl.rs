@@ -3,8 +3,9 @@
 use std::collections::HashSet;
 
 use crate::ast::{
-    BuiltinType, DeclSpecs, Declaration, Declarator, DerivedDeclarator, FunctionDecl, ImplBlock,
-    InitDeclarator, Item, StorageClass, TraitDecl, TraitMethod, TypeName, TypeSpecifier,
+    BuiltinType, DeclSpecs, Declaration, Declarator, DerivedDeclarator, FunctionDecl,
+    GenericArgKind, GenericParam, GenericParamKind, ImplBlock, InitDeclarator, Item, StorageClass,
+    TraitDecl, TraitMethod, TypeName, TypeSpecifier,
 };
 use crate::lexer::{Token, TokenKind};
 use crate::source::{Diagnostic, Span};
@@ -318,61 +319,131 @@ impl Parser {
 
     fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {
         let start = self.bump().span;
-        // `impl Trait for Type` and `impl Trait<Args> for Type` are trait
-        // implementations; `impl Type` keeps its old inherent meaning.
-        let (trait_name, trait_args) = if self.at_trait_impl_header() {
-            let name = self.expect_ident()?;
-            let args = if self.at_punct("<") {
-                self.generic_args()?
+        // The parameters of a template impl stay in scope for the target type
+        // and for every method signature.
+        self.push_scope();
+        let result = (|| {
+            let generics = if self.at_punct("<") {
+                self.generic_params()?
             } else {
                 Vec::new()
             };
-            self.expect_keyword("for")?;
-            (Some(name), args)
-        } else {
-            (None, Vec::new())
-        };
-        let self_type = self.type_name()?;
-        self.expect_punct("{")?;
+            // `impl Trait for Type` and `impl Trait<Args> for Type` are trait
+            // implementations; `impl Type` keeps its old inherent meaning.
+            let (trait_name, trait_args) = if self.at_trait_impl_header() {
+                let name = self.expect_ident()?;
+                let args = if self.at_punct("<") {
+                    self.generic_args()?
+                } else {
+                    Vec::new()
+                };
+                self.expect_keyword("for")?;
+                (Some(name), args)
+            } else {
+                (None, Vec::new())
+            };
+            // `impl Box<T>` without a written parameter list declares the
+            // parameters its target names.
+            let generics = if generics.is_empty() {
+                self.implicit_impl_params()?
+            } else {
+                generics
+            };
+            let self_type = self.type_name()?;
+            self.expect_punct("{")?;
 
-        self.impl_depth += 1;
-        self.push_scope();
-        let mut methods = Vec::new();
-        while !self.at_punct("}") {
-            if self.at_eof() {
-                return Err(Diagnostic::new(self.here(), "unterminated impl block"));
-            }
-            if self.at_fn_declaration() {
-                methods.push(self.fn_method()?);
-                continue;
-            }
-            let specs = self.decl_specs()?;
-            if self.at_punct(";") {
-                return Err(Diagnostic::new(
-                    self.here(),
-                    "method declarations inside impl must have a body",
-                ));
-            }
-            let declarator = self.declarator(false)?;
-            if !self.at_punct("{") {
-                return Err(Diagnostic::new(
-                    self.here(),
-                    "method declarations inside impl must have a body",
-                ));
-            }
-            methods.push(self.function_definition(specs, declarator)?);
-        }
-        let close = self.expect_punct("}")?;
+            self.impl_depth += 1;
+            let methods = (|| {
+                let mut methods = Vec::new();
+                while !self.at_punct("}") {
+                    if self.at_eof() {
+                        return Err(Diagnostic::new(self.here(), "unterminated impl block"));
+                    }
+                    if self.at_fn_declaration() {
+                        methods.push(self.fn_method()?);
+                        continue;
+                    }
+                    let specs = self.decl_specs()?;
+                    if self.at_punct(";") {
+                        return Err(Diagnostic::new(
+                            self.here(),
+                            "method declarations inside impl must have a body",
+                        ));
+                    }
+                    let declarator = self.declarator(false)?;
+                    if !self.at_punct("{") {
+                        return Err(Diagnostic::new(
+                            self.here(),
+                            "method declarations inside impl must have a body",
+                        ));
+                    }
+                    methods.push(self.function_definition(specs, declarator)?);
+                }
+                Ok(methods)
+            })();
+            self.impl_depth -= 1;
+            let methods = methods?;
+            let close = self.expect_punct("}")?;
+            Ok(ImplBlock {
+                span: start.join(close),
+                generics,
+                trait_name,
+                trait_args,
+                self_type,
+                methods,
+            })
+        })();
         self.pop_scope();
-        self.impl_depth -= 1;
+        result
+    }
 
-        Ok(ImplBlock {
-            span: start.join(close),
-            trait_name,
-            trait_args,
-            self_type,
-            methods,
-        })
+    /// Declares the parameters of an `impl Name<T, ...>` header that wrote no
+    /// `<T, ...>` list of its own.
+    ///
+    /// Only an argument that no type or value in scope can name becomes a type
+    /// parameter, so `impl Box<int>` and `impl Box<Alias>` keep their concrete
+    /// meaning and are resolved as ordinary type uses. A header that mixes
+    /// parameters with concrete arguments still reaches the lowering check that
+    /// asks for the parameters in order.
+    fn implicit_impl_params(&mut self) -> Result<Vec<GenericParam>, Diagnostic> {
+        if !matches!(&self.peek().kind, TokenKind::Ident(_)) || !self.at_punct_ahead(1, "<") {
+            return Ok(Vec::new());
+        }
+        let Some(args) = self.probe(|parser| {
+            parser.bump();
+            parser.generic_args()
+        }) else {
+            return Ok(Vec::new());
+        };
+        let mut params = Vec::new();
+        for arg in &args {
+            let name = match &arg.kind {
+                GenericArgKind::Type(type_name) => match bare_type_name(type_name) {
+                    Some(name) if !self.is_type_name(&name.text) => name,
+                    _ => continue,
+                },
+                // An unknown bare name parses as a value argument; it can only
+                // be a type parameter here.
+                GenericArgKind::Const(crate::ast::Expr::Name(name))
+                    if !self.is_value_name(&name.text) =>
+                {
+                    name
+                }
+                _ => continue,
+            };
+            params.push(GenericParam {
+                span: name.span,
+                name: name.clone(),
+                kind: GenericParamKind::Type,
+                bounds: Vec::new(),
+            });
+        }
+        // Declare nothing until the whole list is known: a later concrete
+        // argument must not leave an earlier parameter half-declared.
+        for parameter in &params {
+            self.declare_typedef(&parameter.name.text);
+        }
+        Ok(params)
     }
 
     /// Whether the cursor starts `Trait for` or `Trait<Args> for`.
@@ -533,18 +604,26 @@ impl Parser {
         }
         if self.at_ident("impl") {
             self.bump();
-            // Skip the trait name and its arguments of `impl Trait<Args> for
-            // Type` the same way the real parser recognizes them.
-            if self.at_trait_impl_header() {
-                self.bump();
+            self.push_scope();
+            let skipped = (|| {
                 if self.at_punct("<") {
-                    self.generic_args()?;
+                    self.generic_params()?;
                 }
-                self.bump();
-            }
-            self.type_name()?;
-            self.expect_punct("{")?;
-            return self.skip_braced_body();
+                // Skip the trait name and its arguments of `impl Trait<Args>
+                // for Type` the same way the real parser recognizes them.
+                if self.at_trait_impl_header() {
+                    self.bump();
+                    if self.at_punct("<") {
+                        self.generic_args()?;
+                    }
+                    self.bump();
+                }
+                self.type_name()?;
+                self.expect_punct("{")?;
+                self.skip_braced_body()
+            })();
+            self.pop_scope();
+            return skipped;
         }
         if self.at_fn_declaration() {
             return self.prescan_fn();
@@ -727,5 +806,17 @@ impl Parser {
             self.bump();
         }
         Ok(())
+    }
+}
+
+/// The name of a type written as one bare identifier, which is the only shape
+/// an implicit impl parameter can have. `Box<T *>` and `Box<int>` give `None`.
+fn bare_type_name(type_name: &TypeName) -> Option<&crate::ast::Name> {
+    if type_name.declarator.is_some() {
+        return None;
+    }
+    match type_name.specs.type_specs.as_slice() {
+        [TypeSpecifier::TypedefName(name)] => Some(name),
+        _ => None,
     }
 }

@@ -146,6 +146,15 @@ impl Parser {
         self.scopes[innermost].typedefs.insert(name.to_string());
     }
 
+    /// Whether `name` currently spells a value, which is what makes a bare name
+    /// a const generic argument rather than a new type parameter.
+    pub(crate) fn is_value_name(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.values.contains(name))
+    }
+
     pub(crate) fn declare_value(&mut self, name: &str) {
         let innermost = self.scopes.len() - 1;
         self.scopes[innermost].values.insert(name.to_string());

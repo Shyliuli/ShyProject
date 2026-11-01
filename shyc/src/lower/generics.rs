@@ -1,4 +1,5 @@
-//! Generic function registration, inference, and instantiation.
+//! Generic function and generic impl registration, inference, and
+//! instantiation.
 //!
 //! `fn name<T>(...)` is a compile-time template. A call that writes concrete
 //! arguments, `name<int>(x)`, re-resolves the template under a type scope that
@@ -13,7 +14,15 @@
 //!
 //! A `const` parameter and a type parameter that occurs only inside a function
 //! type are not inferred; such a call names the parameter and asks for explicit
-//! generic arguments. Generic methods are not implemented either.
+//! generic arguments.
+//!
+//! `impl<T> Box<T>` (or `impl Box<T>`) is the same kind of template. A method
+//! lookup on one concrete record instance binds the impl parameters to that
+//! record's own arguments and registers one ordinary function per method with
+//! an internal symbol naming the receiver. A method body is only lowered when
+//! a lookup asks for it, so an instance compiles exactly the methods it uses.
+//! A method cannot declare generic parameters of its own, and a trait
+//! implementation cannot be generic yet.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -176,6 +185,224 @@ impl Lowerer {
         // Arguments resolve in the caller's scope, never the template's.
         let concrete = self.resolve_generic_args(&name.text, &template.params, args)?;
         self.instantiate_concrete(name, &template, concrete)
+    }
+
+    /// Registers every generic impl template before anything is resolved.
+    ///
+    /// A method lookup on a concrete record instance materializes the template
+    /// it finds here, so the whole pass runs before any body is lowered.
+    pub(super) fn register_generic_impls(
+        &mut self,
+        unit: &ast::TranslationUnit,
+    ) -> Result<(), Diagnostic> {
+        for item in &unit.items {
+            let ast::Item::Impl(block) = item else {
+                continue;
+            };
+            if block.generics.is_empty() {
+                continue;
+            }
+            self.register_generic_impl(block)?;
+        }
+        Ok(())
+    }
+
+    fn register_generic_impl(&mut self, block: &ast::ImplBlock) -> Result<(), Diagnostic> {
+        if block.trait_name.is_some() {
+            return Err(Diagnostic::new(
+                block.span,
+                "generic trait implementations are not implemented yet",
+            ));
+        }
+        if let Some(bound) = block
+            .generics
+            .iter()
+            .find_map(|parameter| parameter.bounds.first())
+        {
+            return Err(Diagnostic::new(
+                bound.span,
+                "trait bounds on a generic impl are not implemented yet",
+            ));
+        }
+        for (index, parameter) in block.generics.iter().enumerate() {
+            let repeated = block.generics[..index]
+                .iter()
+                .any(|previous| previous.name.text == parameter.name.text);
+            if repeated {
+                return Err(Diagnostic::new(
+                    parameter.span,
+                    format!(
+                        "redefinition of generic impl parameter '{}'",
+                        parameter.name.text
+                    ),
+                ));
+            }
+        }
+        let Some(generic) = generic_impl_target(&block.self_type) else {
+            return Err(Diagnostic::new(
+                block.self_type.span,
+                "a generic impl target must name a generic record, as in 'impl<T> Box<T>'",
+            ));
+        };
+        let Some(record) = self.generic_records.get(&generic.name.text) else {
+            return Err(Diagnostic::new(
+                generic.name.span,
+                format!("'{}' is not a generic record", generic.name.text),
+            ));
+        };
+        if generic.args.len() != record.params.len() {
+            return Err(Diagnostic::new(
+                block.self_type.span,
+                format!(
+                    "generic impl for '{}' names {} argument(s), but the record has {} \
+                     parameter(s)",
+                    generic.name.text,
+                    generic.args.len(),
+                    record.params.len()
+                ),
+            ));
+        }
+        let in_order = generic.args.len() == block.generics.len()
+            && generic
+                .args
+                .iter()
+                .zip(&block.generics)
+                .all(|(arg, parameter)| argument_names_parameter(arg, parameter));
+        if !in_order {
+            return Err(Diagnostic::new(
+                block.self_type.span,
+                format!(
+                    "generic impl target must list the impl's parameters in order, as in \
+                     'impl<T> {}<T>'",
+                    generic.name.text
+                ),
+            ));
+        }
+        if self.generic_impls.contains_key(&generic.name.text) {
+            return Err(Diagnostic::new(
+                block.span,
+                format!(
+                    "redefinition of the generic impl for '{}'",
+                    generic.name.text
+                ),
+            ));
+        }
+        self.generic_impls.insert(
+            generic.name.text.clone(),
+            super::GenericImpl {
+                params: block.generics.clone(),
+                block: block.clone(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Materializes the generic impl whose receiver is `record`, once.
+    ///
+    /// The record's own concrete arguments bind the impl parameters, and every
+    /// method becomes an ordinary function whose symbol names the receiver, so
+    /// method lookup continues to see plain [`super::MethodInfo`] values and
+    /// calls keep going through the direct-call machinery.
+    pub(super) fn instantiate_generic_impl(&mut self, record: TypeId) -> Result<(), Diagnostic> {
+        if self.generic_impl_instances.contains(&record) {
+            return Ok(());
+        }
+        let Some(key) = self.record_instance_key(record) else {
+            return Ok(());
+        };
+        let Some(template) = self.generic_impls.get(&key.name).cloned() else {
+            return Ok(());
+        };
+        for (parameter, argument) in template.params.iter().zip(&key.args) {
+            let kind_matches = matches!(
+                (&parameter.kind, argument),
+                (ast::GenericParamKind::Type, GenericArgKey::Type(_))
+                    | (ast::GenericParamKind::Const, GenericArgKey::Int(_))
+            );
+            if !kind_matches {
+                return Err(Diagnostic::new(
+                    parameter.span,
+                    format!(
+                        "generic impl for '{}' takes '{}' as a {} parameter, but the record's \
+                         argument is a {}; write the impl parameters before the target",
+                        key.name,
+                        parameter.name.text,
+                        match parameter.kind {
+                            ast::GenericParamKind::Type => "type",
+                            ast::GenericParamKind::Const => "const",
+                        },
+                        match argument {
+                            GenericArgKey::Type(_) => "type",
+                            GenericArgKey::Int(_) => "constant",
+                        }
+                    ),
+                ));
+            }
+        }
+        if self.instantiation_depth >= MAX_INSTANTIATION_DEPTH {
+            return Err(Diagnostic::new(
+                template.block.span,
+                format!(
+                    "generic impl instantiation is nested more than \
+                     {MAX_INSTANTIATION_DEPTH} levels deep"
+                ),
+            ));
+        }
+        // Mark first: collecting the methods resolves their signatures, which
+        // must find this record's impl already present instead of recursing.
+        self.generic_impl_instances.insert(record);
+        self.instantiation_depth += 1;
+        self.push_type_scope();
+        self.bind_generic_args(&template.params, &key.args);
+        let saved = self.impl_context.clone();
+        self.impl_context = Some((record, key.name.clone()));
+        let result = (|| {
+            let instance = super::ImplInstance {
+                params: template.params.clone(),
+                args: key.args.clone(),
+            };
+            for method in &template.block.methods {
+                self.collect_function(
+                    method,
+                    Some(super::ImplTarget {
+                        ty: record,
+                        name: key.name.clone(),
+                        instance: Some(instance.clone()),
+                    }),
+                )?;
+            }
+            Ok(())
+        })();
+        self.impl_context = saved;
+        self.pop_type_scope();
+        self.instantiation_depth -= 1;
+        if result.is_err() {
+            self.generic_impl_instances.remove(&record);
+        }
+        result
+    }
+
+    /// The instantiation key of a concrete record, when it came from a generic
+    /// record template.
+    fn record_instance_key(&self, record: TypeId) -> Option<InstanceKey> {
+        self.record_instances
+            .iter()
+            .find_map(|(key, instance)| (*instance == record).then(|| key.clone()))
+    }
+
+    /// Deterministic internal symbol for one method of one materialized impl.
+    pub(super) fn generic_impl_method_symbol(
+        &self,
+        impl_name: &str,
+        method: &str,
+        record: TypeId,
+    ) -> String {
+        self.internal_symbol(&format!(
+            "generic.impl.{}.{}.{}",
+            Self::sanitize_ident(impl_name),
+            Self::sanitize_ident(method),
+            record.index()
+        ))
     }
 
     /// Whether a bare name denotes a template call whose arguments are inferred
@@ -841,7 +1068,7 @@ impl Lowerer {
             ast::Expr::Name(name) => self.instantiate_generic_function(name, type_args),
             ast::Expr::ScopedName { .. } | ast::Expr::Member { .. } => Err(Diagnostic::new(
                 span,
-                "generic method calls are not supported by lowering yet",
+                "a method call cannot take generic arguments; only a generic function name can",
             )),
             _ => Err(Diagnostic::new(
                 span,
@@ -869,6 +1096,36 @@ impl Lowerer {
             }
         }
         self.internal_symbol(&mangled)
+    }
+}
+
+/// The generic target of `impl<T> Box<T>`, when the type name is exactly one
+/// generic use with no declarator.
+fn generic_impl_target(type_name: &ast::TypeName) -> Option<&ast::GenericSpec> {
+    if type_name.declarator.is_some() {
+        return None;
+    }
+    match type_name.specs.type_specs.as_slice() {
+        [ast::TypeSpecifier::Generic(generic)] => Some(generic),
+        _ => None,
+    }
+}
+
+/// Whether one target argument is exactly the impl parameter it binds.
+fn argument_names_parameter(arg: &ast::GenericArg, parameter: &ast::GenericParam) -> bool {
+    match (&arg.kind, &parameter.kind) {
+        (ast::GenericArgKind::Type(type_name), ast::GenericParamKind::Type) => {
+            type_name.declarator.is_none()
+                && matches!(
+                    type_name.specs.type_specs.as_slice(),
+                    [ast::TypeSpecifier::TypedefName(name)]
+                        if name.text == parameter.name.text
+                )
+        }
+        (ast::GenericArgKind::Const(ast::Expr::Name(name)), ast::GenericParamKind::Const) => {
+            name.text == parameter.name.text
+        }
+        _ => false,
     }
 }
 

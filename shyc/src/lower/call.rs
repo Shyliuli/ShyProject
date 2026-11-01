@@ -426,7 +426,7 @@ impl FnLower<'_> {
         {
             let object_ty = self.type_of(object)?;
             if let Some(record) = self.l.record_of(object_ty)
-                && let Some(method) = self.l.method_of(record, &name.text)
+                && let Some(method) = self.l.method_of(record, &name.text)?
             {
                 return self.lower_method_call(object, name, *op, method, args, span);
             }
@@ -681,7 +681,7 @@ impl FnLower<'_> {
                             "argument type does not match the parameter type",
                         ));
                     }
-                    if self.l.drop_method(param).is_some() {
+                    if self.l.drop_method(param)?.is_some() {
                         self.deactivate_if_local(argument);
                     }
                     operands.push(operand);

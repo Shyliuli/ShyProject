@@ -123,6 +123,16 @@ change. A bound on a `const` parameter, a generic record, a generic enum, or a
 generic trait, a bound that writes trait arguments such as `T: From<int>`, and
 a generic trait method each get an explicit diagnostic instead.
 
+A generic record takes methods through a template `impl`:
+`impl<T> Box<T> { T get(self *b) { return b->value; } }`, where the short
+`impl Box<T>` form writes the same parameters. A method lookup on one concrete
+instance binds the impl parameters to that instance's own arguments and lowers
+every method it uses to an ordinary function with a translation-unit internal
+symbol, so `Box<int> b; b.get();` stays a direct call. The target must list the
+impl's parameters in order, and a method cannot declare generic parameters of
+its own. A generic trait implementation, a trait bound on an impl parameter, and
+a second generic impl of the same record each get an explicit diagnostic.
+
 `trait Drawable { void draw(self *value); }` declares method signatures, and
 `impl Drawable for Circle { ... }` checks that the implementation defines exactly
 those methods with matching signatures. The methods are lowered exactly like an

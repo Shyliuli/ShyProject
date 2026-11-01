@@ -22,6 +22,7 @@ impl Lowerer {
         self.register_traits(unit)?;
         self.register_generic_records(unit)?;
         self.register_generic_enums(unit)?;
+        self.register_generic_impls(unit)?;
         self.register_generic_functions(unit)?;
         for item in &unit.items {
             match item {
@@ -244,13 +245,13 @@ impl Lowerer {
     pub(super) fn collect_function(
         &mut self,
         declaration: &ast::FunctionDecl,
-        impl_context: Option<(TypeId, String)>,
+        target: Option<super::ImplTarget>,
     ) -> Result<(), Diagnostic> {
         if generic_declarator(&declaration.declarator).is_some() {
-            if impl_context.is_some() {
+            if target.is_some() {
                 return Err(Diagnostic::new(
                     declaration.declarator.span,
-                    "generic methods are not supported by lowering yet",
+                    "an impl method cannot declare its own generic parameters",
                 ));
             }
             // A file-scope template was registered by the collection pre-pass;
@@ -276,13 +277,16 @@ impl Lowerer {
         // also its name-table key. A file-scope function is keyed by its C name
         // so that later declarations resolve to it; only the emitted symbol
         // differs for `static`.
-        let (key, symbol) = match &impl_context {
-            Some((_, type_name)) => {
-                let symbol = format!(
-                    "____{}__{}",
-                    Self::sanitize_ident(type_name),
-                    Self::sanitize_ident(&name)
-                );
+        let (key, symbol) = match &target {
+            Some(target) => {
+                let symbol = match &target.instance {
+                    Some(_) => self.generic_impl_method_symbol(&target.name, &name, target.ty),
+                    None => format!(
+                        "____{}__{}",
+                        Self::sanitize_ident(&target.name),
+                        Self::sanitize_ident(&name)
+                    ),
+                };
                 (symbol.clone(), symbol)
             }
             None => {
@@ -291,17 +295,31 @@ impl Lowerer {
             }
         };
         self.declare_function_symbol(&key, &symbol, resolved.ty, true, declaration.span)?;
-        if let Some((implemented, _)) = &impl_context {
+        // A method of a materialized generic impl keeps only its signature:
+        // the body is queued when a lookup first needs it, so an instance
+        // compiles the methods it uses. Everything else is lowered now.
+        let plain = target
+            .as_ref()
+            .is_none_or(|target| target.instance.is_none());
+        let deferred = match &target {
+            Some(target) => target
+                .instance
+                .as_ref()
+                .map(|instance| super::DeferredMethod {
+                    decl: declaration.clone(),
+                    env: self.generic_env(&instance.params, &instance.args),
+                    impl_context: (target.ty, target.name.clone()),
+                }),
+            None => None,
+        };
+        if let Some(target) = &target {
             let info = self
                 .impls
-                .entry(*implemented)
+                .entry(target.ty)
                 .or_insert_with(|| super::ImplInfo {
-                    name: String::new(),
+                    name: target.name.clone(),
                     methods: Default::default(),
                 });
-            if let Some((_, type_name)) = &impl_context {
-                info.name = type_name.clone();
-            }
             if info.methods.contains_key(&name) {
                 return Err(Diagnostic::new(
                     declaration.span,
@@ -313,17 +331,22 @@ impl Lowerer {
                 super::MethodInfo {
                     symbol: symbol.clone(),
                     ty: resolved.ty,
+                    deferred,
                 },
             );
         }
-        self.pending.push(PendingFunction {
-            decl: declaration.clone(),
-            symbol,
-            ty: resolved.ty,
-            impl_context,
-            env: None,
-            internal: false,
-        });
+        if plain {
+            self.pending.push(PendingFunction {
+                decl: declaration.clone(),
+                symbol,
+                ty: resolved.ty,
+                impl_context: target
+                    .as_ref()
+                    .map(|target| (target.ty, target.name.clone())),
+                env: None,
+                internal: false,
+            });
+        }
         Ok(())
     }
 
@@ -1148,7 +1171,9 @@ impl FnLower<'_> {
             let ir_ty = self.l.ir_type(resolved.ty);
             let align = self.l.types.align_of(resolved.ty).unwrap_or(1);
             let slot = self.f.alloc_slot_aligned(&name, ir_ty, align);
-            let drop_symbol = self.l.drop_method(resolved.ty).map(|method| method.symbol);
+            let drop = self.l.drop_method(resolved.ty)?;
+            let drop_symbol = drop.as_ref().map(|method| method.symbol.clone());
+            let drop_ty = drop.map(|method| method.ty);
             let active = drop_symbol.is_some();
             let local = self.locals.len();
             self.locals.push(Local {
@@ -1158,6 +1183,7 @@ impl FnLower<'_> {
                 qualifiers: resolved.qualifiers,
                 readonly: false,
                 drop_symbol,
+                drop_ty,
                 drop_active: active,
             });
             self.bind(name.clone(), super::LocalBinding::Local(local));
@@ -1196,7 +1222,9 @@ impl FnLower<'_> {
         let ir_ty = self.l.ir_type(ty);
         let align = self.l.types.align_of(ty).unwrap_or(1);
         let slot = self.f.alloc_slot_aligned(&name, ir_ty, align);
-        let drop_symbol = self.l.drop_method(ty).map(|method| method.symbol);
+        let drop = self.l.drop_method(ty)?;
+        let drop_symbol = drop.as_ref().map(|method| method.symbol.clone());
+        let drop_ty = drop.map(|method| method.ty);
         let active = drop_symbol.is_some();
         let local = self.locals.len();
         self.locals.push(Local {
@@ -1206,6 +1234,7 @@ impl FnLower<'_> {
             qualifiers: Qualifiers::NONE,
             readonly: !decl.is_mut && !self.l.disable_rustic_mut,
             drop_symbol,
+            drop_ty,
             drop_active: active,
         });
         self.bind(name, super::LocalBinding::Local(local));
@@ -1465,6 +1494,7 @@ impl FnLower<'_> {
             qualifiers: Qualifiers::NONE,
             readonly: false,
             drop_symbol: None,
+            drop_ty: None,
             drop_active: false,
         });
         self.bind(name.to_string(), super::LocalBinding::Local(local));
@@ -1504,6 +1534,7 @@ impl FnLower<'_> {
             qualifiers: Qualifiers::NONE,
             readonly: false,
             drop_symbol: None,
+            drop_ty: None,
             drop_active: false,
         });
         self.bind("__va_area__".to_string(), super::LocalBinding::Local(local));

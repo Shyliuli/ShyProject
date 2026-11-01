@@ -12,8 +12,9 @@
 //!    loads, stores, casts, and pointer arithmetic.
 //!
 //! Shy extensions are handled here too: `impl` methods get the
-//! `____Type__method` symbol, `self` names the implemented record type, dot
-//! access auto-dereferences a pointer, and locals with a `drop` method are
+//! `____Type__method` symbol (a materialized generic impl gets one internal
+//! symbol per receiver and method), `self` names the implemented record type,
+//! dot access auto-dereferences a pointer, and locals with a `drop` method are
 //! dropped at scope exit, `return`, `break`, and `continue`.
 //!
 //! Deliberately not lowered: bit-fields, variable-length arrays, `_Atomic`
@@ -130,6 +131,22 @@ pub(super) enum GlobalRef {
 pub(super) struct MethodInfo {
     pub symbol: String,
     pub ty: TypeId,
+    /// The body of a materialized generic impl method, queued for lowering the
+    /// first time method lookup needs it.
+    pub deferred: Option<DeferredMethod>,
+}
+
+/// A generic impl method whose signature exists but whose body has not been
+/// queued yet.
+///
+/// Only the methods an instance actually uses are lowered, so a method that is
+/// valid for one type argument does not make the impl invalid for another one
+/// it never runs on.
+#[derive(Clone)]
+pub(super) struct DeferredMethod {
+    pub decl: ast::FunctionDecl,
+    pub env: GenericEnv,
+    pub impl_context: (TypeId, String),
 }
 
 pub(super) struct ImplInfo {
@@ -204,6 +221,39 @@ pub(super) struct GenericFunction {
     pub decl: Option<ast::FunctionDecl>,
 }
 
+/// One generic `impl` block, kept as the AST template it is.
+///
+/// `impl<T> Box<T> { ... }` is instantiated when a concrete `Box<int>` needs one
+/// of its methods: the parameters bind to the receiver's own concrete
+/// arguments, and each method is lowered as an ordinary function with a
+/// translation-unit internal symbol. Registration checks that the target's
+/// argument list is exactly the parameters in order, so instantiation never
+/// has to unify a partial target type.
+#[derive(Clone)]
+pub(super) struct GenericImpl {
+    pub params: Vec<ast::GenericParam>,
+    pub block: ast::ImplBlock,
+}
+
+/// The concrete bindings of one materialized generic impl, carried by each of
+/// its method definitions so the body still resolves the parameter names.
+#[derive(Clone)]
+pub(super) struct ImplInstance {
+    pub params: Vec<ast::GenericParam>,
+    pub args: Vec<GenericArgKey>,
+}
+
+/// The impl block a method definition belongs to.
+#[derive(Clone)]
+pub(super) struct ImplTarget {
+    pub ty: TypeId,
+    /// The record name written after `impl`, which is also the base of a plain
+    /// method symbol.
+    pub name: String,
+    /// Concrete bindings when this target is one materialized generic impl.
+    pub instance: Option<ImplInstance>,
+}
+
 /// Concrete bindings for one generic function instantiation: the type
 /// arguments and the integer values of its `const` arguments.
 #[derive(Clone)]
@@ -270,6 +320,10 @@ pub(super) struct Lowerer {
     pub generic_functions: HashMap<String, GenericFunction>,
     /// Instantiated generic functions, keyed by name and concrete arguments.
     pub function_instances: HashMap<InstanceKey, FunctionInstance>,
+    /// Every generic impl template, by the record name it targets.
+    pub generic_impls: HashMap<String, GenericImpl>,
+    /// Concrete records whose generic impl has already been materialized.
+    pub generic_impl_instances: HashSet<TypeId>,
     /// Nesting level of the generic instantiation currently being resolved.
     pub instantiation_depth: u32,
     /// Every trait declaration, by name. Registered before any `impl` is
@@ -327,6 +381,8 @@ impl Lowerer {
             enum_instances: HashMap::new(),
             generic_functions: HashMap::new(),
             function_instances: HashMap::new(),
+            generic_impls: HashMap::new(),
+            generic_impl_instances: HashSet::new(),
             instantiation_depth: 0,
             traits: HashMap::new(),
             trait_impls: HashSet::new(),
@@ -453,17 +509,57 @@ impl Lowerer {
         self.globals.get(name).copied()
     }
 
-    pub(super) fn method_of(&self, record: TypeId, name: &str) -> Option<MethodInfo> {
-        self.impls
+    /// The method `name` of a record, materializing its generic impl first when
+    /// the record is an instance that has not needed one yet.
+    ///
+    /// A method of a materialized impl has only a signature until this lookup
+    /// asks for it; the body is queued here, so an instance compiles exactly
+    /// the methods it uses.
+    pub(super) fn method_of(
+        &mut self,
+        record: TypeId,
+        name: &str,
+    ) -> Result<Option<MethodInfo>, Diagnostic> {
+        if self
+            .impls
+            .get(&record)
+            .and_then(|info| info.methods.get(name))
+            .is_none()
+        {
+            self.instantiate_generic_impl(record)?;
+        }
+        let Some(method) = self
+            .impls
             .get(&record)
             .and_then(|info| info.methods.get(name))
             .cloned()
+        else {
+            return Ok(None);
+        };
+        if let Some(deferred) = &method.deferred {
+            self.pending.push(PendingFunction {
+                decl: deferred.decl.clone(),
+                symbol: method.symbol.clone(),
+                ty: method.ty,
+                impl_context: Some(deferred.impl_context.clone()),
+                env: Some(deferred.env.clone()),
+                internal: true,
+            });
+            if let Some(stored) = self
+                .impls
+                .get_mut(&record)
+                .and_then(|info| info.methods.get_mut(name))
+            {
+                stored.deferred = None;
+            }
+        }
+        Ok(Some(method))
     }
 
     /// The `drop` method for a type, if an `impl` declared one.
-    pub(super) fn drop_method(&self, ty: TypeId) -> Option<MethodInfo> {
+    pub(super) fn drop_method(&mut self, ty: TypeId) -> Result<Option<MethodInfo>, Diagnostic> {
         if !self.types.is_record(ty) {
-            return None;
+            return Ok(None);
         }
         self.method_of(ty, "drop")
     }
@@ -731,6 +827,9 @@ pub(super) struct Local {
     /// pointer type and aliases keep ordinary C semantics.
     pub readonly: bool,
     pub drop_symbol: Option<String>,
+    /// The `drop` method's function type, kept with the symbol so emitting the
+    /// call does not look the method up again.
+    pub drop_ty: Option<TypeId>,
     pub drop_active: bool,
 }
 
