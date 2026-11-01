@@ -2,7 +2,7 @@
 
 #include <core/str.shyh>
 
-static fn same_bytes(const char *a, const char *b, int n) -> int {
+fn same_bytes(const char *a, const char *b, int n) -> int {
     for (int i = 0; i < n; i++) {
         if (a[i] != b[i]) {
             return 0;

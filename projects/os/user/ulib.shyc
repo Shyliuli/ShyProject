@@ -26,7 +26,7 @@ struct Buffer {
 };
 
 impl Text {
-    static fn len(self *s) -> int {
+    fn len(self *s) -> int {
         let mut n = 0;
 
         while (s.data[n]) {
@@ -35,7 +35,7 @@ impl Text {
         return n;
     }
 
-    static fn eq(self *s, const char *other) -> int {
+    fn eq(self *s, const char *other) -> int {
         let mut i = 0;
 
         while (s.data[i] && other[i]) {
@@ -47,7 +47,7 @@ impl Text {
         return s.data[i] == other[i];
     }
 
-    static fn starts_with(self *s, const char *prefix) -> int {
+    fn starts_with(self *s, const char *prefix) -> int {
         let mut i = 0;
 
         while (prefix[i]) {
@@ -59,7 +59,7 @@ impl Text {
         return 1;
     }
 
-    static fn find(self *s, const char *needle) -> int {
+    fn find(self *s, const char *needle) -> int {
         let mut i = 0;
         Text pat;
 
@@ -84,13 +84,13 @@ impl Text {
 }
 
 impl Buffer {
-    static fn init(self *b, char *data, int max) {
+    fn init(self *b, char *data, int max) {
         b.data = data;
         b.max = max;
         b.len = 0;
     }
 
-    static fn has_room(self *b) -> int {
+    fn has_room(self *b) -> int {
         return b.len < b.max - 1;
     }
 }

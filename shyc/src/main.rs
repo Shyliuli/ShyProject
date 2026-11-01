@@ -164,6 +164,7 @@ fn run() -> Result<(), String> {
                         .attributes
                         .disable_nonexhaustive_switch,
                     disable_rustic_mut: preprocessed.attributes.disable_rustic_mut,
+                    disable_default_static: preprocessed.attributes.disable_default_static,
                     exports,
                 },
             )
@@ -253,6 +254,7 @@ fn lower_instances(
             abi: target.abi,
             disable_nonexhaustive_switch: attributes.disable_nonexhaustive_switch,
             disable_rustic_mut: attributes.disable_rustic_mut,
+            disable_default_static: attributes.disable_default_static,
             exports,
         },
     )
@@ -613,6 +615,9 @@ fn render_preprocessed(tokens: &[Token], attributes: &Attributes) -> String {
     }
     if attributes.disable_rustic_mut {
         output.push_str("#![disable_rustic_mut]\n");
+    }
+    if attributes.disable_default_static {
+        output.push_str("#![disable_default_static]\n");
     }
     output.push_str(&export::render_c_source(tokens));
     output

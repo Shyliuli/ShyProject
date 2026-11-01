@@ -292,7 +292,12 @@ impl Lowerer {
                         "a function cannot have an initializer",
                     ));
                 }
-                let symbol = self.declared_function_symbol(&name, storage);
+                let symbol = self.declared_function_symbol(
+                    &name,
+                    storage,
+                    declaration.specs.is_shy_fn,
+                    true,
+                );
                 self.declare_function_symbol(&name, &symbol, resolved.ty, false, init.span)?;
             } else {
                 self.collect_object(
@@ -356,13 +361,24 @@ impl Lowerer {
                         self.trait_impl_method_symbol(trait_impl, &target.name, &name)
                     }
                     (None, None) => {
-                        self.inherent_method_symbol(&target.name, &name, declaration.specs.storage)
+                        self.inherent_method_symbol(
+                            &target.name,
+                            &name,
+                            declaration.specs.storage,
+                            declaration.specs.is_shy_fn,
+                            true,
+                        )
                     }
                 };
                 (symbol.clone(), symbol)
             }
             None => {
-                let symbol = self.declared_function_symbol(&name, declaration.specs.storage);
+                let symbol = self.declared_function_symbol(
+                    &name,
+                    declaration.specs.storage,
+                    declaration.specs.is_shy_fn,
+                    true,
+                );
                 (name.clone(), symbol)
             }
         };
@@ -454,15 +470,22 @@ impl Lowerer {
         type_name: &str,
         method: &str,
         storage: Option<ast::StorageClass>,
+        is_shy_fn: bool,
+        defined: bool,
     ) -> String {
         let symbol = format!(
             "____{}__{}",
             Self::sanitize_ident(type_name),
             Self::sanitize_ident(method)
         );
-        match storage {
-            Some(ast::StorageClass::Static) => self.internal_symbol(&symbol),
-            _ => symbol,
+        // 头文件里的原型先登记过：定义沿用原型定下的符号，两边才一致。
+        if let Some(GlobalRef::Function(index)) = self.global_ref(&symbol) {
+            return self.function(index).symbol.clone();
+        }
+        if self.file_local(storage, is_shy_fn, defined) {
+            self.internal_symbol(&symbol)
+        } else {
+            symbol
         }
     }
 
@@ -487,7 +510,13 @@ impl Lowerer {
                 "declarator is not a function",
             ));
         }
-        let symbol = self.inherent_method_symbol(type_name, &name, prototype.specs.storage);
+        let symbol = self.inherent_method_symbol(
+            type_name,
+            &name,
+            prototype.specs.storage,
+            prototype.specs.is_shy_fn,
+            false,
+        );
         self.declare_function_symbol(&symbol, &symbol, resolved.ty, false, prototype.span)?;
         let info = self
             .impls
@@ -614,13 +643,35 @@ impl Lowerer {
         &self,
         name: &str,
         storage: Option<ast::StorageClass>,
+        is_shy_fn: bool,
+        defined: bool,
     ) -> String {
         if let Some(GlobalRef::Function(index)) = self.global_ref(name) {
             return self.function(index).symbol.clone();
         }
+        if self.file_local(storage, is_shy_fn, defined) {
+            self.internal_symbol(name)
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// Whether a declaration gets a file-local symbol.
+    ///
+    /// `static` always does. A Shy `fn` or method does too, because ShyC makes
+    /// file-local the default; `#![disable_default_static]` restores the C
+    /// default for a file. A C-style declaration is only affected by `static`.
+    fn file_local(
+        &self,
+        storage: Option<ast::StorageClass>,
+        is_shy_fn: bool,
+        defined: bool,
+    ) -> bool {
         match storage {
-            Some(ast::StorageClass::Static) => self.internal_symbol(name),
-            _ => name.to_string(),
+            Some(ast::StorageClass::Static) => true,
+            // 原型声明的是别处的东西，永远按对外名字走；只有带函数体的定义
+            // 才吃「ShyC 默认文件级私有」这条规则。
+            _ => is_shy_fn && defined && !self.disable_default_static,
         }
     }
 
@@ -1360,7 +1411,14 @@ impl FnLower<'_> {
                         "a function cannot have an initializer",
                     ));
                 }
-                let symbol = self.l.declared_function_symbol(&name, storage);
+                let symbol =
+                    self.l
+                        .declared_function_symbol(
+                            &name,
+                            storage,
+                            declaration.specs.is_shy_fn,
+                            false,
+                        );
                 self.l
                     .declare_function_symbol(&name, &symbol, resolved.ty, false, init.span)?;
                 self.bind(

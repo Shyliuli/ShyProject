@@ -267,7 +267,10 @@ impl Parser {
     /// `fn` is a soft keyword: `int fn;` and calls to a function named `fn`
     /// remain ordinary C.
     pub(crate) fn at_fn_declaration(&self) -> bool {
-        let at = usize::from(self.at_ident("static"));
+        let mut at = 0;
+        while self.at_ident_ahead(at, "static") || self.at_ident_ahead(at, "pub") {
+            at += 1;
+        }
         self.at_ident_ahead(at, "fn")
             && matches!(&self.peek_ahead(at + 1).kind, TokenKind::Ident(name) if !is_keyword(name))
             && (self.at_punct_ahead(at + 2, "(") || self.at_punct_ahead(at + 2, "<"))
@@ -278,6 +281,11 @@ impl Parser {
     /// prototype.
     fn fn_signature(&mut self) -> Result<(Span, DeclSpecs, Declarator), Diagnostic> {
         let start = self.here();
+        // `pub` 只是一个空 token：ShyC 的默认就是文件级私有，写它是给读代码的人看的。
+        while self.eat_ident("pub") {
+            self.eat_ident("static");
+            let _ = self.eat_ident("pub");
+        }
         let storage = self.eat_ident("static").then_some(StorageClass::Static);
         self.bump();
         self.push_scope();
@@ -308,6 +316,7 @@ impl Parser {
                     storage: None,
                     is_inline: false,
                     is_noreturn: false,
+                    is_shy_fn: false,
                     qualifiers: Vec::new(),
                     type_specs: vec![TypeSpecifier::Builtin(BuiltinType::Void)],
                 },
@@ -322,7 +331,11 @@ impl Parser {
             name: Some(name),
             derived,
         };
-        let specs = DeclSpecs { storage, ..specs };
+        let specs = DeclSpecs {
+            storage,
+            is_shy_fn: true,
+            ..specs
+        };
         Ok((start, specs, declarator))
     }
 

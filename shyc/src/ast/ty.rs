@@ -157,6 +157,10 @@ pub struct DeclSpecs {
     pub storage: Option<StorageClass>,
     pub is_inline: bool,
     pub is_noreturn: bool,
+    /// The declaration was written with Shy's `fn` spelling. ShyC gives those
+    /// declarations file-local linkage by default; `#![disable_default_static]`
+    /// restores the C default. A C-style declaration is never affected.
+    pub is_shy_fn: bool,
     pub qualifiers: Vec<Qualifier>,
     pub type_specs: Vec<TypeSpecifier>,
 }

@@ -32,6 +32,7 @@ impl Parser {
             storage: None,
             is_inline: false,
             is_noreturn: false,
+            is_shy_fn: false,
             qualifiers: Vec::new(),
             type_specs: Vec::new(),
         };

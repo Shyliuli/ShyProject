@@ -100,6 +100,10 @@ pub struct Attributes {
     /// local without `mut` may be assigned. This is a checking choice only; the
     /// ABI and object layout are unchanged either way.
     pub disable_rustic_mut: bool,
+    /// `#![disable_default_static]`: restore the C linkage default, so only
+    /// `static` gives a file-local symbol. Without it a Shy `fn` or method is
+    /// file-local by default.
+    pub disable_default_static: bool,
 }
 
 /// One `#include` directive written in the main input file.

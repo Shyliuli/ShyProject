@@ -1,5 +1,6 @@
 //! Shy metadata attributes: `#![no_main]`, `#![mem(N)]`, `#![stack(N)]`,
-//! `#![disable_nonexhaustive_switch]`, `#![disable_rustic_mut]`.
+//! `#![disable_nonexhaustive_switch]`, `#![disable_rustic_mut]`,
+//! `#![disable_default_static]`.
 //!
 //! Only the main input file may contain them. The size suffixes `k`, `K`,
 //! `m`, and `M` are binary multiples, as documented in `ShyC.md`.
@@ -69,6 +70,21 @@ impl Preprocessor<'_> {
                     ));
                 }
                 self.attributes.disable_nonexhaustive_switch = true;
+            }
+            "disable_default_static" => {
+                if inside.len() != 1 {
+                    return Err(Diagnostic::new(
+                        *span,
+                        "expected #![disable_default_static]",
+                    ));
+                }
+                if self.attributes.disable_default_static {
+                    return Err(Diagnostic::new(
+                        *span,
+                        "duplicate Shy #![disable_default_static] attribute",
+                    ));
+                }
+                self.attributes.disable_default_static = true;
             }
             "disable_rustic_mut" => {
                 if inside.len() != 1 {

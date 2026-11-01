@@ -95,6 +95,9 @@ pub struct Options {
     /// `#![disable_rustic_mut]`: keep ordinary C writable defaults, so a `let`
     /// local without `mut` may be assigned. This changes checking only.
     pub disable_rustic_mut: bool,
+    /// `#![disable_default_static]`: keep the C linkage default, so only
+    /// `static` gives a file-local symbol.
+    pub disable_default_static: bool,
     /// Concrete generic instances the explicit instance table exports. Each
     /// one is instantiated even when the unit never uses it, and its functions
     /// get a public C symbol.
@@ -110,6 +113,7 @@ impl Default for Options {
             abi: abi_plan::AbiKind::ShyV1,
             disable_nonexhaustive_switch: false,
             disable_rustic_mut: false,
+            disable_default_static: false,
             exports: Vec::new(),
         }
     }
@@ -458,6 +462,7 @@ pub(super) struct Lowerer {
     pub current_function_name: Option<String>,
     pub disable_nonexhaustive_switch: bool,
     pub disable_rustic_mut: bool,
+    pub disable_default_static: bool,
     pub pending: Vec<PendingFunction>,
     string_counter: u32,
     static_counter: u32,
@@ -506,6 +511,7 @@ impl Lowerer {
             current_function_name: None,
             disable_nonexhaustive_switch: options.disable_nonexhaustive_switch,
             disable_rustic_mut: options.disable_rustic_mut,
+            disable_default_static: options.disable_default_static,
             pending: Vec::new(),
             string_counter: 0,
             static_counter: 0,

@@ -407,6 +407,30 @@ p.add(5);
 The dot operator also auto-dereferences struct and union pointers for both field
 access and method calls.
 
+### Linkage
+
+A `fn` function or an inherent-impl method is **file-local by default**: the
+compiler gives it a symbol scoped to its translation unit, so two units may each
+write their own `helper` without colliding, and a header can carry a private
+implementation. A prototype is not affected — it names something defined
+elsewhere, so it always uses the plain symbol name and a later definition in the
+same unit adopts it.
+
+`#![disable_default_static]` restores the C default for one file, so only
+`static` gives a file-local symbol. It is the linkage twin of
+`#![disable_rustic_mut]`, and it is what a C-compatible library wants:
+
+```c
+#![disable_default_static]   // 这个文件按 C 的默认来
+
+fn helper(void) -> int;      // 对外
+static fn local(void) -> int { return 1; }   // 只在本文件
+```
+
+`pub` is accepted in front of a `fn` as a readability marker and is otherwise an
+empty token: ShyC's default is already the private one, so it changes nothing.
+A C-style declaration keeps C's rules — external unless `static`.
+
 A method of an inherent impl may be declared without a body, like a C
 prototype. A header declares the methods and one translation unit defines them:
 
