@@ -55,7 +55,7 @@
       "patterns": [
         {
           "name": "meta.attribute.shyc",
-          "match": "#!\\[(?:no_main|disable_nonexhaustive_switch|disable_rustic_mut|mem\\([^\\]]*\\)|stack\\([^\\]]*\\))\\]"
+          "match": "#!\\[(?:no_main|disable_nonexhaustive_switch|disable_rustic_mut|disable_default_static|mem\\([^\\]]*\\)|stack\\([^\\]]*\\))\\]"
         },
         {
           "name": "meta.attribute.shyc",
@@ -128,7 +128,7 @@
         },
         {
           "name": "keyword.other.shyc",
-          "match": "\\b(?:impl|trait|fn|let|mut|use)\\b"
+          "match": "\\b(?:impl|trait|fn|let|mut|use|pub)\\b"
         },
         {
           "name": "storage.modifier.shyc",

@@ -286,11 +286,12 @@ impl Parser {
     /// prototype.
     fn fn_signature(&mut self) -> Result<(Span, DeclSpecs, Declarator), Diagnostic> {
         let start = self.here();
-        // `pub` 只是一个空 token：ShyC 的默认就是文件级私有，写它是给读代码的人看的。
-        // `static` 与 `pub` 可以按任意顺序写，`static` 最多一次。
+        // `pub` 导出，`static` 私有，两者可以按任意顺序写，各自最多一次。
         let mut storage = None;
+        let mut is_pub = false;
         loop {
-            if self.eat_ident("pub") {
+            if !is_pub && self.eat_ident("pub") {
+                is_pub = true;
                 continue;
             }
             if storage.is_none() && self.at_ident("static") {
@@ -329,6 +330,7 @@ impl Parser {
                     storage: None,
                     is_inline: false,
                     is_noreturn: false,
+                    is_pub: false,
                     is_shy_fn: false,
                     qualifiers: Vec::new(),
                     type_specs: vec![TypeSpecifier::Builtin(BuiltinType::Void)],
@@ -346,6 +348,7 @@ impl Parser {
         };
         let specs = DeclSpecs {
             storage,
+            is_pub,
             is_shy_fn: true,
             ..specs
         };

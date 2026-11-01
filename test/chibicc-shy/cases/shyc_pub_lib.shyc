@@ -1,0 +1,6 @@
+// 默认私有：只有 pub 的名字能跨单元看到。
+fn helper(void) -> int { return 1; }
+
+pub fn exported_sum(void) -> int { return helper() + 4; }
+
+pub int exported_counter = 3;

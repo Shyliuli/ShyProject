@@ -8,7 +8,7 @@
 
 #include <string.shyh>
 
-fn mem_init(void);
+pub fn mem_init(void);
 void scheduler(void);
 void trap_entry(void);
 
@@ -16,10 +16,10 @@ extern proc *current;
 
 #ifndef SHYOS_RISCV
 // ShyISA 引导栈：入口汇编按符号取它的栈底。
-unsigned char boot_stack[4096];
+pub unsigned char boot_stack[4096];
 #endif
-unsigned int sched_stack_top = SCHED_STACK_TOP;
-unsigned int user_seg_size = USER_SEG_SIZE;
+pub unsigned int sched_stack_top = SCHED_STACK_TOP;
+pub unsigned int user_seg_size = USER_SEG_SIZE;
 
 static void load_init(proc *p) {
     let file = fs_lookup("init");
@@ -43,7 +43,10 @@ static void load_init(proc *p) {
     p->name[4] = 0;
 }
 
-fn kmain(void) {
+// 原型把名字定成对外符号：entry 里的汇编直接调它。
+pub fn kmain(void);
+
+pub fn kmain(void) {
     let banner = "ShyOS boot\n";
 
     mem_init();

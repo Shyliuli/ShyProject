@@ -58,7 +58,7 @@ static int writer(int fd) {
     return 0;
 }
 
-fn main(void) -> int {
+pub fn main(void) -> int {
     int fds[2];
     let mut total = 0;
     let mut ok = 1;

@@ -5,7 +5,7 @@
 #include "usys.h"
 #include "ulib.h"
 
-fn main(void) -> int {
+pub fn main(void) -> int {
     let arg = user_arg();
 
     if (arg[0]) {

@@ -7,19 +7,19 @@
 #include "../../kernel/trap.h"
 #include "../../kernel/proc.h"
 
-fn seg_alloc(void) -> unsigned int;
-fn seg_free(unsigned int base);
+pub fn seg_alloc(void) -> unsigned int;
+pub fn seg_free(unsigned int base);
 void *memcpy(void *dst, const void *src, unsigned int n);
 
-fn arch_user_ptr(proc *p, unsigned int user_addr) -> void * {
+pub fn arch_user_ptr(proc *p, unsigned int user_addr) -> void * {
     return (void *)(p->segbase + user_addr);
 }
 
-fn arch_space_alloc(proc *p) {
+pub fn arch_space_alloc(proc *p) {
     p->segbase = seg_alloc();
 }
 
-fn arch_space_free(proc *p) {
+pub fn arch_space_free(proc *p) {
     if (p->segbase != 0) {
         seg_free(p->segbase);
     }
@@ -57,7 +57,7 @@ static void zero_word_count(unsigned int *dst, unsigned int words) {
     };
 }
 
-fn arch_space_copy(proc *parent, proc *child) -> int {
+pub fn arch_space_copy(proc *parent, proc *child) -> int {
     copy_word_count((void *)child->segbase, (void *)parent->segbase, USER_SEG_SIZE / 4);
     return 0;
 }
@@ -69,7 +69,7 @@ static void clear_tail(proc *p, unsigned int n) {
     zero_word_count(memory + start, USER_SEG_SIZE / 4 - start);
 }
 
-fn arch_space_load(proc *p, const void *src, unsigned int n) {
+pub fn arch_space_load(proc *p, const void *src, unsigned int n) {
     clear_tail(p, n);
     if (((unsigned int)src & 3) == 0 && (n & 3) == 0) {
         copy_word_count((void *)p->segbase, src, n / 4);
@@ -78,18 +78,18 @@ fn arch_space_load(proc *p, const void *src, unsigned int n) {
     }
 }
 
-fn arch_user_sp(unsigned int stack_base) -> unsigned int {
+pub fn arch_user_sp(unsigned int stack_base) -> unsigned int {
     return stack_base; /* ShyISA frames grow upward. */
 }
 
-fn arch_space_write(proc *p, unsigned int user_addr, const void *src, unsigned int n) {
+pub fn arch_space_write(proc *p, unsigned int user_addr, const void *src, unsigned int n) {
     memcpy((void *)(p->segbase + user_addr), src, n);
 }
 
-fn arch_space_read(proc *p, void *dst, unsigned int user_addr, unsigned int n) {
+pub fn arch_space_read(proc *p, void *dst, unsigned int user_addr, unsigned int n) {
     memcpy(dst, (void *)(p->segbase + user_addr), n);
 }
 
-fn ctx_set_ret(context *ctx, int value) {
+pub fn ctx_set_ret(context *ctx, int value) {
     ctx->regs[1] = (unsigned int)value;
 }

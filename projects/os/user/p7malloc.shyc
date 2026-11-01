@@ -30,7 +30,7 @@ static void check(char *p, int n, int seed) {
     }
 }
 
-fn main(void) -> int {
+pub fn main(void) -> int {
     let mut a = (char *)malloc(32);
     let mut b = (char *)malloc(257);
     let mut c = (char *)malloc(4);

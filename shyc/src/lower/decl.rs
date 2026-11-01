@@ -297,6 +297,7 @@ impl Lowerer {
                     &name,
                     storage,
                     declaration.specs.is_shy_fn,
+                    declaration.specs.is_pub,
                     false,
                 );
                 self.declare_function_symbol(&name, &symbol, resolved.ty, false, init.span)?;
@@ -306,6 +307,7 @@ impl Lowerer {
                     resolved.ty,
                     resolved.qualifiers,
                     storage,
+                    declaration.specs.is_pub,
                     init.init.as_ref(),
                     init.span,
                 )?;
@@ -367,6 +369,7 @@ impl Lowerer {
                             &name,
                             declaration.specs.storage,
                             declaration.specs.is_shy_fn,
+                            declaration.specs.is_pub,
                             true,
                         )
                     }
@@ -378,6 +381,7 @@ impl Lowerer {
                     &name,
                     declaration.specs.storage,
                     declaration.specs.is_shy_fn,
+                    declaration.specs.is_pub,
                     true,
                 );
                 (name.clone(), symbol)
@@ -472,6 +476,7 @@ impl Lowerer {
         method: &str,
         storage: Option<ast::StorageClass>,
         is_shy_fn: bool,
+        is_pub: bool,
         defined: bool,
     ) -> String {
         let symbol = format!(
@@ -483,7 +488,7 @@ impl Lowerer {
         if let Some(GlobalRef::Function(index)) = self.global_ref(&symbol) {
             return self.function(index).symbol.clone();
         }
-        if self.file_local(storage, is_shy_fn, defined) {
+        if self.file_local(storage, is_shy_fn, is_pub, defined) {
             self.internal_symbol(&symbol)
         } else {
             symbol
@@ -516,6 +521,7 @@ impl Lowerer {
             &name,
             prototype.specs.storage,
             prototype.specs.is_shy_fn,
+            prototype.specs.is_pub,
             false,
         );
         self.declare_function_symbol(&symbol, &symbol, resolved.ty, false, prototype.span)?;
@@ -645,12 +651,13 @@ impl Lowerer {
         name: &str,
         storage: Option<ast::StorageClass>,
         is_shy_fn: bool,
+        is_pub: bool,
         defined: bool,
     ) -> String {
         if let Some(GlobalRef::Function(index)) = self.global_ref(name) {
             return self.function(index).symbol.clone();
         }
-        if self.file_local(storage, is_shy_fn, defined) {
+        if self.file_local(storage, is_shy_fn, is_pub, defined) {
             self.internal_symbol(name)
         } else {
             name.to_string()
@@ -666,14 +673,19 @@ impl Lowerer {
         &self,
         storage: Option<ast::StorageClass>,
         is_shy_fn: bool,
+        is_pub: bool,
         defined: bool,
     ) -> bool {
-        match storage {
-            Some(ast::StorageClass::Static) => true,
-            // 原型声明的是别处的东西，永远按对外名字走；只有带函数体的定义
-            // 才吃「ShyC 默认文件级私有」这条规则。
-            _ => is_shy_fn && defined && !self.disable_default_static,
+        if storage == Some(ast::StorageClass::Static) {
+            return true;
         }
+        if is_pub {
+            // 显式 `pub`：文件级默认被它关掉，就是导出。
+            return false;
+        }
+        // 原型声明的是别处的东西，永远按对外名字走；只有带函数体的定义
+        // 才吃「ShyC 默认文件级私有」这条规则。
+        is_shy_fn && defined && !self.disable_default_static
     }
 
     /// Register a function, checking redeclaration compatibility.
@@ -734,11 +746,17 @@ impl Lowerer {
         ty: TypeId,
         qualifiers: Qualifiers,
         storage: Option<ast::StorageClass>,
+        is_pub: bool,
         init: Option<&ast::Initializer>,
         span: Span,
     ) -> Result<(), Diagnostic> {
         let is_extern = storage == Some(ast::StorageClass::Extern);
-        let symbol = if storage == Some(ast::StorageClass::Static) {
+        // 全局变量和函数同一套规则：`pub` 导出，`static` 私有，
+        // 两者都不写就是本单元私有（`#![disable_default_static]` 切回 C 默认）。
+        // `extern` 声明的是别处的东西，名字永远按对外符号走。
+        let symbol = if storage == Some(ast::StorageClass::Static)
+            || (!is_pub && !is_extern && !self.disable_default_static)
+        {
             self.internal_symbol(name)
         } else {
             name.to_string()
@@ -1418,6 +1436,7 @@ impl FnLower<'_> {
                             &name,
                             storage,
                             declaration.specs.is_shy_fn,
+                            declaration.specs.is_pub,
                             false,
                         );
                 self.l
@@ -1438,6 +1457,7 @@ impl FnLower<'_> {
                         resolved.ty,
                         resolved.qualifiers,
                         Some(ast::StorageClass::Extern),
+                        declaration.specs.is_pub,
                         None,
                         init.span,
                     )?;

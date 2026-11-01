@@ -409,27 +409,33 @@ access and method calls.
 
 ### Linkage
 
-A `fn` function or an inherent-impl method is **file-local by default**: the
-compiler gives it a symbol scoped to its translation unit, so two units may each
-write their own `helper` without colliding, and a header can carry a private
-implementation. A prototype is not affected — it names something defined
-elsewhere, so it always uses the plain symbol name and a later definition in the
-same unit adopts it.
+ShyC declarations are **file-local by default**, the same shape as `let` being
+read-only by default: the conservative choice is implicit, and opening it up is
+written out.
+
+| Declaration | Default | `pub` | `static` |
+|---|---|---|---|
+| `fn` function | file-local | exported | file-local |
+| impl method | file-local | exported | file-local |
+| global object | file-local | exported | file-local |
+| struct/union field | always accessible | — | — |
+
+`pub` is accepted in front of every `fn`, method and global. Fields are C
+style: they carry no `pub` and are always accessible.
+
+A prototype is never file-local: it names something defined elsewhere, and a
+definition in the same unit adopts the prototype's symbol.
 
 `#![disable_default_static]` restores the C default for one file, so only
-`static` gives a file-local symbol. It is the linkage twin of
-`#![disable_rustic_mut]`, and it is what a C-compatible library wants:
+`static` gives a file-local symbol and `pub` becomes an empty token. It is the
+linkage twin of `#![disable_rustic_mut]`, and it is what a C-compatible
+library wants:
 
 ```c
 #![disable_default_static]   // 这个文件按 C 的默认来
-
 fn helper(void) -> int;      // 对外
 static fn local(void) -> int { return 1; }   // 只在本文件
 ```
-
-`pub` is accepted in front of a `fn` as a readability marker and is otherwise an
-empty token: ShyC's default is already the private one, so it changes nothing.
-A C-style declaration keeps C's rules — external unless `static`.
 
 A method of an inherent impl may be declared without a body, like a C
 prototype. A header declares the methods and one translation unit defines them:

@@ -112,6 +112,7 @@ impl Analysis {
                 abi: AbiKind::ShyV1,
                 disable_nonexhaustive_switch: attributes.disable_nonexhaustive_switch,
                 disable_rustic_mut: attributes.disable_rustic_mut,
+                disable_default_static: attributes.disable_default_static,
                 exports: Vec::new(),
             };
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

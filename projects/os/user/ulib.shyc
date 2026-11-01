@@ -95,22 +95,22 @@ impl Buffer {
     }
 }
 
-fn user_argv0(void) -> char * {
+pub fn user_argv0(void) -> char * {
     return (char *)USER_ARG0_ADDR;
 }
 
-fn user_arg(void) -> char * {
+pub fn user_arg(void) -> char * {
     return (char *)USER_ARG_ADDR;
 }
 
-fn streq(const char *a, const char *b) -> int {
+pub fn streq(const char *a, const char *b) -> int {
     Text s;
 
     s.data = a;
     return s.eq(b);
 }
 
-fn read_line(char *buf, int max) -> int {
+pub fn read_line(char *buf, int max) -> int {
     Buffer line;
 
     if (max <= 0) {

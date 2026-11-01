@@ -1,0 +1,19 @@
+// 两个单元各写一个 helper() 不冲突：默认都是本单元私有。
+fn helper(void) -> int { return 100; }
+
+// 跨单元的名字要 pub：另一个单元里导出的函数与全局变量。
+pub fn exported_sum(void) -> int;
+extern int exported_counter;
+
+int main(void) {
+    if (helper() != 100) {
+        return 1;
+    }
+    if (exported_sum() != 5) {
+        return 2;
+    }
+    if (exported_counter != 3) {
+        return 3;
+    }
+    return 0;
+}

@@ -32,6 +32,7 @@ impl Parser {
             storage: None,
             is_inline: false,
             is_noreturn: false,
+            is_pub: false,
             is_shy_fn: false,
             qualifiers: Vec::new(),
             type_specs: Vec::new(),
@@ -58,8 +59,9 @@ impl Parser {
                     specs.is_noreturn = true;
                     self.bump();
                 }
-                // `pub` 是空 token：默认就是文件级私有，写它只为可读性。
+                // `pub` 是导出标记：不写就是文件级私有。
                 "pub" => {
+                    specs.is_pub = true;
                     self.bump();
                 }
                 "const" => {

@@ -4,14 +4,14 @@
 #define UART_THR 0x10000000
 #define UART_LSR 0x10000005
 
-fn arch_uart_putc(int c) {
+pub fn arch_uart_putc(int c) {
     volatile unsigned char *lsr = (volatile unsigned char *)UART_LSR;
     volatile unsigned char *thr = (volatile unsigned char *)UART_THR;
     while ((*lsr & 0x20) == 0) { }
     *thr = (unsigned char)c;
 }
 
-fn arch_uart_getc(void) -> int {
+pub fn arch_uart_getc(void) -> int {
     volatile unsigned char *lsr = (volatile unsigned char *)UART_LSR;
     volatile unsigned char *rbr = (volatile unsigned char *)UART_THR;
     if ((*lsr & 1) == 0) return -1;

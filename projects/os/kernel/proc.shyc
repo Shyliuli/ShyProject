@@ -10,14 +10,14 @@
 
 #include <string.shyh>
 
-fn kalloc_page(void) -> void *;
-fn kfree_page(void *p);
-fn seg_alloc(void) -> unsigned int;
-fn seg_free(unsigned int pa);
+pub fn kalloc_page(void) -> void *;
+pub fn kfree_page(void *p);
+pub fn seg_alloc(void) -> unsigned int;
+pub fn seg_free(unsigned int pa);
 void scheduler(void);
 
-proc procs[NPROC];
-int next_pid;
+pub proc procs[NPROC];
+pub int next_pid;
 static Lock proc_lock;
 
 static void write_u32(unsigned char *p, unsigned int off, unsigned int v) {
@@ -105,66 +105,66 @@ static void load_idle_code(proc *p) {
 }
 
 impl proc {
-    fn set_state(self *p, enum procstate state) {
+    pub fn set_state(self *p, enum procstate state) {
         p.state = state;
     }
 
-    fn is_state(self *p, enum procstate state) -> int {
+    pub fn is_state(self *p, enum procstate state) -> int {
         return p.state == state;
     }
 
-    fn is_used(self *p) -> int {
+    pub fn is_used(self *p) -> int {
         return p.state != UNUSED;
     }
 
-    fn is_runnable_user(self *p) -> int {
+    pub fn is_runnable_user(self *p) -> int {
         return p.state == RUNNABLE && p.pid != 0;
     }
 
-    fn is_live_non_idle(self *p) -> int {
+    pub fn is_live_non_idle(self *p) -> int {
         return p.state != UNUSED && p.state != ZOMBIE && p.pid != 0;
     }
 
-    fn killed_runnable(self *p) -> int {
+    pub fn killed_runnable(self *p) -> int {
         return p.pid != 0 && p.killed && p.state == RUNNABLE;
     }
 
-    fn wait_chan(self *p) -> int {
+    pub fn wait_chan(self *p) -> int {
         return 0 - p.pid;
     }
 
-    fn sleeping_on(self *p, int chan) -> int {
+    pub fn sleeping_on(self *p, int chan) -> int {
         return p.state == SLEEPING && p.chan == chan;
     }
 
-    fn clear_wait(self *p) {
+    pub fn clear_wait(self *p) {
         p.waiting = 0;
         p.wait_status = 0;
         p.chan = 0;
     }
 
-    fn sleep_on(self *p, int chan) {
+    pub fn sleep_on(self *p, int chan) {
         p.chan = chan;
         p.state = SLEEPING;
     }
 
-    fn wake(self *p) {
+    pub fn wake(self *p) {
         p.chan = 0;
         p.state = RUNNABLE;
     }
 
-    fn kill_flag(self *p) {
+    pub fn kill_flag(self *p) {
         p.killed = 1;
         if (p.state == SLEEPING) {
             p.wake();
         }
     }
 
-    fn copy_name(self *p, const char *name) {
+    pub fn copy_name(self *p, const char *name) {
         copy_proc_name(p.name, name);
     }
 
-    fn init_unused(self *p) {
+    pub fn init_unused(self *p) {
         clear_context(&p.ctx);
         p.state = UNUSED;
         p.pid = 0;
@@ -185,7 +185,7 @@ impl proc {
         p.name[0] = 0;
     }
 
-    fn init_embryo(self *p, int pid) {
+    pub fn init_embryo(self *p, int pid) {
         p.state = EMBRYO;
         p.pid = pid;
         p.parent = -1;
@@ -197,7 +197,7 @@ impl proc {
         p.name[0] = 0;
     }
 
-    fn init_user_context(self *p) {
+    pub fn init_user_context(self *p) {
         for (int r = 0; r < NREG; r++) {
             p.ctx.regs[r] = 0;
         }
@@ -229,7 +229,7 @@ impl proc {
         p.name[0] = 0;
     }
 
-    fn free_resources(self *p) {
+    pub fn free_resources(self *p) {
         if (p.kstack != 0) {
             kfree_page((void *)p.kstack);
         }
@@ -283,7 +283,7 @@ static void wake_waiting_parent_locked(proc *parent, proc *child) {
     parent.set_state(RUNNABLE);
 }
 
-fn proc_init(void) {
+pub fn proc_init(void) {
     lock_init(&proc_lock);
     for (int i = 0; i < NPROC; i++) {
         procs[i].init_unused();
@@ -298,7 +298,7 @@ fn proc_init(void) {
     load_idle_code(idle);
 }
 
-fn alloc_proc(void) -> proc * {
+pub fn alloc_proc(void) -> proc * {
     proc *p = 0;
 
     lock_acquire(&proc_lock);
@@ -335,13 +335,13 @@ static void free_proc_locked(proc *p) {
     p.init_unused();
 }
 
-fn free_proc(proc *p) {
+pub fn free_proc(proc *p) {
     lock_acquire(&proc_lock);
     free_proc_locked(p);
     lock_release(&proc_lock);
 }
 
-fn fork(void) -> int {
+pub fn fork(void) -> int {
     let child = alloc_proc();
     let stdin_fd = current->stdin_fd;
     let stdout_fd = current->stdout_fd;
@@ -436,7 +436,7 @@ static void proc_exit_locked(int status) {
     }
 }
 
-fn proc_exit(int status) {
+pub fn proc_exit(int status) {
     current->xstatus = status;
     if (current->stdin_fd >= 3 || current->stdout_fd >= 3 || current->open_fds != 0) {
         file_close_proc();
@@ -451,7 +451,7 @@ void exit(int status) {
     proc_exit(status);
 }
 
-fn wait(int *status) -> int {
+pub fn wait(int *status) -> int {
     while (1) {
         let mut have_child = 0;
 
@@ -487,14 +487,14 @@ fn wait(int *status) -> int {
     }
 }
 
-fn getpid(void) -> int {
+pub fn getpid(void) -> int {
     lock_acquire(&proc_lock);
     let pid = current->pid;
     lock_release(&proc_lock);
     return pid;
 }
 
-fn kill(int pid) -> int {
+pub fn kill(int pid) -> int {
     lock_acquire(&proc_lock);
     let p = find_proc_locked(pid);
     if (p == 0 || p->pid == 0) {
@@ -507,7 +507,7 @@ fn kill(int pid) -> int {
     return 0;
 }
 
-fn sleep(int chan) -> int {
+pub fn sleep(int chan) -> int {
     if (chan == 0) {
         return -1;
     }
@@ -533,13 +533,13 @@ static void wakeup_locked(int chan) {
     }
 }
 
-fn wakeup(int chan) {
+pub fn wakeup(int chan) {
     lock_acquire(&proc_lock);
     wakeup_locked(chan);
     lock_release(&proc_lock);
 }
 
-fn yield(void) {
+pub fn yield(void) {
     lock_acquire(&proc_lock);
     if (current.is_state(RUNNING)) {
         current.set_state(RUNNABLE);
@@ -548,7 +548,7 @@ fn yield(void) {
     scheduler();
 }
 
-fn proc_sbrk(int n) -> int {
+pub fn proc_sbrk(int n) -> int {
     lock_acquire(&proc_lock);
     if (current == 0 || current->pid == 0) {
         lock_release(&proc_lock);
@@ -590,7 +590,7 @@ fn proc_sbrk(int n) -> int {
     return (int)old;
 }
 
-fn proc_next(void) -> proc * {
+pub fn proc_next(void) -> proc * {
     let mut start = 0;
 
     lock_acquire(&proc_lock);
@@ -633,7 +633,7 @@ fn proc_next(void) -> proc * {
     return next;
 }
 
-fn proc_set_current_state(enum procstate state) {
+pub fn proc_set_current_state(enum procstate state) {
     lock_acquire(&proc_lock);
     if (current != 0) {
         current.set_state(state);
@@ -641,7 +641,7 @@ fn proc_set_current_state(enum procstate state) {
     lock_release(&proc_lock);
 }
 
-fn proc_current_state_is(enum procstate state) -> int {
+pub fn proc_current_state_is(enum procstate state) -> int {
     let mut same = 0;
 
     lock_acquire(&proc_lock);
@@ -652,7 +652,7 @@ fn proc_current_state_is(enum procstate state) -> int {
     return same;
 }
 
-fn proc_current_killed_runnable(void) -> int {
+pub fn proc_current_killed_runnable(void) -> int {
     let mut killed = 0;
 
     lock_acquire(&proc_lock);
@@ -663,14 +663,14 @@ fn proc_current_killed_runnable(void) -> int {
     return killed;
 }
 
-fn proc_live_non_idle_exists(void) -> int {
+pub fn proc_live_non_idle_exists(void) -> int {
     lock_acquire(&proc_lock);
     let live = has_live_non_idle_locked();
     lock_release(&proc_lock);
     return live;
 }
 
-fn proc_set_current_size(unsigned int sz) {
+pub fn proc_set_current_size(unsigned int sz) {
     lock_acquire(&proc_lock);
     if (current != 0) {
         current->sz = sz;
@@ -679,7 +679,7 @@ fn proc_set_current_size(unsigned int sz) {
     lock_release(&proc_lock);
 }
 
-fn proc_set_current_stack_base(unsigned int stack_base) {
+pub fn proc_set_current_stack_base(unsigned int stack_base) {
     lock_acquire(&proc_lock);
     if (current != 0) {
         current->stack_base = stack_base;
@@ -687,7 +687,7 @@ fn proc_set_current_stack_base(unsigned int stack_base) {
     lock_release(&proc_lock);
 }
 
-fn proc_set_current_name(const char *name) {
+pub fn proc_set_current_name(const char *name) {
     lock_acquire(&proc_lock);
     if (current != 0) {
         current.copy_name(name);
@@ -695,7 +695,7 @@ fn proc_set_current_name(const char *name) {
     lock_release(&proc_lock);
 }
 
-fn proc_psline(int index, char *user_buf, int max) -> int {
+pub fn proc_psline(int index, char *user_buf, int max) -> int {
     char dst[64];
     let addr = (unsigned int)user_buf;
     let mut seen = 0;

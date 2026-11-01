@@ -1,22 +1,22 @@
 #![no_main]
 #include "arch.h"
 
-fn uart_putc(int c) { arch_uart_putc(c); }
-fn uart_getc(void) -> int { return arch_uart_getc(); }
+pub fn uart_putc(int c) { arch_uart_putc(c); }
+pub fn uart_getc(void) -> int { return arch_uart_getc(); }
 
-fn user_exit(void) {
+pub fn user_exit(void) {
     let msg = "ShyOS user exit\n";
     for (int i = 0; msg[i]; i++) arch_uart_putc(msg[i]);
     arch_shutdown(0);
 }
 
-fn trap_unexpected(void) {
+pub fn trap_unexpected(void) {
     let msg = "ShyOS unexpected trap\n";
     for (int i = 0; msg[i]; i++) arch_uart_putc(msg[i]);
     arch_shutdown(1);
 }
 
-fn panic(char *msg) {
+pub fn panic(char *msg) {
     let prefix = "panic: ";
     let null_msg = "(null)";
     for (int i = 0; prefix[i]; i++) arch_uart_putc(prefix[i]);

@@ -2,11 +2,11 @@
 
 #include "../../kernel/arch.h"
 
-fn arch_uart_putc(int c) {
+pub fn arch_uart_putc(int c) {
     asm!(c) { "oututfa {c}" };
 }
 
-fn arch_uart_getc(void) -> int {
+pub fn arch_uart_getc(void) -> int {
     int status = 0;
     int data = 0;
     asm!(status, data) {
@@ -15,33 +15,33 @@ fn arch_uart_getc(void) -> int {
     return (status & 1) ? data : -1;
 }
 
-fn arch_shutdown(int status) {
+pub fn arch_shutdown(int status) {
     asm!(status) { "seta exit {status}" };
     for (;;) { }
 }
 
-fn arch_set_trap(void *entry) {
+pub fn arch_set_trap(void *entry) {
     asm!(entry) { "seta trap {entry}" };
 }
 
-fn arch_set_timer(uint32_t ticks) {
+pub fn arch_set_timer(uint32_t ticks) {
     asm!(ticks) { "seta tm {ticks}" };
 }
 
-fn arch_fence_i(void) {
+pub fn arch_fence_i(void) {
     asm("fencei");
 }
 
-fn arch_atomic_exchange(volatile int *address, int value) -> int {
+pub fn arch_atomic_exchange(volatile int *address, int value) -> int {
     asm!(address, value) { "atoma {address} {value}" };
     return value;
 }
 
-fn arch_enable_timer(void) {
+pub fn arch_enable_timer(void) {
     /* ShyISA has no maskable timer interrupt to arm. */
 }
 
-fn arch_enter_user(void *entry, void *user_sp, void *kernel_sp) {
+pub fn arch_enter_user(void *entry, void *user_sp, void *kernel_sp) {
     asm!(entry, user_sp, kernel_sp) {
         "seta ksp {kernel_sp}\nseta sp {user_sp}\nseta epc {entry}\nenteruser {entry}"
     };

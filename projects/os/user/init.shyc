@@ -4,7 +4,7 @@
 
 #include "usys.h"
 
-fn main(void) -> int {
+pub fn main(void) -> int {
     while (1) {
         let status = 0;
         let mut pid = fork();

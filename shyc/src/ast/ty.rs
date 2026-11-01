@@ -157,6 +157,9 @@ pub struct DeclSpecs {
     pub storage: Option<StorageClass>,
     pub is_inline: bool,
     pub is_noreturn: bool,
+    /// An explicit `pub`, which exports a ShyC `fn` or method. Without it a
+    /// declaration is file-local, so `pub` is the opt-in that mirrors `mut`.
+    pub is_pub: bool,
     /// The declaration was written with Shy's `fn` spelling. ShyC gives those
     /// declarations file-local linkage by default; `#![disable_default_static]`
     /// restores the C default. A C-style declaration is never affected.

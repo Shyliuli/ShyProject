@@ -719,7 +719,7 @@ static int dispatch(const char *name, int argc, char *argv[]) {
     return 1;
 }
 
-fn main(void) -> int {
+pub fn main(void) -> int {
     Args args;
     char argbuf[LINE_MAX];
     let src = user_arg();

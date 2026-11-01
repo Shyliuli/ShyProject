@@ -86,19 +86,19 @@ def write_c(output, inputs):
             out.write(f"unsigned int {ident}_len = {len(data)};\n\n")
 
         if files:
-            out.write(f"struct fs_file fs_files[{len(files)}] = {{\n")
+            out.write(f"pub struct fs_file fs_files[{len(files)}] = {{\n")
             for item in files:
                 out.write(
                     f"    {{ (char *){item['id']}_name, {item['data_id']}_data, {len(item['data'])} }},\n"
                 )
             out.write("};\n")
         else:
-            out.write("struct fs_file fs_files[1] = {\n")
+            out.write("pub struct fs_file fs_files[1] = {\n")
             out.write("    { (char *)0, (unsigned char *)0, 0 },\n")
             out.write("};\n")
 
-        out.write(f"int fs_nfiles = {len(files)};\n\n")
-        out.write("int fs_init(void) {\n")
+        out.write(f"pub int fs_nfiles = {len(files)};\n\n")
+        out.write("pub int fs_init(void) {\n")
         out.write("    return 0;\n")
         out.write("}\n")
 

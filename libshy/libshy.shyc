@@ -255,9 +255,9 @@ struct FILE {
 static FILE stdin_file = {STDIN_FILENO, 0};
 static FILE stdout_file = {STDOUT_FILENO, 0};
 static FILE stderr_file = {STDERR_FILENO, 0};
-FILE *stdin = &stdin_file;
-FILE *stdout = &stdout_file;
-FILE *stderr = &stderr_file;
+pub FILE *stdin = &stdin_file;
+pub FILE *stdout = &stdout_file;
+pub FILE *stderr = &stderr_file;
 
 FILE *fopen(const char *path, const char *mode) {
   int flags = O_RDONLY;
