@@ -7,13 +7,19 @@
       "include": "#comments"
     },
     {
-      "include": "#strings"
+      "include": "#metadata"
     },
     {
       "include": "#sections"
     },
     {
       "include": "#directives"
+    },
+    {
+      "include": "#labels"
+    },
+    {
+      "include": "#strings"
     },
     {
       "include": "#numbers"
@@ -25,7 +31,7 @@
       "include": "#instructions"
     },
     {
-      "include": "#labels"
+      "include": "#symbols"
     }
   ],
   "repository": {
@@ -39,6 +45,138 @@
           "name": "comment.block.shyasm",
           "begin": "/\\*",
           "end": "\\*/"
+        }
+      ]
+    },
+    "metadata": {
+      "patterns": [
+        {
+          "name": "meta.attribute.shyasm",
+          "match": "#!\\[(?:mem|stack)\\([^\\]]*\\)\\]"
+        }
+      ]
+    },
+    "sections": {
+      "patterns": [
+        {
+          "begin": "___\\s*DEFINE\\s*___",
+          "end": "(?=___\\s*(?:DATA|CODE)\\s*___)",
+          "name": "meta.definition-section.shyasm",
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "include": "#numbers"
+            },
+            {
+              "name": "variable.other.constant.shyasm",
+              "match": "^\\s*[A-Za-z_$][A-Za-z0-9_.$]*"
+            }
+          ],
+          "beginCaptures": {
+            "0": {
+              "name": "keyword.control.section.shyasm"
+            }
+          }
+        },
+        {
+          "begin": "___\\s*DATA\\s*___",
+          "end": "(?=___\\s*(?:DEFINE|CODE)\\s*___)",
+          "name": "meta.data-section.shyasm",
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "include": "#strings"
+            },
+            {
+              "include": "#numbers"
+            },
+            {
+              "include": "#data"
+            }
+          ],
+          "beginCaptures": {
+            "0": {
+              "name": "keyword.control.section.shyasm"
+            }
+          }
+        },
+        {
+          "begin": "___\\s*CODE\\s*___",
+          "end": "(?=___\\s*(?:DEFINE|DATA)\\s*___)",
+          "name": "meta.code-section.shyasm",
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "include": "#directives"
+            },
+            {
+              "include": "#labels"
+            },
+            {
+              "include": "#strings"
+            },
+            {
+              "include": "#numbers"
+            },
+            {
+              "include": "#registers"
+            },
+            {
+              "include": "#instructions"
+            },
+            {
+              "include": "#symbols"
+            }
+          ],
+          "beginCaptures": {
+            "0": {
+              "name": "keyword.control.section.shyasm"
+            }
+          }
+        }
+      ]
+    },
+    "directives": {
+      "patterns": [
+        {
+          "match": "^\\s*\\.section\\s+([A-Za-z_$][A-Za-z0-9_.$]*)",
+          "captures": {
+            "0": {
+              "name": "keyword.other.directive.shyasm"
+            },
+            "1": {
+              "name": "entity.name.section.shyasm"
+            }
+          }
+        },
+        {
+          "match": "^\\s*\\.symbol\\s+([A-Za-z_$][A-Za-z0-9_.$]*)",
+          "captures": {
+            "0": {
+              "name": "keyword.other.directive.shyasm"
+            },
+            "1": {
+              "name": "entity.name.symbol.shyasm"
+            }
+          }
+        }
+      ]
+    },
+    "labels": {
+      "patterns": [
+        {
+          "match": "^\\s*([A-Za-z_.$][A-Za-z0-9_.$]*):",
+          "captures": {
+            "1": {
+              "name": "entity.name.label.shyasm"
+            }
+          }
         }
       ]
     },
@@ -57,31 +195,11 @@
         }
       ]
     },
-    "sections": {
-      "patterns": [
-        {
-          "name": "keyword.control.section.shyasm",
-          "match": "\\b(___DEFINE___|___DATA___|___CODE___)\\b"
-        }
-      ]
-    },
-    "directives": {
-      "patterns": [
-        {
-          "name": "keyword.other.directive.shyasm",
-          "match": "^\\s*\\.(section|symbol)\\b"
-        },
-        {
-          "name": "meta.attribute.shyasm",
-          "match": "#!\\[(mem|stack)\\([^\\]]*\\)\\]"
-        }
-      ]
-    },
     "numbers": {
       "patterns": [
         {
           "name": "constant.numeric.shyasm",
-          "match": "\\b(0[xX][0-9a-fA-F]+|[01]+b|[0-9]+)\\b"
+          "match": "\\b(?:0[xX][0-9a-fA-F]+|[01]+[bB]|[0-9]+)\\b"
         }
       ]
     },
@@ -89,7 +207,7 @@
       "patterns": [
         {
           "name": "variable.language.register.shyasm",
-          "match": "\\b([1-9]x|ax|bx|cx|dx|sp|bp)\\b"
+          "match": "(?i)\\b(?:[0-9a-f]x|ax|bx|cx|dx|ex|fx|pc|segs|sp|tm|status|trap|m[1-4]|rs|exit|epc|cause|ksp|sege)\\b"
         }
       ]
     },
@@ -97,15 +215,46 @@
       "patterns": [
         {
           "name": "keyword.mnemonic.shyasm",
-          "match": "^\\s*\\b[a-z][a-z0-9]*\\b"
+          "match": "^\\s*[a-z][a-z0-9]*\\b"
         }
       ]
     },
-    "labels": {
+    "symbols": {
       "patterns": [
         {
-          "name": "entity.name.label.shyasm",
-          "match": "^\\s*[A-Za-z_.$][A-Za-z0-9_.$]*:"
+          "name": "variable.other.symbol.shyasm",
+          "match": "\\b[A-Za-z_$][A-Za-z0-9_.$]*(?:\\([^)]*\\))?"
+        }
+      ]
+    },
+    "data": {
+      "patterns": [
+        {
+          "name": "variable.other.symbol.shyasm",
+          "match": "^\\s*[A-Za-z_$][A-Za-z0-9_.$]*(?:\\([^)]*\\))?"
+        },
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "name": "meta.array.shyasm",
+          "patterns": [
+            {
+              "include": "#numbers"
+            },
+            {
+              "include": "#symbols"
+            }
+          ]
+        },
+        {
+          "begin": "\\[",
+          "end": "\\]",
+          "name": "meta.byte-array.shyasm",
+          "patterns": [
+            {
+              "include": "#numbers"
+            }
+          ]
         }
       ]
     }

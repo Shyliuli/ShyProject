@@ -270,7 +270,7 @@ fn describe(token: &Token) -> String {
 ///
 /// `self` is deliberately absent: it is a type name only inside `impl` or a
 /// `trait` signature, and a normal identifier everywhere else.
-pub(crate) fn is_keyword(word: &str) -> bool {
+pub fn is_keyword(word: &str) -> bool {
     matches!(
         word,
         "auto"

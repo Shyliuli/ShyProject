@@ -767,7 +767,7 @@ impl Parser {
 }
 
 /// One built-in type keyword, if `word` is one.
-fn builtin_type(word: &str) -> Option<BuiltinType> {
+pub fn builtin_type(word: &str) -> Option<BuiltinType> {
     Some(match word {
         "void" => BuiltinType::Void,
         "_Bool" => BuiltinType::Bool,

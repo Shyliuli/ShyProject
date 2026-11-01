@@ -38,6 +38,9 @@ mod init;
 mod stmt;
 mod ty;
 
+pub use cursor::is_keyword;
+pub use ty::builtin_type;
+
 use std::collections::HashSet;
 
 use crate::ast;
