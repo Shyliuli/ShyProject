@@ -135,27 +135,31 @@ own parameter each get an explicit diagnostic instead.
 A generic record takes methods through a template `impl`:
 `impl<T> Box<T> { T get(self *b) { return b->value; } }`, where the short
 `impl Box<T>` form writes the same parameters. A method lookup on one concrete
-instance binds the impl parameters to that instance's own arguments and lowers
+instance unifies the target with that instance's own arguments and lowers
 every method it uses to an ordinary function with a translation-unit internal
 symbol, so `Box<int> b; b.get();` stays a direct call. A target may reorder or
-repeat its parameters: `impl<T, U> Trait for Pair<U, T>` binds `U` from the
-first receiver argument and `T` from the second. Every target argument must be
-a bare impl parameter; a nested or concrete target argument such as
-`Pair<T, int>` is rejected with a diagnostic, as is an impl parameter that
-never appears in the target. Repeating a parameter is checked against the
-concrete receiver, so `Pair<T, T>` accepts `Pair<int, int>` and rejects
-`Pair<int, long>`.
+repeat its parameters, as in `impl<T, U> Trait for Pair<U, T>`, and its
+arguments may be concrete, nested, pointer, or array types:
+`impl<T> Trait for Pair<T, int>` applies only to a `Pair<..., int>`, and
+`impl<T> Trait for Box<Vec<T>>` binds `T` through `Box<Vec<int>>`. A template
+whose concrete parts do not agree with the receiver does not apply, so
+disjoint targets such as `Pair<T, int>` and `Pair<T, long>` can coexist.
+Repeating a parameter is checked against the concrete receiver, so
+`Pair<T, T>` accepts `Pair<int, int>` and reports `Pair<int, long>`. An impl
+parameter that never appears in the target is rejected.
 
 A generic impl may implement a trait: `impl<T> Show for Box<T> { ... }`, or
 with reordered bindings `impl<T, U> Convert<T> for Pair<U, T> { ... }`. The
 trait arguments resolve after the impl parameters bind, and a materialized
 implementation is keyed by trait + concrete receiver + resolved trait arguments.
 `Show for Box<int>` and `Show for Box<long>` are therefore distinct, and so are
-`Convert<int> for Pair<U, T>` and `Convert<long> for Pair<U, T>`. One record has
-at most one generic inherent impl; it may have generic impls of several
-different traits. A trait bound on an impl parameter still gets an explicit
-diagnostic, and a second generic impl of the same trait arguments and concrete
-receiver is reported when the receiver is instantiated.
+`Convert<int> for Pair<U, T>` and `Convert<long> for Pair<U, T>`. A record may
+have several generic inherent impls when their targets are disjoint; two
+templates that both match one receiver are reported when that receiver is
+instantiated. It may also have generic impls of several different traits. A
+trait bound on an impl parameter still gets an explicit diagnostic, and a
+second generic impl of the same trait arguments and concrete receiver is
+reported when the receiver is instantiated.
 
 A method may declare generic parameters of its own:
 `fn identity<U>(self *b, U value) -> U`. Such a method is a template inside its

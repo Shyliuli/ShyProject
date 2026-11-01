@@ -402,7 +402,10 @@ impl Lowerer {
         }
     }
 
-    fn array_length(&mut self, array: &ast::ArrayDeclarator) -> Result<Option<u32>, Diagnostic> {
+    pub(super) fn array_length(
+        &mut self,
+        array: &ast::ArrayDeclarator,
+    ) -> Result<Option<u32>, Diagnostic> {
         match &array.length {
             ast::ArrayLength::Unspecified => Ok(None),
             ast::ArrayLength::Star => Err(Diagnostic::new(

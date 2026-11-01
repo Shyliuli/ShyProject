@@ -337,8 +337,8 @@ impl Lowerer {
         // instantiation, when every file-scope name exists.
         for (position, argument) in generic.args.iter().enumerate() {
             let actual = generic_argument_kind(argument);
-            let expected = record.params[position].kind;
-            if actual != expected {
+            let expected = &record.params[position].kind;
+            if &actual != expected {
                 return Err(Diagnostic::new(
                     argument.span,
                     format!(
@@ -346,7 +346,7 @@ impl Lowerer {
                         position + 1,
                         generic.name.text,
                         generic_parameter_kind_text(expected),
-                        generic_argument_kind_text(actual)
+                        generic_argument_kind_text(&actual)
                     ),
                 ));
             }
@@ -355,7 +355,7 @@ impl Lowerer {
         for argument in &generic.args {
             mark_target_params(argument, &block.generics, &mut used);
         }
-        if let Some((index, parameter)) = block
+        if let Some((_index, parameter)) = block
             .generics
             .iter()
             .enumerate()
@@ -521,6 +521,200 @@ impl Lowerer {
                 second_argument + 1
             ),
         )
+    }
+
+    /// The target arguments of one generic impl, with concrete parts resolved
+    /// in the receiver's scope.
+    ///
+    /// Matching happens when a concrete receiver is first needed, so every
+    /// file-scope type the target names already exists. That is why the shapes
+    /// are built here instead of at registration.
+    fn impl_target_arguments(
+        &mut self,
+        type_name: &ast::TypeName,
+        params: &[ast::GenericParam],
+    ) -> Result<Vec<TargetArg>, Diagnostic> {
+        let Some(generic) = generic_impl_target(type_name) else {
+            return Err(Diagnostic::new(
+                type_name.span,
+                "a generic impl target must name a generic record, as in 'impl<T> Box<T>'",
+            ));
+        };
+        let mut arguments = Vec::with_capacity(generic.args.len());
+        for argument in &generic.args {
+            let target = match &argument.kind {
+                ast::GenericArgKind::Type(type_name) => {
+                    TargetArg::Type(self.target_type_pattern(type_name, params)?)
+                }
+                ast::GenericArgKind::Const(expr) => {
+                    TargetArg::Const(self.target_const_pattern(expr, params)?)
+                }
+            };
+            arguments.push(target);
+        }
+        Ok(arguments)
+    }
+
+    /// The shape of one type in a generic impl target.
+    ///
+    /// A type that names no impl parameter resolves to one concrete identity.
+    /// Otherwise its generic, pointer, and array structure stays open, and each
+    /// concrete part becomes an exact identity a receiver must agree with.
+    fn target_type_pattern(
+        &mut self,
+        type_name: &ast::TypeName,
+        params: &[ast::GenericParam],
+    ) -> Result<TypePattern, Diagnostic> {
+        if !target_type_mentions_parameter(type_name, params) {
+            return Ok(TypePattern::Exact(self.resolve_type_name(type_name)?));
+        }
+        let base = self.target_spec_pattern(&type_name.specs, params)?;
+        match &type_name.declarator {
+            Some(declarator) => self.target_declarator_pattern(base, declarator),
+            None => Ok(base),
+        }
+    }
+
+    fn target_spec_pattern(
+        &mut self,
+        specs: &ast::DeclSpecs,
+        params: &[ast::GenericParam],
+    ) -> Result<TypePattern, Diagnostic> {
+        let [specifier] = specs.type_specs.as_slice() else {
+            return Ok(TypePattern::Exact(self.resolve_specs(specs)?.ty));
+        };
+        match specifier {
+            ast::TypeSpecifier::TypedefName(name) => match type_param_index(params, &name.text) {
+                Some(index) => Ok(TypePattern::Param(index)),
+                None => Ok(TypePattern::Exact(self.resolve_specs(specs)?.ty)),
+            },
+            ast::TypeSpecifier::Generic(generic) => self.target_generic_pattern(generic, params),
+            _ => Ok(TypePattern::Exact(self.resolve_specs(specs)?.ty)),
+        }
+    }
+
+    fn target_generic_pattern(
+        &mut self,
+        generic: &ast::GenericSpec,
+        params: &[ast::GenericParam],
+    ) -> Result<TypePattern, Diagnostic> {
+        let Some(kinds) = self.generic_parameter_kinds(&generic.name.text) else {
+            return Err(Diagnostic::new(
+                generic.name.span,
+                format!("'{}' is not a generic record or enum", generic.name.text),
+            ));
+        };
+        if generic.args.len() != kinds.len() {
+            return Err(Diagnostic::new(
+                generic.span,
+                format!(
+                    "generic impl target names '{}' with {} argument(s), but it has {} \
+                     parameter(s)",
+                    generic.name.text,
+                    generic.args.len(),
+                    kinds.len()
+                ),
+            ));
+        }
+        let mut arguments = Vec::with_capacity(generic.args.len());
+        for (argument, kind) in generic.args.iter().zip(kinds) {
+            arguments.push(self.target_pattern_argument(argument, kind, params)?);
+        }
+        Ok(TypePattern::Generic {
+            name: generic.name.text.clone(),
+            args: arguments,
+        })
+    }
+
+    fn target_pattern_argument(
+        &mut self,
+        argument: &ast::GenericArg,
+        kind: ast::GenericParamKind,
+        params: &[ast::GenericParam],
+    ) -> Result<PatternArg, Diagnostic> {
+        match (&argument.kind, kind) {
+            (ast::GenericArgKind::Type(type_name), ast::GenericParamKind::Type) => Ok(
+                PatternArg::Type(self.target_type_pattern(type_name, params)?),
+            ),
+            (ast::GenericArgKind::Const(expr), ast::GenericParamKind::Const) => Ok(
+                PatternArg::Const(Some(self.target_const_pattern(expr, params)?)),
+            ),
+            (ast::GenericArgKind::Type(_), ast::GenericParamKind::Const) => Err(Diagnostic::new(
+                argument.span,
+                "generic impl target writes a type where the generic parameter is a const",
+            )),
+            (ast::GenericArgKind::Const(_), ast::GenericParamKind::Type) => Err(Diagnostic::new(
+                argument.span,
+                "generic impl target writes a constant where the generic parameter is a type",
+            )),
+        }
+    }
+
+    fn target_const_pattern(
+        &mut self,
+        expr: &ast::Expr,
+        params: &[ast::GenericParam],
+    ) -> Result<ConstPattern, Diagnostic> {
+        if let ast::Expr::Name(name) = expr
+            && let Some(index) = const_param_index(params, &name.text)
+        {
+            return Ok(ConstPattern::Param(index));
+        }
+        let value = self.eval_const_int(expr).map_err(|error| {
+            Diagnostic::new(
+                error.span,
+                format!(
+                    "generic impl target constant must be an integer constant expression: {}",
+                    error.message
+                ),
+            )
+        })?;
+        Ok(ConstPattern::Value(value))
+    }
+
+    fn target_declarator_pattern(
+        &mut self,
+        base: TypePattern,
+        declarator: &ast::Declarator,
+    ) -> Result<TypePattern, Diagnostic> {
+        let mut pattern = base;
+        for operator in declarator.derived.iter().rev() {
+            pattern = match operator {
+                ast::DerivedDeclarator::Pointer(_) => TypePattern::Pointer(Box::new(pattern)),
+                ast::DerivedDeclarator::Array(array) => TypePattern::Array {
+                    element: Box::new(pattern),
+                    len: self.array_length(array)?,
+                },
+                ast::DerivedDeclarator::Function(_) => {
+                    return Err(Diagnostic::new(
+                        declarator.span,
+                        "a generic impl target cannot mention an impl parameter inside a \
+                         function type",
+                    ));
+                }
+            };
+        }
+        Ok(pattern)
+    }
+
+    /// The generic parameters of a registered generic record or enum, by name.
+    fn generic_parameter_kinds(&self, name: &str) -> Option<Vec<ast::GenericParamKind>> {
+        if let Some(record) = self.generic_records.get(name) {
+            return Some(
+                record
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.kind.clone())
+                    .collect(),
+            );
+        }
+        self.generic_enums.get(name).map(|enumeration| {
+            enumeration
+                .params
+                .iter()
+                .map(|parameter| parameter.kind.clone())
+                .collect()
+        })
     }
 
     /// Collects one instantiated impl block under its concrete bindings.
@@ -823,7 +1017,7 @@ impl Lowerer {
             }
             patterns.push(self.parameter_pattern(parameter, params));
         }
-        let mut bindings: Vec<Option<(TypeId, usize)>> = vec![None; params.len()];
+        let mut bindings = Bindings::new(params.len());
         for (index, (argument_span, ty)) in arguments.iter().enumerate() {
             let Some(pattern) = patterns.get(index) else {
                 break;
@@ -845,6 +1039,7 @@ impl Lowerer {
                 Err(UnifyError::Conflict {
                     parameter,
                     first_argument,
+                    ..
                 }) => {
                     return Err(Diagnostic::new(
                         *argument_span,
@@ -862,7 +1057,7 @@ impl Lowerer {
         }
         let mut concrete = Vec::with_capacity(params.len());
         for (index, parameter) in params.iter().enumerate() {
-            let Some((ty, _)) = bindings[index] else {
+            let Some((ty, _)) = bindings.types[index] else {
                 return Err(Diagnostic::new(
                     span,
                     format!(
@@ -1411,7 +1606,7 @@ impl Lowerer {
         // C parameter adjustment: an array parameter becomes a pointer to its
         // element. A function parameter is already `Concrete` above.
         match pattern {
-            TypePattern::Array(element) => TypePattern::Pointer(element),
+            TypePattern::Array { element, .. } => TypePattern::Pointer(element),
             other => other,
         }
     }
@@ -1430,11 +1625,7 @@ impl Lowerer {
         };
         match specifier {
             ast::TypeSpecifier::TypedefName(name) => {
-                let parameter = type_params.iter().position(|parameter| {
-                    parameter.kind == ast::GenericParamKind::Type
-                        && parameter.name.text == name.text
-                });
-                match parameter {
+                match type_param_index(type_params, &name.text) {
                     Some(index) => TypePattern::Param(index),
                     None => TypePattern::Concrete,
                 }
@@ -1449,7 +1640,7 @@ impl Lowerer {
                         }
                         // A const argument never binds a type parameter, so
                         // only its kind matters here.
-                        ast::GenericArgKind::Const(_) => PatternArg::Const,
+                        ast::GenericArgKind::Const(_) => PatternArg::Const(None),
                     })
                     .collect();
                 let pattern = TypePattern::Generic {
@@ -1490,9 +1681,10 @@ impl Lowerer {
                 ast::DerivedDeclarator::Pointer(_) if pattern.is_open() => {
                     TypePattern::Pointer(Box::new(pattern))
                 }
-                ast::DerivedDeclarator::Array(_) if pattern.is_open() => {
-                    TypePattern::Array(Box::new(pattern))
-                }
+                ast::DerivedDeclarator::Array(_) if pattern.is_open() => TypePattern::Array {
+                    element: Box::new(pattern),
+                    len: None,
+                },
                 // A type parameter behind a function type has no value shape to
                 // match, so the whole part stays unconstrained.
                 _ => TypePattern::Concrete,
@@ -1501,25 +1693,34 @@ impl Lowerer {
         pattern
     }
 
-    /// Binds the open type parameters of `pattern` against one argument type.
+    /// Binds the open parameters of `pattern` against one argument type.
     fn unify_pattern(
         &self,
         pattern: &TypePattern,
         ty: TypeId,
         argument: usize,
-        bindings: &mut [Option<(TypeId, usize)>],
+        bindings: &mut Bindings,
     ) -> Result<(), UnifyError> {
         match pattern {
             TypePattern::Concrete => Ok(()),
-            TypePattern::Param(index) => match bindings[*index] {
+            TypePattern::Exact(expected) => {
+                if self.types.is_compatible(*expected, ty) {
+                    Ok(())
+                } else {
+                    Err(UnifyError::Mismatch)
+                }
+            }
+            TypePattern::Param(index) => match bindings.types[*index] {
                 None => {
-                    bindings[*index] = Some((ty, argument));
+                    bindings.types[*index] = Some((ty, argument));
                     Ok(())
                 }
                 Some((existing, _)) if self.types.is_compatible(existing, ty) => Ok(()),
-                Some((_, first_argument)) => Err(UnifyError::Conflict {
+                Some((existing, first_argument)) => Err(UnifyError::Conflict {
                     parameter: *index,
                     first_argument,
+                    first: GenericArgKey::Type(existing),
+                    second: GenericArgKey::Type(ty),
                 }),
             },
             TypePattern::Pointer(pointee) => {
@@ -1528,27 +1729,55 @@ impl Lowerer {
                 };
                 self.unify_pattern(pointee, actual.ty, argument, bindings)
             }
-            TypePattern::Array(element) => {
+            TypePattern::Array { element, len } => {
                 let TypeKind::Array {
-                    element: actual, ..
+                    element: actual,
+                    len: actual_len,
                 } = self.types.kind(ty)
                 else {
                     return Err(UnifyError::Mismatch);
                 };
+                if len.is_some_and(|expected| *actual_len != Some(expected)) {
+                    return Err(UnifyError::Mismatch);
+                }
                 self.unify_pattern(element, actual.ty, argument, bindings)
             }
             TypePattern::Generic { name, args } => {
                 let Some(actual_args) = self.generic_instance_args(name, ty) else {
                     return Err(UnifyError::Mismatch);
                 };
+                if args.len() != actual_args.len() {
+                    return Err(UnifyError::Mismatch);
+                }
                 for (pattern, actual) in args.iter().zip(actual_args) {
-                    let PatternArg::Type(pattern) = pattern else {
-                        continue;
-                    };
-                    let GenericArgKey::Type(actual) = actual else {
-                        continue;
-                    };
-                    self.unify_pattern(pattern, *actual, argument, bindings)?;
+                    match (pattern, actual) {
+                        (PatternArg::Type(pattern), GenericArgKey::Type(actual)) => {
+                            self.unify_pattern(pattern, *actual, argument, bindings)?;
+                        }
+                        (
+                            PatternArg::Const(Some(ConstPattern::Param(index))),
+                            GenericArgKey::Int(value),
+                        ) => match bindings.consts[*index] {
+                            None => bindings.consts[*index] = Some((*value, argument)),
+                            Some((previous, _)) if previous == *value => {}
+                            Some((previous, first_argument)) => {
+                                return Err(UnifyError::Conflict {
+                                    parameter: *index,
+                                    first_argument,
+                                    first: GenericArgKey::Int(previous),
+                                    second: GenericArgKey::Int(*value),
+                                });
+                            }
+                        },
+                        (
+                            PatternArg::Const(Some(ConstPattern::Value(expected))),
+                            GenericArgKey::Int(value),
+                        ) if expected == value => {}
+                        // An open const slot never binds during inference, and
+                        // a mismatched kind or value means the shapes differ.
+                        (PatternArg::Const(None), _) => {}
+                        _ => return Err(UnifyError::Mismatch),
+                    }
                 }
                 Ok(())
             }
@@ -1762,66 +1991,148 @@ fn generic_impl_target(type_name: &ast::TypeName) -> Option<&ast::GenericSpec> {
     }
 }
 
-/// The impl parameter index one target argument names, when it is a bare
-/// parameter. Anything else needs unification against the receiver, which this
-/// monomorphizer does not perform.
-fn target_argument_parameter(
+/// The position of the type parameter called `name`.
+fn type_param_index(params: &[ast::GenericParam], name: &str) -> Option<usize> {
+    params.iter().position(|parameter| {
+        parameter.kind == ast::GenericParamKind::Type && parameter.name.text == name
+    })
+}
+
+/// The position of the const parameter called `name`.
+fn const_param_index(params: &[ast::GenericParam], name: &str) -> Option<usize> {
+    params.iter().position(|parameter| {
+        parameter.kind == ast::GenericParamKind::Const && parameter.name.text == name
+    })
+}
+
+/// Whether a written generic argument is a type or a constant.
+fn generic_argument_kind(argument: &ast::GenericArg) -> ast::GenericParamKind {
+    match &argument.kind {
+        ast::GenericArgKind::Type(_) => ast::GenericParamKind::Type,
+        ast::GenericArgKind::Const(_) => ast::GenericParamKind::Const,
+    }
+}
+
+fn generic_parameter_kind_text(kind: &ast::GenericParamKind) -> &'static str {
+    match kind {
+        ast::GenericParamKind::Type => "type parameter",
+        ast::GenericParamKind::Const => "const parameter",
+    }
+}
+
+fn generic_argument_kind_text(kind: &ast::GenericParamKind) -> &'static str {
+    match kind {
+        ast::GenericParamKind::Type => "type",
+        ast::GenericParamKind::Const => "constant",
+    }
+}
+
+/// Marks every impl parameter that one target argument mentions, including
+/// parameters inside a nested generic use or a function type.
+fn mark_target_params(argument: &ast::GenericArg, params: &[ast::GenericParam], used: &mut [bool]) {
+    match &argument.kind {
+        ast::GenericArgKind::Type(type_name) => mark_type_params(type_name, params, used),
+        ast::GenericArgKind::Const(ast::Expr::Name(name)) => {
+            if let Some(index) = const_param_index(params, &name.text) {
+                used[index] = true;
+            }
+        }
+        ast::GenericArgKind::Const(_) => {}
+    }
+}
+
+fn mark_type_params(type_name: &ast::TypeName, params: &[ast::GenericParam], used: &mut [bool]) {
+    mark_specs_params(&type_name.specs, params, used);
+    if let Some(declarator) = &type_name.declarator {
+        mark_declarator_params(declarator, params, used);
+    }
+}
+
+fn mark_specs_params(specs: &ast::DeclSpecs, params: &[ast::GenericParam], used: &mut [bool]) {
+    for specifier in &specs.type_specs {
+        match specifier {
+            ast::TypeSpecifier::TypedefName(name) => {
+                if let Some(index) = type_param_index(params, &name.text) {
+                    used[index] = true;
+                }
+            }
+            ast::TypeSpecifier::Generic(generic) => {
+                for argument in &generic.args {
+                    mark_target_params(argument, params, used);
+                }
+            }
+            ast::TypeSpecifier::Atomic(inner) => mark_type_params(inner, params, used),
+            _ => {}
+        }
+    }
+}
+
+fn mark_declarator_params(
+    declarator: &ast::Declarator,
+    params: &[ast::GenericParam],
+    used: &mut [bool],
+) {
+    for operator in &declarator.derived {
+        let ast::DerivedDeclarator::Function(function) = operator else {
+            continue;
+        };
+        for parameter in &function.params {
+            mark_specs_params(&parameter.specs, params, used);
+            if let Some(declarator) = &parameter.declarator {
+                mark_declarator_params(declarator, params, used);
+            }
+        }
+    }
+}
+
+/// Whether a target type mentions any impl parameter.
+fn target_type_mentions_parameter(type_name: &ast::TypeName, params: &[ast::GenericParam]) -> bool {
+    specs_mention_parameter(&type_name.specs, params)
+        || type_name
+            .declarator
+            .as_ref()
+            .is_some_and(|declarator| declarator_mentions_parameter(declarator, params))
+}
+
+fn specs_mention_parameter(specs: &ast::DeclSpecs, params: &[ast::GenericParam]) -> bool {
+    specs.type_specs.iter().any(|specifier| match specifier {
+        ast::TypeSpecifier::TypedefName(name) => type_param_index(params, &name.text).is_some(),
+        ast::TypeSpecifier::Generic(generic) => generic
+            .args
+            .iter()
+            .any(|argument| target_argument_mentions_parameter(argument, params)),
+        ast::TypeSpecifier::Atomic(inner) => target_type_mentions_parameter(inner, params),
+        _ => false,
+    })
+}
+
+fn target_argument_mentions_parameter(
     argument: &ast::GenericArg,
     params: &[ast::GenericParam],
-) -> Option<usize> {
-    let name = match &argument.kind {
-        ast::GenericArgKind::Type(type_name) => {
-            if type_name.declarator.is_some() {
-                return None;
-            }
-            let [ast::TypeSpecifier::TypedefName(name)] = type_name.specs.type_specs.as_slice()
-            else {
-                return None;
-            };
-            (name, ast::GenericParamKind::Type)
-        }
-        ast::GenericArgKind::Const(ast::Expr::Name(name)) => (name, ast::GenericParamKind::Const),
-        ast::GenericArgKind::Const(_) => return None,
-    };
-    params
-        .iter()
-        .position(|parameter| parameter.kind == name.1 && parameter.name.text == name.0.text)
-}
-
-/// A built-in type keyword for a diagnostic.
-fn builtin_type_text(builtin: &ast::BuiltinType) -> &'static str {
-    match builtin {
-        ast::BuiltinType::Void => "void",
-        ast::BuiltinType::Bool => "_Bool",
-        ast::BuiltinType::Char => "char",
-        ast::BuiltinType::Short => "short",
-        ast::BuiltinType::Int => "int",
-        ast::BuiltinType::Long => "long",
-        ast::BuiltinType::Float => "float",
-        ast::BuiltinType::Double => "double",
-        ast::BuiltinType::Signed => "signed",
-        ast::BuiltinType::Unsigned => "unsigned",
-    }
-}
-
-/// A short spelling of an unsupported target argument for a diagnostic.
-fn target_argument_text(argument: &ast::GenericArg) -> String {
+) -> bool {
     match &argument.kind {
-        ast::GenericArgKind::Type(type_name) => match type_name.specs.type_specs.as_slice() {
-            [ast::TypeSpecifier::TypedefName(name)] if type_name.declarator.is_none() => {
-                name.text.clone()
-            }
-            [ast::TypeSpecifier::Generic(generic)] if type_name.declarator.is_none() => {
-                generic.name.text.clone()
-            }
-            [ast::TypeSpecifier::Builtin(builtin)] if type_name.declarator.is_none() => {
-                builtin_type_text(builtin).to_string()
-            }
-            _ => "a type expression".to_string(),
-        },
-        ast::GenericArgKind::Const(ast::Expr::Name(name)) => name.text.clone(),
-        ast::GenericArgKind::Const(_) => "a constant expression".to_string(),
+        ast::GenericArgKind::Type(type_name) => target_type_mentions_parameter(type_name, params),
+        ast::GenericArgKind::Const(ast::Expr::Name(name)) => {
+            const_param_index(params, &name.text).is_some()
+        }
+        ast::GenericArgKind::Const(_) => false,
     }
+}
+
+fn declarator_mentions_parameter(
+    declarator: &ast::Declarator,
+    params: &[ast::GenericParam],
+) -> bool {
+    declarator.derived.iter().any(|operator| match operator {
+        ast::DerivedDeclarator::Function(function) => function.params.iter().any(|parameter| {
+            specs_mention_parameter(&parameter.specs, params)
+                || parameter
+                    .declarator
+                    .as_ref()
+                    .is_some_and(|declarator| declarator_mentions_parameter(declarator, params))
+        }),
+        _ => false,
+    })
 }
 
 /// The generic function declarator, when this declarator names a `fn` template.
