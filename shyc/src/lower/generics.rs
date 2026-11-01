@@ -17,15 +17,17 @@
 //! generic arguments.
 //!
 //! `impl<T> Box<T>` (or `impl Box<T>`) is the same kind of template. A method
-//! lookup on one concrete record instance binds the impl parameters to that
+//! lookup on one concrete record instance unifies the impl target against that
 //! record's own arguments and registers one ordinary function per method with
 //! an internal symbol naming the receiver. A method body is only lowered when
 //! a lookup asks for it, so an instance compiles exactly the methods it uses.
 //! A generic impl target may reorder or repeat its parameters, as in
-//! `impl<T, U> Trait for Pair<U, T>`: registration records which parameter
-//! each target position names, and instantiation binds the receiver's own
-//! arguments through that mapping. Every target argument must be a bare impl
-//! parameter.
+//! `impl<T, U> Trait for Pair<U, T>`, and it may mix them with concrete,
+//! nested, pointer, and array shapes, as in `impl<T> Trait for Pair<T, int>`
+//! or `impl<T> Trait for Box<Vec<T>>`. Matching binds each impl parameter from
+//! its position in the concrete receiver, skips a template whose concrete
+//! parts do not agree, and reports a parameter that the target repeats with
+//! two different types.
 //!
 //! A method may declare generic parameters of its own. The method is stored as
 //! a template inside its impl and instantiated through the same cache as a
@@ -50,57 +52,100 @@ use crate::source::{Diagnostic, Span};
 /// How deep generic instantiation may nest before lowering gives up.
 const MAX_INSTANTIATION_DEPTH: u32 = 64;
 
-/// The shape of one template parameter type, with its type parameters open.
+/// The shape of one template parameter or impl target type, with its type
+/// parameters open.
 ///
 /// Inference resolves a parameter type to this shape instead of a concrete
 /// type: a `T` stays [`TypePattern::Param`], so matching the argument types is
-/// what binds it. A part that cannot bind anything is [`TypePattern::Concrete`],
-/// which accepts every argument; the normal argument check after instantiation
-/// still verifies it.
+/// what binds it. A generic impl target uses the same shapes, but writes
+/// concrete parts as [`TypePattern::Exact`] so a receiver only matches when
+/// those parts agree. Inference keeps a part that cannot bind anything as
+/// [`TypePattern::Concrete`], which accepts every argument; the normal argument
+/// check after instantiation still verifies it.
 enum TypePattern {
     /// One type parameter of the template, by position.
     Param(usize),
     /// A concrete type, with nothing to infer.
     Concrete,
+    /// A concrete type that a receiver must equal.
+    Exact(TypeId),
     /// A pointer to another shape.
     Pointer(Box<TypePattern>),
-    /// An array of another shape. The length never binds a parameter.
-    Array(Box<TypePattern>),
+    /// An array of another shape. `len` is `None` when the length does not
+    /// take part in matching and `Some` when it must agree.
+    Array {
+        element: Box<TypePattern>,
+        len: Option<u32>,
+    },
     /// `Name<args>` naming a generic record or enum instance.
     Generic { name: String, args: Vec<PatternArg> },
 }
 
 impl TypePattern {
-    /// Whether this shape contains a type parameter that inference can bind.
+    /// Whether this shape contains a type parameter that matching can bind.
     fn is_open(&self) -> bool {
         match self {
             TypePattern::Param(_) => true,
-            TypePattern::Concrete => false,
-            TypePattern::Pointer(inner) | TypePattern::Array(inner) => inner.is_open(),
+            TypePattern::Concrete | TypePattern::Exact(_) => false,
+            TypePattern::Pointer(inner) | TypePattern::Array { element: inner, .. } => {
+                inner.is_open()
+            }
             TypePattern::Generic { args, .. } => args.iter().any(|argument| match argument {
                 PatternArg::Type(pattern) => pattern.is_open(),
-                PatternArg::Const => false,
+                PatternArg::Const(_) => false,
             }),
         }
     }
 }
 
-/// One argument of a generic type use inside a parameter type.
+/// One argument of a generic type use inside a pattern.
 enum PatternArg {
     /// A type argument, matched against the instance's own type argument.
     Type(TypePattern),
-    /// A `const` argument, which never binds during inference.
-    Const,
+    /// A `const` argument. Inference leaves it open; a generic impl target
+    /// either binds a parameter or requires one exact value.
+    Const(Option<ConstPattern>),
 }
 
-/// Why one argument could not be matched against a parameter pattern.
+/// The shape of one `const` generic argument.
+enum ConstPattern {
+    /// One const parameter of the impl, by position.
+    Param(usize),
+    /// One concrete integer value.
+    Value(i64),
+}
+
+/// One top-level argument of a generic impl target.
+enum TargetArg {
+    Type(TypePattern),
+    Const(ConstPattern),
+}
+
+/// The parameter bindings gathered while matching one pattern.
+struct Bindings {
+    types: Vec<Option<(TypeId, usize)>>,
+    consts: Vec<Option<(i64, usize)>>,
+}
+
+impl Bindings {
+    fn new(params: usize) -> Bindings {
+        Bindings {
+            types: vec![None; params],
+            consts: vec![None; params],
+        }
+    }
+}
+
+/// Why one argument could not be matched against a pattern.
 enum UnifyError {
-    /// The argument type does not have the shape the parameter requires.
+    /// The argument type does not have the shape the pattern requires.
     Mismatch,
-    /// An earlier argument already bound the parameter to another type.
+    /// An earlier position already bound the parameter to another value.
     Conflict {
         parameter: usize,
         first_argument: usize,
+        first: GenericArgKey,
+        second: GenericArgKey,
     },
 }
 
@@ -286,59 +331,35 @@ impl Lowerer {
                 ));
             }
         }
-        // Each target argument must name one impl parameter. A bare parameter
-        // may still appear twice, which is valid only when the receiver's two
-        // arguments agree; a nested or concrete target argument would need
-        // unification that this monomorphizer deliberately does not perform.
-        let mut target_args = Vec::with_capacity(generic.args.len());
-        for argument in &generic.args {
-            let parameter =
-                target_argument_parameter(argument, &block.generics).ok_or_else(|| {
-                    Diagnostic::new(
-                        argument.span,
-                        format!(
-                            "generic impl target for '{}' must name one of the impl's parameters; \
-                         '{}' is not supported",
-                            generic.name.text,
-                            target_argument_text(argument)
-                        ),
-                    )
-                })?;
-            let kind_matches = matches!(
-                (
-                    &block.generics[parameter].kind,
-                    &record.params[target_args.len()].kind
-                ),
-                (ast::GenericParamKind::Type, ast::GenericParamKind::Type)
-                    | (ast::GenericParamKind::Const, ast::GenericParamKind::Const)
-            );
-            if !kind_matches {
+        // A target argument may name an impl parameter anywhere, or write a
+        // concrete or nested type. Only the argument kind is checked here;
+        // concrete parts resolve and compare against the receiver at
+        // instantiation, when every file-scope name exists.
+        for (position, argument) in generic.args.iter().enumerate() {
+            let actual = generic_argument_kind(argument);
+            let expected = record.params[position].kind;
+            if actual != expected {
                 return Err(Diagnostic::new(
                     argument.span,
                     format!(
-                        "generic impl parameter '{}' is a {}, but target position {} of '{}' \
-                         is a {}",
-                        block.generics[parameter].name.text,
-                        match block.generics[parameter].kind {
-                            ast::GenericParamKind::Type => "type parameter",
-                            ast::GenericParamKind::Const => "const parameter",
-                        },
-                        target_args.len() + 1,
+                        "target position {} of '{}' is a {}, but the target argument is a {}",
+                        position + 1,
                         generic.name.text,
-                        match record.params[target_args.len()].kind {
-                            ast::GenericParamKind::Type => "type parameter",
-                            ast::GenericParamKind::Const => "const parameter",
-                        }
+                        generic_parameter_kind_text(expected),
+                        generic_argument_kind_text(actual)
                     ),
                 ));
             }
-            target_args.push(parameter);
         }
-        if let Some((_index, parameter)) = block
+        let mut used = vec![false; block.generics.len()];
+        for argument in &generic.args {
+            mark_target_params(argument, &block.generics, &mut used);
+        }
+        if let Some((index, parameter)) = block
             .generics
             .iter()
             .enumerate()
-            .find(|(index, _)| !target_args.contains(index))
+            .find(|(index, _)| !used[*index])
         {
             return Err(Diagnostic::new(
                 parameter.span,
@@ -349,34 +370,26 @@ impl Lowerer {
                 ),
             ));
         }
-        let inherent = block.trait_name.is_none();
-        let existing = self
-            .generic_impls
+        // Several templates may target the same record with disjoint concrete
+        // arguments. Overlap is caught when a concrete receiver asks for the
+        // impl and both templates match it.
+        self.generic_impls
             .entry(generic.name.text.clone())
-            .or_default();
-        if inherent && existing.iter().any(|template| template.inherent) {
-            return Err(Diagnostic::new(
-                block.span,
-                format!(
-                    "redefinition of the generic impl for '{}'",
-                    generic.name.text
-                ),
-            ));
-        }
-        existing.push(super::GenericImpl {
-            params: block.generics.clone(),
-            block: block.clone(),
-            target_args,
-            inherent,
-        });
+            .or_default()
+            .push(super::GenericImpl {
+                params: block.generics.clone(),
+                block: block.clone(),
+            });
         Ok(())
     }
 
     /// Materializes every generic impl whose target matches `record`.
     ///
-    /// One record may have an inherent template plus a template per trait. The
-    /// target mapping binds the impl parameters from the record's own concrete
-    /// arguments; each method then becomes an ordinary function whose symbol
+    /// One record may have an inherent template plus a template per trait, and
+    /// several templates may target the same record with disjoint concrete
+    /// arguments. The target binds the impl parameters against the record's own
+    /// concrete arguments; a template whose concrete parts disagree is
+    /// skipped. Each method then becomes an ordinary function whose symbol
     /// names the receiver, so method lookup continues to see plain
     /// [`super::MethodInfo`] values and calls stay direct calls.
     ///
@@ -391,81 +404,123 @@ impl Lowerer {
             return Ok(());
         };
         for template in &templates {
-            let env = self.bind_generic_impl_target(&key, template)?;
+            let Some(env) = self.bind_generic_impl_target(&key, template)? else {
+                continue;
+            };
             self.materialize_generic_impl(record, &key.name, template, env)?;
         }
         Ok(())
     }
 
-    /// Binds each impl parameter to the concrete receiver argument at the
-    /// target position that names it.
+    /// Matches one impl target against the concrete receiver, binding every
+    /// impl parameter. `None` means the target's concrete parts do not agree
+    /// with this receiver, so the template does not apply.
     fn bind_generic_impl_target(
-        &self,
+        &mut self,
         key: &InstanceKey,
         template: &super::GenericImpl,
-    ) -> Result<Vec<GenericArgKey>, Diagnostic> {
-        let mut bindings: Vec<Option<GenericArgKey>> = vec![None; template.params.len()];
-        for (position, &parameter) in template.target_args.iter().enumerate() {
-            let Some(argument) = key.args.get(position).copied() else {
-                break;
-            };
-            let kind_matches = matches!(
-                (&template.params[parameter].kind, argument),
-                (ast::GenericParamKind::Type, GenericArgKey::Type(_))
-                    | (ast::GenericParamKind::Const, GenericArgKey::Int(_))
-            );
-            if !kind_matches {
-                return Err(Diagnostic::new(
-                    template.params[parameter].span,
-                    format!(
-                        "generic impl for '{}' takes '{}' as a {} parameter, but the record's \
-                         argument is a {}",
-                        key.name,
-                        template.params[parameter].name.text,
-                        match template.params[parameter].kind {
-                            ast::GenericParamKind::Type => "type",
-                            ast::GenericParamKind::Const => "const",
-                        },
-                        match argument {
-                            GenericArgKey::Type(_) => "type",
-                            GenericArgKey::Int(_) => "constant",
+    ) -> Result<Option<Vec<GenericArgKey>>, Diagnostic> {
+        let target = self.impl_target_arguments(&template.block.self_type, &template.params)?;
+        let mut bindings = Bindings::new(template.params.len());
+        for (position, (target, actual)) in target.iter().zip(&key.args).enumerate() {
+            match (target, actual) {
+                (TargetArg::Type(pattern), GenericArgKey::Type(ty)) => {
+                    match self.unify_pattern(pattern, *ty, position, &mut bindings) {
+                        Ok(()) => {}
+                        Err(UnifyError::Mismatch) => return Ok(None),
+                        Err(UnifyError::Conflict {
+                            parameter,
+                            first_argument,
+                            first,
+                            second,
+                        }) => {
+                            return Err(self.generic_impl_conflict(
+                                key,
+                                template,
+                                parameter,
+                                first_argument,
+                                position,
+                                first,
+                                second,
+                            ));
                         }
-                    ),
-                ));
-            }
-            match bindings[parameter] {
-                None => bindings[parameter] = Some(argument),
-                Some(previous) if previous == argument => {}
-                Some(previous) => {
-                    return Err(Diagnostic::new(
-                        template.block.self_type.span,
-                        format!(
-                            "generic impl for '{}' binds parameter '{}' to both {} and {}; \
-                             the target repeats a parameter that this receiver cannot satisfy \
-                             consistently",
-                            key.name,
-                            template.params[parameter].name.text,
-                            self.generic_arg_text(previous),
-                            self.generic_arg_text(argument)
-                        ),
-                    ));
+                    }
                 }
+                (TargetArg::Const(ConstPattern::Param(parameter)), GenericArgKey::Int(value)) => {
+                    match bindings.consts[*parameter] {
+                        None => bindings.consts[*parameter] = Some((*value, position)),
+                        Some((previous, _)) if previous == *value => {}
+                        Some((previous, first_argument)) => {
+                            return Err(self.generic_impl_conflict(
+                                key,
+                                template,
+                                *parameter,
+                                first_argument,
+                                position,
+                                GenericArgKey::Int(previous),
+                                GenericArgKey::Int(*value),
+                            ));
+                        }
+                    }
+                }
+                (TargetArg::Const(ConstPattern::Value(expected)), GenericArgKey::Int(value))
+                    if expected == value => {}
+                // A kind mismatch or a concrete value that differs means this
+                // template targets another instantiation.
+                _ => return Ok(None),
             }
         }
-        let mut env = Vec::with_capacity(bindings.len());
-        for (index, binding) in bindings.into_iter().enumerate() {
+        let mut env = Vec::with_capacity(template.params.len());
+        for (index, parameter) in template.params.iter().enumerate() {
+            let binding = match parameter.kind {
+                ast::GenericParamKind::Type => {
+                    bindings.types[index].map(|(ty, _)| GenericArgKey::Type(ty))
+                }
+                ast::GenericParamKind::Const => {
+                    bindings.consts[index].map(|(value, _)| GenericArgKey::Int(value))
+                }
+            };
             let Some(argument) = binding else {
                 return Err(Diagnostic::new(
-                    template.params[index].span,
+                    parameter.span,
                     format!(
                         "generic impl parameter '{}' is not bound by the target for '{}'",
-                        template.params[index].name.text, key.name
+                        parameter.name.text, key.name
                     ),
                 ));
             };
             env.push(argument);
         }
-        Ok(env)
+        Ok(Some(env))
+    }
+
+    /// The diagnostic for a target that repeats one parameter with two
+    /// different concrete values.
+    #[allow(clippy::too_many_arguments)]
+    fn generic_impl_conflict(
+        &self,
+        key: &InstanceKey,
+        template: &super::GenericImpl,
+        parameter: usize,
+        first_argument: usize,
+        second_argument: usize,
+        first: GenericArgKey,
+        second: GenericArgKey,
+    ) -> Diagnostic {
+        Diagnostic::new(
+            template.block.self_type.span,
+            format!(
+                "generic impl for '{}' binds parameter '{}' to both {} and {} at target \
+                 positions {} and {}; the target repeats a parameter that this receiver cannot \
+                 satisfy consistently",
+                key.name,
+                template.params[parameter].name.text,
+                self.generic_arg_text(first),
+                self.generic_arg_text(second),
+                first_argument + 1,
+                second_argument + 1
+            ),
+        )
     }
 
     /// Collects one instantiated impl block under its concrete bindings.
@@ -1112,10 +1167,12 @@ impl Lowerer {
 
     /// Verifies every trait bound once the concrete type arguments are known.
     ///
-    /// A bound is satisfied by an `impl Bound for Type` already collected for
-    /// the unit: the same [`Self::trait_impls`] table that rejects a duplicate
-    /// implementation answers the check. Only a bound that writes no type
-    /// arguments is supported, matching the AST's `Vec<Name>` bounds.
+    /// A bound is satisfied by an `impl Bound<Args> for Type` already collected
+    /// for the unit: the same [`Self::trait_impls`] table that rejects a
+    /// duplicate implementation answers the check. A bound may write trait
+    /// arguments (`T: From<int>`, `U: From<T>`); they resolve in the concrete
+    /// environment of the instantiation, so the lookup uses the same type and
+    /// constant identities the implementation registered.
     fn check_generic_bounds(
         &mut self,
         function: &str,
@@ -1128,34 +1185,49 @@ impl Lowerer {
                 continue;
             };
             for bound in &parameter.bounds {
-                let Some(info) = self.traits.get(&bound.text).cloned() else {
+                let Some(info) = self.traits.get(&bound.name.text).cloned() else {
                     return Err(Diagnostic::new(
                         bound.span,
                         format!(
                             "trait bound '{}: {}' on generic function '{}' names unknown \
                              trait '{}'",
-                            parameter.name.text, bound.text, function, bound.text
+                            parameter.name.text, bound.name.text, function, bound.name.text
                         ),
                     ));
                 };
-                if !info.params.is_empty() {
+                if bound.args.len() != info.params.len() {
                     return Err(Diagnostic::new(
                         bound.span,
                         format!(
-                            "trait bound '{}: {}' on generic function '{}' needs type \
-                             arguments, which are not implemented yet",
-                            parameter.name.text, bound.text, function
+                            "trait bound '{}: {}' on generic function '{}' gives {} trait \
+                             argument(s), but trait '{}' expects {}",
+                            parameter.name.text,
+                            bound.name.text,
+                            function,
+                            bound.args.len(),
+                            bound.name.text,
+                            info.params.len()
                         ),
                     ));
                 }
+                // The bound is written in the template's own parameters, so it
+                // resolves with the concrete bindings of this instantiation.
+                let bound_args = if bound.args.is_empty() {
+                    Vec::new()
+                } else {
+                    self.push_type_scope();
+                    self.bind_generic_args(params, args);
+                    let resolved =
+                        self.resolve_generic_args(&bound.name.text, &info.params, &bound.args);
+                    self.pop_type_scope();
+                    resolved?
+                };
                 // The bound may be satisfied by a generic trait impl that this
                 // concrete type argument has not needed until now.
-                if !self.impls.contains_key(ty) {
-                    self.instantiate_generic_impl(*ty)?;
-                }
-                let implemented = self
-                    .trait_impls
-                    .contains(&(bound.text.clone(), Vec::new(), *ty));
+                self.instantiate_generic_impl(*ty)?;
+                let implemented =
+                    self.trait_impls
+                        .contains(&(bound.name.text.clone(), bound_args.clone(), *ty));
                 if !implemented {
                     return Err(Diagnostic::new(
                         span,
@@ -1164,7 +1236,7 @@ impl Lowerer {
                              '{}', but '{}' does not implement it",
                             parameter.name.text,
                             function,
-                            bound.text,
+                            self.bound_trait_name(&bound.name.text, &bound_args),
                             self.concrete_type_name(*ty)
                         ),
                     ));
@@ -1172,6 +1244,22 @@ impl Lowerer {
             }
         }
         Ok(())
+    }
+
+    /// `Trait<Args>` with resolved argument spellings, for a bound diagnostic.
+    fn bound_trait_name(&self, name: &str, args: &[GenericArgKey]) -> String {
+        if args.is_empty() {
+            return name.to_string();
+        }
+        let args = args
+            .iter()
+            .map(|argument| match argument {
+                GenericArgKey::Type(ty) => self.concrete_type_name(*ty),
+                GenericArgKey::Int(value) => value.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{name}<{args}>")
     }
 
     /// A readable spelling of a concrete type for a bound diagnostic.

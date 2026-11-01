@@ -122,12 +122,15 @@ A generic function may constrain its type parameters with a static trait bound:
 `fn render<T: Drawable>(T *value) -> ...`. The bound is checked when the
 template is instantiated, after an explicit argument or inference binds `T`, and
 the call is accepted only when the unit contains `impl Drawable for Type`.
-Several bounds may be written with `+`. The check is compile-time only: the call
-still becomes the ordinary monomorphized function, with no dispatch or ABI
-change. A bound on a `const` parameter, a generic record, a generic enum, or a
-generic trait, a bound that writes trait arguments such as `T: From<int>`, and
-a bound on a generic method's own parameter each get an explicit diagnostic
-instead.
+Several bounds may be written with `+`. A bound may also name a parameterized
+trait: `fn convert<T: From<int>>(T value) -> ...` or `fn bridge<T, U: From<T>>`.
+The trait arguments resolve in the same concrete type-parameter environment as
+the function, and the call is accepted only when the unit contains the matching
+`impl From<int> for Type` (or `impl<T> From<T> for ...`). The check is
+compile-time only: the call still becomes the ordinary monomorphized function,
+with no dispatch or ABI change. A bound on a `const` parameter, a generic
+record, a generic enum, or a generic trait, and a bound on a generic method's
+own parameter each get an explicit diagnostic instead.
 
 A generic record takes methods through a template `impl`:
 `impl<T> Box<T> { T get(self *b) { return b->value; } }`, where the short

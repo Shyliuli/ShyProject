@@ -9,7 +9,7 @@ use crate::ast::{
     ArrayDeclarator, ArrayLength, BuiltinType, DeclSpecs, Declarator, DerivedDeclarator, EnumSpec,
     Enumerator, FunctionDeclarator, GenericArg, GenericArgKind, GenericParam, GenericParamKind,
     GenericSpec, MemberDecl, MemberDeclarator, ParamDecl, PointerDeclarator, Qualifier, RecordKind,
-    RecordSpec, StorageClass, TypeName, TypeSpecifier,
+    RecordSpec, StorageClass, TraitBound, TypeName, TypeSpecifier,
 };
 use crate::lexer::TokenKind;
 use crate::source::Diagnostic;
@@ -628,12 +628,12 @@ impl Parser {
 
     // -- generic parameters and arguments --------------------------------
 
-    /// Parses `<T, T: Drawable, const N>` and declares the names in the current
-    /// scope.
+    /// Parses `<T, T: Drawable, T: From<int>, const N>` and declares the names
+    /// in the current scope.
     ///
-    /// A bound is one or more trait names after `:` separated by `+`. Trait
-    /// arguments and bounds on a `const` parameter are rejected here; the
-    /// lowering pass checks the bound against each instantiation.
+    /// A bound is one or more traits after `:` separated by `+`, each with
+    /// optional generic arguments. Bounds on a `const` parameter are rejected
+    /// here; the lowering pass checks every bound against each instantiation.
     /// The caller opens the scope that should contain the parameters.
     pub(crate) fn generic_params(&mut self) -> Result<Vec<GenericParam>, Diagnostic> {
         self.expect_punct("<")?;
@@ -659,13 +659,23 @@ impl Parser {
                 }
                 loop {
                     let bound = self.expect_ident()?;
-                    if self.at_punct("<") || self.at_punct("(") {
+                    if self.at_punct("(") {
                         return Err(Diagnostic::new(
                             self.here(),
-                            "trait bounds with type arguments are not implemented yet",
+                            "trait bounds with parenthesized arguments are not implemented yet",
                         ));
                     }
-                    bounds.push(bound);
+                    let (args, span) = if self.at_punct("<") {
+                        let args = self.generic_args()?;
+                        (args, bound.span.join(self.last_span()))
+                    } else {
+                        (Vec::new(), bound.span)
+                    };
+                    bounds.push(TraitBound {
+                        span,
+                        name: bound,
+                        args,
+                    });
                     if !self.eat_punct("+") {
                         break;
                     }

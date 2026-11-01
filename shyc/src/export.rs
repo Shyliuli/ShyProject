@@ -632,7 +632,7 @@ fn generic_params_text(params: &[GenericParam]) -> String {
                 let bounds = param
                     .bounds
                     .iter()
-                    .map(|bound| bound.text.clone())
+                    .map(|bound| format!("{}{}", bound.name.text, generic_args_text(&bound.args)))
                     .collect::<Vec<_>>()
                     .join(" + ");
                 text.push_str(": ");

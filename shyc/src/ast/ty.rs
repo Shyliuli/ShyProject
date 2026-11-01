@@ -103,7 +103,20 @@ pub struct GenericParam {
     pub span: Span,
     pub name: Name,
     pub kind: GenericParamKind,
-    pub bounds: Vec<Name>,
+    pub bounds: Vec<TraitBound>,
+}
+
+/// One trait bound written on a type parameter, for example `Drawable` or
+/// `From<int>`.
+///
+/// The arguments are generic arguments rather than resolved types: `From<T>`
+/// names a template parameter, and only an instantiation knows which concrete
+/// type it stands for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraitBound {
+    pub span: Span,
+    pub name: Name,
+    pub args: Vec<GenericArg>,
 }
 
 /// One generic argument at a use site or call site.

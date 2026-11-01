@@ -285,24 +285,17 @@ pub(super) struct GenericFunction {
 
 /// One generic `impl` block, kept as the AST template it is.
 ///
-/// `impl<T> Box<T>` and `impl<T, U> Trait for Pair<U, T>` are instantiated when
-/// a concrete receiver needs one of their methods. Registration resolves the
-/// target's argument list into a mapping from each concrete receiver argument
-/// to an impl parameter, so a reordered target binds the same parameter names
-/// the method signatures use. Each method becomes an ordinary function with a
+/// `impl<T> Box<T>`, `impl<T> Pair<T, int>`, and
+/// `impl<T, U> Trait for Pair<U, T>` are materialized when a concrete receiver
+/// needs one of their methods. Registration keeps the source target, and
+/// instantiation unifies it against the receiver's own arguments, so a
+/// reordered, concrete, or nested target binds the same parameter names the
+/// method signatures use. Each method becomes an ordinary function with a
 /// translation-unit internal symbol.
 #[derive(Clone)]
 pub(super) struct GenericImpl {
     pub params: Vec<ast::GenericParam>,
     pub block: ast::ImplBlock,
-    /// One impl parameter index per target argument, in target order. A
-    /// reordered target such as `Pair<U, T>` stores the indices of `U` and `T`
-    /// in `params`, so instantiation binds each receiver argument to the
-    /// parameter that target position names.
-    pub target_args: Vec<usize>,
-    /// Whether this template declares an inherent `impl`, which keeps the old
-    /// rule that a record has at most one of them.
-    pub inherent: bool,
 }
 
 /// The concrete bindings of one materialized generic impl, carried by each of
