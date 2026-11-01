@@ -176,16 +176,19 @@ const generic parameters on a trait method are not implemented yet.
 
 `trait Drawable { void draw(self *value); }` declares method signatures, and
 `impl Drawable for Circle { ... }` checks that the implementation defines exactly
-those methods with matching signatures. A method of `impl Trait for Type` lowers
-to `____Trait__Type__method`, and a parameterized trait adds one `__tN` (type
-argument) or `__n<bits>` (`const` argument) part per resolved trait argument:
-`impl From<int> for Target` gives `____From__Target__from__tN`. The trait name
+those methods with matching signatures. A method of a concrete
+`impl Trait for Type` lowers to `____Trait__Type__method`, and a parameterized
+trait adds one `__tN` (type argument) or `__n<bits>` (`const` argument) part per
+resolved trait argument: `impl From<int> for Target` gives
+`____From__Target__from__tN`. A method of a materialized generic impl keeps an
+internal symbol that names the trait, its arguments, and the concrete receiver.
+The trait name
 and arguments are part of the symbol, so two traits may declare the same method
 name for one type, and one trait may be implemented for several argument
 values. An inherent `impl Type` keeps the plain `____Type__method` spelling.
-A call on a concrete type stays statically dispatched; a receiver call whose
-name is provided by more than one trait implementation is diagnosed as
-ambiguous.
+A call on a concrete type stays statically dispatched. An inherent method wins
+when it has the same name as a trait method, and a receiver call whose name is
+provided by more than one trait implementation is diagnosed as ambiguous.
 
 A trait name can also be used as an object or field type. It denotes a
 transparent record with one function-pointer field per method, named after the
@@ -227,7 +230,8 @@ dispatch mechanism.
 `struct` of function pointers, with `self` erased to `void`, so a C caller sees
 the same layout. Implementation methods still have no exported prototypes: a C
 translation unit that builds a table by hand must declare the
-`____Type__method` symbols itself.
+`____Trait__Type__method` symbols itself, including their resolved trait
+argument suffixes.
 
 `let name = expression;` infers its type from the initializer as an rvalue:
 arrays and functions decay, and top-level qualifiers do not carry over. The
