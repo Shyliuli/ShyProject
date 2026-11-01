@@ -35,20 +35,20 @@ struct Vec<T> {
     T *data;
     i32 len;
     i32 cap;
+};
+
+impl Vec<T> {
+    fn push(self *v, T value) { /* ... */ }
+    fn get(self *v, i32 index) -> T { return v.data[index]; }
 }
 
-impl Vec {
-    fn push<T>(self *v, T value);
-    fn get<T>(self *v, i32 index) -> T;
-    fn size(self *v) -> i32;
-}
-
-fn identity<T>(T value) -> T;
+fn identity<T>(T value) -> T { return value; }
 ```
 
-`impl` remains a method-binding collection. It does not itself carry a generic
-parameter; individual methods may be generic. `const N` is a compile-time
-integer parameter:
+`impl Vec<T>` binds `T` for every method of the block; a method may add type
+parameters of its own. A generic impl is instantiated in each translation unit
+that uses it, so its methods are always written with their bodies, usually in a
+header. `const N` is a compile-time integer parameter:
 
 ```c
 struct Array<T, const N> {

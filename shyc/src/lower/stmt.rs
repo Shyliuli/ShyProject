@@ -262,6 +262,7 @@ impl FnLower<'_> {
             match init {
                 ast::ForInit::Decl(declaration) => self.lower_declaration(declaration)?,
                 ast::ForInit::Expr(expr) => self.discard(expr)?,
+                ast::ForInit::Let(decl) => self.lower_let(decl)?,
             }
         }
         let condition_block = self.f.alloc_block();

@@ -172,30 +172,15 @@ impl FnWriter<'_> {
     }
 
     /// `lhs < rhs` for 32-bit signed values, materialised in `1x`.
+    ///
+    /// Flipping the sign bit turns signed order into unsigned order, so the
+    /// ISA's unsigned `smaa` does the whole comparison without a branch. The
+    /// operands are scratch registers, so flipping them in place is safe.
     fn signed_less_32(&mut self, lhs: &str, rhs: &str, invert: bool) {
-        let same = self.fresh("scmp_same");
-        let differ_true = self.fresh("scmp_true");
-        let differ_false = self.fresh("scmp_false");
-        let end = self.fresh("scmp_end");
-        self.line(format!("seta dx {lhs}"));
-        self.line("rsn dx 31");
-        self.line(format!("seta ex {rhs}"));
-        self.line("rsn ex 31");
-        self.line("equa dx ex");
-        self.line(format!("jmpn {same}"));
-        self.line("equn dx 1");
-        self.line(format!("jmpn {differ_true}"));
-        self.line(format!("ujmpn {differ_false}"));
-        self.line(format!("{differ_true}:"));
-        self.line(format!("setn 1x {}", if invert { 0 } else { 1 }));
-        self.line(format!("ujmpn {end}"));
-        self.line(format!("{differ_false}:"));
-        self.line(format!("setn 1x {}", if invert { 1 } else { 0 }));
-        self.line(format!("ujmpn {end}"));
-        self.line(format!("{same}:"));
+        self.line(format!("xorn {lhs} 2147483648"));
+        self.line(format!("xorn {rhs} 2147483648"));
         self.line(format!("smaa {lhs} {rhs}"));
         self.bool_from_rs(invert);
-        self.line(format!("{end}:"));
     }
 
     fn unsigned_less_64(

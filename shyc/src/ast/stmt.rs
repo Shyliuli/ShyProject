@@ -26,6 +26,8 @@ pub enum ForInit {
     Decl(Declaration),
     /// `for (i = 0; ...)`
     Expr(Expr),
+    /// `for (let mut i = 0; ...)`
+    Let(LetDecl),
 }
 
 /// Inline assembly, in either supported ShyC form.

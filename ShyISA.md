@@ -505,7 +505,7 @@ ujmpn loop(12)     // 无条件跳转到loop后面一条指令
 | `0x4D`　　　　　　　　 | `ret`　　 | `ret`　　　　　　　　　　　　　| 按 `pop`/`popa` 规则从栈弹出返回地址并跳转。　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　|
 | **I/O 指令**　　　　　 | 　　　　　| 　　　　　　　　　　　　　　　 | 　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　|
 | `0x4E`　　　　　　　　 | `ina`　　 | `ina <address>`　　　　　　　　| 从标准输入读取十六进制文本并写入指定地址。输入可使用大写或小写十六进制数字，可带可选 `0x`/`0X` 前缀。　　　　　　　　　　　　　　　　　　 |
-| `0x4F`　　　　　　　　 | `inutfa`　| `inutfa <address>`　　　　　　 | 从标准输入读取一个 UTF-8 字符，解码为 Unicode code point 后写入指定地址；无效 UTF-8 输入触发非法指令trap。　　　　　　　　　　　　　　　　|
+| `0x4F`　　　　　　　　 | `inutfa`　| `inutfa <address>`　　　　　　 | 从标准输入读取一个 UTF-8 字符，解码为 Unicode code point 后写入指定地址；输入结束时写入 `0xFFFFFFFF`；无效 UTF-8 输入触发非法指令trap。　　　　　　　　　　　　　　　　|
 | `0x50`　　　　　　　　 | `outa`　　| `outa <address>`　　　　　　　 | 将指定地址中的32位值以大写十六进制文本输出，不带 `0x` 前缀，例如 `0x1A2BDEED` 输出 `1A2BDEED`。　　　　　　　　　　　　　　　　　　　　　 |
 | `0x51`　　　　　　　　 | `outn`　　| `outn <number>`　　　　　　　　| 将32位立即数以大写十六进制文本输出，不带 `0x` 前缀，例如 `0x1A2BDEED` 输出 `1A2BDEED`。　　　　　　　　　　　　　　　　　　　　　　　　　 |
 | `0x52`　　　　　　　　 | `oututfa` | `oututfa <address>`　　　　　　| 将指定地址中的32位值视为 Unicode code point，编码为 UTF-8 后输出；无效 code point 触发非法指令trap。　　　　　　　　　　　　　　　　　　　|

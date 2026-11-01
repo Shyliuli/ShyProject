@@ -4,8 +4,10 @@ SHYLD = ../../target/bin/shyld
 SHYEMU = ../../target/bin/shyemu
 PYTHON ?= python3
 
-# small_mem 用它切到 4 MiB 内存布局。
+# small_mem 用它切到小内存布局。
 SHYC_DEFS ?=
+# 内核和用户程序都按 -O2 生成；需要时用 SHYC_OPTS= 覆盖。
+SHYC_OPTS ?= -O2
 
 # Keep generated .shy assembly files (with source line numbers) by default.
 .SECONDARY:
@@ -22,7 +24,12 @@ USER_PROG_SRCS := $(filter-out user/usys.shy user/ulib.shyc user/sh.shyc user/ec
 USER_PROGS := $(basename $(notdir $(USER_PROG_SRCS)))
 USER_SFS := $(addprefix $(USER_TARGET)/,$(addsuffix .sfs,$(USER_PROGS)))
 BUSYBOX_APPLET_SFS := $(addprefix $(USER_TARGET)/,$(addsuffix .sfs,$(BUSYBOX_APPLETS)))
-USER_LIB_OBJS = $(USER_TARGET)/usys.sobj $(USER_TARGET)/ulib.sobj
+# ShyLib on ShyOS: libshy's portable C, core, alloc, and std layers over the
+# system calls in usys and ulib (in place of libshy/sys/shy.shyc).
+LIBSHY = ../../libshy
+LIBSHY_LAYERS = libshy core alloc std
+LIBSHY_OBJS = $(addprefix $(USER_TARGET)/,$(addsuffix .sobj,$(LIBSHY_LAYERS)))
+USER_LIB_OBJS = $(USER_TARGET)/usys.sobj $(USER_TARGET)/ulib.sobj $(LIBSHY_OBJS)
 FS_INPUTS := $(USER_SFS) $(BUSYBOX_APPLET_SFS) test.txt
 
 KERNEL_OBJS = \
@@ -57,7 +64,7 @@ small_mem:
 		KERNEL_SFS=$(SMALL_KERNEL_SFS) build
 
 small_run: small_mem
-	$(SHYEMU) $(SMALL_KERNEL_SFS) --mem 4M
+	$(SHYEMU) $(SMALL_KERNEL_SFS) --mem 6M
 
 test: $(KERNEL_SFS)
 	@set -eu; \
@@ -138,11 +145,13 @@ riscv: $(RISCV_ELF)
 
 riscv_user: $(RISCV_USER_SFS)
 
-$(RISCV_USER)/%.sfs: $(RISCV_USER_SRCS) user/%.shyc user/ulib.shyc user/usys.h user/ulib.h kernel/memlayout.h arch/riscv/user/user.ld Makefile $(SHYCC) ../../target/bin/shyc | dirs
+RISCV_LIBSHY_SRCS = $(addprefix $(LIBSHY)/,$(addsuffix .shyc,$(LIBSHY_LAYERS)))
+
+$(RISCV_USER)/%.sfs: $(RISCV_USER_SRCS) $(RISCV_LIBSHY_SRCS) user/%.shyc user/ulib.shyc user/usys.h user/ulib.h kernel/memlayout.h arch/riscv/user/user.ld Makefile $(SHYCC) ../../target/bin/shyc | dirs
 	mkdir -p $(RISCV_USER)
-	$(SHYCC) --target=riscv64-unknown-none -DSHYOS_RISCV -Iuser \
+	$(SHYCC) $(SHYC_OPTS) --target=riscv64-unknown-none -DSHYOS_RISCV -Iuser \
 		-Wl,--oformat=binary -Wl,-T,arch/riscv/user/user.ld \
-		-o $@ user/$*.shyc user/ulib.shyc $(RISCV_USER_SRCS)
+		-o $@ user/$*.shyc user/ulib.shyc $(RISCV_LIBSHY_SRCS) $(RISCV_USER_SRCS)
 
 # The busybox applets are the same image under different names.
 $(addprefix $(RISCV_USER)/,$(addsuffix .sfs,$(BUSYBOX_APPLETS))): $(RISCV_USER)/busybox.sfs
@@ -154,7 +163,7 @@ $(RISCV_FS)/fsdata.c: tools/bin2shy.py $(RISCV_USER_SFS) test.txt | dirs
 
 $(RISCV_ELF): $(RISCV_KERNEL_SRCS) $(wildcard kernel/*.h) $(RISCV_FS)/fsdata.c arch/riscv/kernel.ld Makefile $(SHYCC) ../../target/bin/shyc | dirs
 	mkdir -p $(RISCV_TARGET)
-	$(SHYCC) --target=riscv64-unknown-none -DSHYOS_RISCV \
+	$(SHYCC) $(SHYC_OPTS) --target=riscv64-unknown-none -DSHYOS_RISCV \
 		-Wl,-T,arch/riscv/kernel.ld \
 		-o $@ $(RISCV_KERNEL_SRCS) $(RISCV_FS)/fsdata.c
 
@@ -180,13 +189,13 @@ $(KERNEL_TARGET)/entry.sobj: kernel/entry.shy | dirs
 	$(SHYASM) $< -o $@
 
 $(KERNEL_TARGET)/arch_shy.shy: arch/shy/platform.shyc | dirs
-	$(SHYCC) -S $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
+	$(SHYCC) -S $(SHYC_OPTS) $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
 
 $(KERNEL_TARGET)/arch_shy.sobj: $(KERNEL_TARGET)/arch_shy.shy | dirs
 	$(SHYASM) $< -o $@
 
 $(KERNEL_TARGET)/arch_shy_memory.shy: arch/shy/memory.shyc | dirs
-	$(SHYCC) -S $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
+	$(SHYCC) -S $(SHYC_OPTS) $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
 
 $(KERNEL_TARGET)/arch_shy_memory.sobj: $(KERNEL_TARGET)/arch_shy_memory.shy | dirs
 	$(SHYASM) $< -o $@
@@ -195,7 +204,7 @@ $(KERNEL_TARGET)/%.sobj: kernel/%.shy | dirs
 	$(SHYASM) $< -o $@
 
 $(KERNEL_TARGET)/%.shy: kernel/%.shyc | dirs
-	$(SHYCC) -S $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
+	$(SHYCC) -S $(SHYC_OPTS) $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
 
 $(KERNEL_TARGET)/%.sobj: $(KERNEL_TARGET)/%.shy | dirs
 	$(SHYASM) $< -o $@
@@ -204,7 +213,7 @@ $(FS_TARGET)/fsdata.c: tools/bin2shy.py $(FS_INPUTS) | dirs
 	$(PYTHON) tools/bin2shy.py -o $@ $(FS_INPUTS)
 
 $(FS_TARGET)/%.shy: $(FS_TARGET)/%.c | dirs
-	$(SHYCC) -S $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
+	$(SHYCC) -S $(SHYC_OPTS) $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
 
 $(FS_TARGET)/%.sobj: $(FS_TARGET)/%.shy | dirs
 	$(SHYASM) $< -o $@
@@ -213,13 +222,17 @@ $(USER_TARGET)/usys.sobj: user/usys.shy | dirs
 	$(SHYASM) $< -o $@
 
 $(USER_TARGET)/%.shy: user/%.shyc | dirs
-	$(SHYCC) -S $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
+	$(SHYCC) -S $(SHYC_OPTS) $(SHYC_DEFS) --shy-emit-source-lines $< -o $@
 
 $(USER_TARGET)/%.sobj: $(USER_TARGET)/%.shy | dirs
 	$(SHYASM) $< -o $@
 
+$(USER_TARGET)/%.shy: $(LIBSHY)/%.shyc | dirs
+	$(SHYCC) -S $(SHYC_OPTS) $(SHYC_DEFS) $< -o $@
+
+# Whole libshy objects are linked, so keep only what the program reaches.
 $(USER_TARGET)/%.sfs: $(USER_TARGET)/%.sobj $(USER_LIB_OBJS) | dirs
-	$(SHYLD) $^ -o $@
+	$(SHYLD) --gc-sections $^ -o $@
 
 $(BUSYBOX_APPLET_SFS): $(USER_TARGET)/busybox.sfs | dirs
 	cp $< $@

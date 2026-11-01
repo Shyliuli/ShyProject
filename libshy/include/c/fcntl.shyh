@@ -1,0 +1,4 @@
+#ifndef __SHY_PATH_C_FCNTL_H_SHYH
+#define __SHY_PATH_C_FCNTL_H_SHYH
+#include "../../c/fcntl.shyh"
+#endif

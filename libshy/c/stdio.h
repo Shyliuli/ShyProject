@@ -12,6 +12,32 @@
 extern "C" {
 #endif
 
+typedef struct FILE FILE;
+
+extern FILE *stdin;
+
+extern FILE *stdout;
+
+extern FILE *stderr;
+
+extern FILE *fopen(const char *path, const char *mode);
+
+extern int fclose(FILE *f);
+
+extern int fflush(FILE *f);
+
+extern int feof(FILE *f);
+
+extern int fgetc(FILE *f);
+
+extern int fputc(int c, FILE *f);
+
+extern int fputs(const char *s, FILE *f);
+
+extern size_t fread(void *buf, size_t size, size_t count, FILE *f);
+
+extern size_t fwrite(const void *buf, size_t size, size_t count, FILE *f);
+
 extern int putchar(int c);
 
 extern int getchar(void);
@@ -23,6 +49,10 @@ extern int printf(const char *fmt, ...);
 extern int println(const char *fmt, ...);
 
 extern int vprintf(const char *fmt, va_list ap);
+
+extern int fprintf(FILE *f, const char *fmt, ...);
+
+extern int vfprintf(FILE *f, const char *fmt, va_list ap);
 
 extern int sprintf(char *s, const char *fmt, ...);
 

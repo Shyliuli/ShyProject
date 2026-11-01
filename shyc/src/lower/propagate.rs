@@ -66,8 +66,7 @@ impl FnLower<'_> {
         let tag_ty = self.l.ir_type(underlying);
         let tag = self.load_value(address.clone(), underlying, qualifiers);
         let offset = payload_offset(&self.l.types, source_ty);
-        let displacement = address.offset + i64::from(offset);
-        let payload_address = address.with_offset(displacement);
+        let payload_address = address.offset_by(i64::from(offset));
         // A niche `Result<void, E>` stores the error code itself, and `0` is
         // `Ok`; every other payload enum compares against its `Err` tag.
         let is_failure = self.emit_value(ir::InstKind::ICmp {

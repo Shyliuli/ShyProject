@@ -116,6 +116,43 @@ fn is_data(name: &str) -> bool {
     name == "data" || name.starts_with("data.")
 }
 
+/// `--gc-sections`：只保留从 `text._start` 经 relocation 可达的 section。
+///
+/// 每个函数和全局对象各占一个 section，所以这就是按函数粒度去掉没用到的代码。
+/// 一个只调用 `puts` 的程序因此不会带上整个 `printf`。
+pub fn gc_sections(files: &mut [ObjectFile]) {
+    let mut defined_in: HashMap<&str, &str> = HashMap::new();
+    for file in files.iter() {
+        for sym in &file.symbols {
+            defined_in.insert(&sym.name, &sym.section);
+        }
+    }
+    let mut live: HashSet<String> = HashSet::new();
+    let mut work = vec!["text._start".to_string()];
+    while let Some(section) = work.pop() {
+        if !live.insert(section.clone()) {
+            continue;
+        }
+        for file in files.iter() {
+            for r in file.relocations.iter().filter(|r| r.section == section) {
+                let target = match &r.target {
+                    RelocTarget::Symbol(name) => defined_in.get(name.as_str()).copied(),
+                    RelocTarget::SectionOffset { section, .. } => Some(section.as_str()),
+                };
+                // 未定义的符号留给 link() 报错。
+                if let Some(target) = target {
+                    work.push(target.to_string());
+                }
+            }
+        }
+    }
+    for file in files.iter_mut() {
+        file.sections.retain(|s| live.contains(&s.name));
+        file.symbols.retain(|s| live.contains(&s.section));
+        file.relocations.retain(|r| live.contains(&r.section));
+    }
+}
+
 /// 链接一个或多个 object 文件，生成 `.sfs` 内存镜像和符号表。
 pub fn link(files: Vec<ObjectFile>) -> Result<LinkedOutput> {
     // 1. 合并所有 object 文件，检测重名 section 和重名 symbol。
@@ -207,11 +244,16 @@ pub fn link(files: Vec<ObjectFile>) -> Result<LinkedOutput> {
     // 3. 计算所有 symbol 的最终绝对地址。
     let mut sym_addr: HashMap<String, u32> = HashMap::new();
     for sym in &symbols {
-        let base = *bases
-            .get(&sym.section)
-            .with_context(|| format!("symbol `{}` references unknown section `{}`", sym.name, sym.section))?;
+        let base = *bases.get(&sym.section).with_context(|| {
+            format!(
+                "symbol `{}` references unknown section `{}`",
+                sym.name, sym.section
+            )
+        })?;
         sym_addr.insert(sym.name.clone(), base + sym.offset);
     }
+    // 与 ld 相同：`_end` 是镜像末尾，裸机程序的堆从这里开始。
+    sym_addr.entry("_end".to_string()).or_insert(data_cur);
 
     // 4. 处理所有 relocation，回填 32 位大端序字段。
     let mut sec_index: HashMap<String, usize> = HashMap::new();
@@ -225,17 +267,17 @@ pub fn link(files: Vec<ObjectFile>) -> Result<LinkedOutput> {
                 .get(name)
                 .with_context(|| format!("undefined symbol: {name}"))?,
             RelocTarget::SectionOffset { section, offset } => {
-                let base = *bases.get(section).with_context(|| {
-                    format!("relocation references unknown section: {section}")
-                })?;
+                let base = *bases
+                    .get(section)
+                    .with_context(|| format!("relocation references unknown section: {section}"))?;
                 base + offset
             }
         };
         let final_addr = target_addr.wrapping_add(r.addend);
 
-        let idx = *sec_index.get(&r.section).with_context(|| {
-            format!("relocation references unknown section: {}", r.section)
-        })?;
+        let idx = *sec_index
+            .get(&r.section)
+            .with_context(|| format!("relocation references unknown section: {}", r.section))?;
         let sec = &mut sections[idx];
         let off = r.offset as usize;
         if off + 4 > sec.bytes.len() {
@@ -274,7 +316,9 @@ pub fn link(files: Vec<ObjectFile>) -> Result<LinkedOutput> {
     image[4..8].copy_from_slice(&mem_hint.to_be_bytes());
     image[8..12].copy_from_slice(&stack_hint.to_be_bytes());
     for s in &sections {
-        let base = *bases.get(&s.name).expect("every section has a base address") as usize;
+        let base = *bases
+            .get(&s.name)
+            .expect("every section has a base address") as usize;
         image[base..base + s.bytes.len()].copy_from_slice(&s.bytes);
     }
 
@@ -392,14 +436,25 @@ mod tests {
 
         let out = link(vec![s]).unwrap();
         // text._start 在 0x100，data.message 紧跟在 text 后。
-        assert_eq!(&out.image[0x100..0x10C], &[
-            0x3E, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x01, 0x0C, // message 地址 0x0000010C 大端序
-            0x00, 0x00, 0x00, 0x01,
-        ]);
+        assert_eq!(
+            &out.image[0x100..0x10C],
+            &[
+                0x3E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+                0x0C, // message 地址 0x0000010C 大端序
+                0x00, 0x00, 0x00, 0x01,
+            ]
+        );
         assert_eq!(&out.image[0x10C..0x10F], b"Hi\0");
-        assert!(out.symbols.iter().any(|(n, a)| n == "_start" && *a == 0x100));
-        assert!(out.symbols.iter().any(|(n, a)| n == "message" && *a == 0x10C));
+        assert!(
+            out.symbols
+                .iter()
+                .any(|(n, a)| n == "_start" && *a == 0x100)
+        );
+        assert!(
+            out.symbols
+                .iter()
+                .any(|(n, a)| n == "message" && *a == 0x10C)
+        );
         assert_eq!(&out.image[0x04..0x08], &DEFAULT_MEM_HINT.to_be_bytes());
         assert_eq!(&out.image[0x08..0x0C], &DEFAULT_STACK_HINT.to_be_bytes());
     }
@@ -422,10 +477,7 @@ mod tests {
         );
 
         let out = link(vec![a, b]).unwrap();
-        assert_eq!(
-            &out.image[0x04..0x08],
-            &(12 * 1024 * 1024u32).to_be_bytes()
-        );
+        assert_eq!(&out.image[0x04..0x08], &(12 * 1024 * 1024u32).to_be_bytes());
         assert_eq!(&out.image[0x08..0x0C], &(8 * 1024u32).to_be_bytes());
     }
 
@@ -469,7 +521,11 @@ mod tests {
 
     #[test]
     fn unknown_section_name_is_error() {
-        let s = obj(vec![sec("text._start", &[0; 12]), sec("rodata.x", &[0; 4])], vec![], vec![]);
+        let s = obj(
+            vec![sec("text._start", &[0; 12]), sec("rodata.x", &[0; 4])],
+            vec![],
+            vec![],
+        );
         assert!(link(vec![s]).is_err());
     }
 
@@ -489,10 +545,7 @@ mod tests {
     #[test]
     fn multiple_text_sections_follow_text_start() {
         let s = obj(
-            vec![
-                sec("text._start", &[0; 12]),
-                sec("text.main", &[0; 8]),
-            ],
+            vec![sec("text._start", &[0; 12]), sec("text.main", &[0; 8])],
             vec![
                 sym("text._start", "text._start", 0),
                 sym("text.main", "text.main", 0),
@@ -502,7 +555,11 @@ mod tests {
         let out = link(vec![s]).unwrap();
         // text._start: 0x100, len 12 -> next align4(0x10C) = 0x10C
         // text.main: 0x10C, len 8
-        assert!(out.symbols.iter().any(|(n, a)| n == "text.main" && *a == 0x10C));
+        assert!(
+            out.symbols
+                .iter()
+                .any(|(n, a)| n == "text.main" && *a == 0x10C)
+        );
     }
 
     #[test]
@@ -523,10 +580,18 @@ mod tests {
             vec![],
         );
         let out = link(vec![s]).unwrap();
-        assert!(out.symbols.iter().any(|(n, a)| n == "text.main" && *a == 0x10C));
+        assert!(
+            out.symbols
+                .iter()
+                .any(|(n, a)| n == "text.main" && *a == 0x10C)
+        );
         assert!(out.symbols.iter().any(|(n, a)| n == "data" && *a == 0x114));
         // data len 4 -> align4(0x00000118) = 0x00000118
-        assert!(out.symbols.iter().any(|(n, a)| n == "data.extra" && *a == 0x118));
+        assert!(
+            out.symbols
+                .iter()
+                .any(|(n, a)| n == "data.extra" && *a == 0x118)
+        );
     }
 
     #[test]
@@ -538,7 +603,10 @@ mod tests {
         );
         let b = obj(
             vec![sec("text.print", &[0x4D, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])],
-            vec![sym("text.print", "text.print", 0), sym("print", "text.print", 0)],
+            vec![
+                sym("text.print", "text.print", 0),
+                sym("print", "text.print", 0),
+            ],
             vec![],
         );
         let out = link(vec![a, b]).unwrap();

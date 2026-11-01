@@ -196,7 +196,11 @@ mod tests {
         push_u32(&mut buf, mem_hint.unwrap_or(0));
         push_u32(&mut buf, stack_hint.unwrap_or(0));
 
-        let section_start = if sections.is_empty() { 0 } else { buf.len() as u32 };
+        let section_start = if sections.is_empty() {
+            0
+        } else {
+            buf.len() as u32
+        };
         for (i, s) in sections.iter().enumerate() {
             let node_len = 4 + s.name.len() + 1 + 4 + s.bytes.len();
             let next = if i + 1 < sections.len() {
@@ -210,7 +214,11 @@ mod tests {
             buf.extend_from_slice(&s.bytes);
         }
 
-        let symbol_start = if symbols.is_empty() { 0 } else { buf.len() as u32 };
+        let symbol_start = if symbols.is_empty() {
+            0
+        } else {
+            buf.len() as u32
+        };
         for (i, sym) in symbols.iter().enumerate() {
             let node_len = 4 + 4 + sym.section.len() + 1 + sym.name.len() + 1;
             let next = if i + 1 < symbols.len() {
@@ -288,7 +296,9 @@ mod tests {
         let sections = vec![
             ObjSection {
                 name: "text._start".to_string(),
-                bytes: vec![0x20, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                bytes: vec![
+                    0x20, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                ],
             },
             ObjSection {
                 name: "data.message".to_string(),
@@ -330,7 +340,13 @@ mod tests {
             },
         ];
 
-        let buf = build_sobj(Some(10 * 1024 * 1024), Some(4 * 1024), &sections, &symbols, &relocations);
+        let buf = build_sobj(
+            Some(10 * 1024 * 1024),
+            Some(4 * 1024),
+            &sections,
+            &symbols,
+            &relocations,
+        );
         let obj = ObjectFile::from_bytes(&buf).unwrap();
 
         assert_eq!(obj.mem_hint, Some(10 * 1024 * 1024));

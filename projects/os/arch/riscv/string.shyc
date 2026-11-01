@@ -3,9 +3,16 @@
 /* The ShyISA kernel gets these from hand-written assembly; the portable build
    uses plain C. */
 void *memcpy(void *dst, const void *src, unsigned int n) {
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
-
+    if (((unsigned long)dst & 7) == 0 && ((unsigned long)src & 7) == 0 && (n & 7) == 0) {
+        unsigned long *d = dst;
+        const unsigned long *s = src;
+        for (unsigned int i = 0; i < n / 8; i++) {
+            d[i] = s[i];
+        }
+        return dst;
+    }
+    unsigned char *d = dst;
+    const unsigned char *s = src;
     for (unsigned int i = 0; i < n; i++) {
         d[i] = s[i];
     }

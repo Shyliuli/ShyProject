@@ -25,15 +25,57 @@ fn arch_space_free(proc *p) {
     }
 }
 
+// 段地址与长度都是 4 字节对齐。逐字搬运/清零是冷启动与 fork 的热路径：
+// ShyISA 没有基址+偏移寻址，C 循环每轮要重算一次地址，这里用内联汇编把
+// 一次搬运压到 9 条指令。
+static void copy_word_count(void *dst, const void *src, unsigned int words) {
+    asm!(dst, src, words) {
+        ".Lcopy_words:\n"
+        "equn 6x 0\n"
+        "jmpn .Lcopy_words_done\n"
+        "geta 1x 5x\n"
+        "puta 4x 1x\n"
+        "addn 4x 4\n"
+        "addn 5x 4\n"
+        "subn 6x 1\n"
+        "ujmpn .Lcopy_words\n"
+        ".Lcopy_words_done:\n"
+    };
+}
+
+static void zero_word_count(unsigned int *dst, unsigned int words) {
+    asm!(dst, words) {
+        "setn 1x 0\n"
+        ".Lzero_words:\n"
+        "equn 5x 0\n"
+        "jmpn .Lzero_words_done\n"
+        "puta 4x 1x\n"
+        "addn 4x 4\n"
+        "subn 5x 1\n"
+        "ujmpn .Lzero_words\n"
+        ".Lzero_words_done:\n"
+    };
+}
+
 fn arch_space_copy(proc *parent, proc *child) -> int {
-    memcpy((void *)child->segbase, (void *)parent->segbase, USER_SEG_SIZE);
+    copy_word_count((void *)child->segbase, (void *)parent->segbase, USER_SEG_SIZE / 4);
     return 0;
 }
 
+// 镜像只覆盖段的前 n 个字节，其余部分清零，复用旧段时不会读到上一份数据。
+static void clear_tail(proc *p, unsigned int n) {
+    unsigned int *memory = (unsigned int *)p->segbase;
+    unsigned int start = n / 4;
+    zero_word_count(memory + start, USER_SEG_SIZE / 4 - start);
+}
+
 fn arch_space_load(proc *p, const void *src, unsigned int n) {
-    unsigned char *memory = (unsigned char *)p->segbase;
-    for (unsigned int i = 0; i < USER_SEG_SIZE; i++) memory[i] = 0;
-    arch_space_write(p, 0, src, n);
+    clear_tail(p, n);
+    if (((unsigned int)src & 3) == 0 && (n & 3) == 0) {
+        copy_word_count((void *)p->segbase, src, n / 4);
+    } else {
+        arch_space_write(p, 0, src, n);
+    }
 }
 
 fn arch_user_sp(unsigned int stack_base) -> unsigned int {

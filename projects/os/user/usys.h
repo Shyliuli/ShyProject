@@ -24,14 +24,16 @@
 #define SYS_psline 21
 #define SYS_sbrk 22
 
-int write(int fd, const char *buf, int n);
-int read(int fd, char *buf, int n);
-int open(const char *path);
-int close(int fd);
+// read, write, close, _exit, and sbrk are the POSIX calls libshy builds its
+// C library on; their prototypes come from <unistd.h>. open() and exit() are
+// libshy's, on top of sys_open/sys_create and _exit.
+#include <unistd.h>
+#include <stdlib.h>
+
+int sys_open(const char *path);
+int sys_create(const char *path);
 int fork(void);
 int getpid(void);
-void user_exit(int status);
-#define exit user_exit
 void yield(void);
 int exec(const char *path, const char *arg);
 int wait(int *status);
@@ -41,11 +43,9 @@ int wakeup(int chan);
 int p3counter(int op);
 int pipe(int fds[2]);
 int dup2(int oldfd, int newfd);
-int create(const char *path);
 int dirent(int index, char *buf, int max);
 int mkdir(const char *path);
 int rm(const char *path);
 int psline(int index, char *buf, int max);
-void *sbrk(int n);
 
 #endif

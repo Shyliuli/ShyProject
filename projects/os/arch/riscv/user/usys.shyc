@@ -4,15 +4,15 @@
 
 long sys_call(long number, long a, long b, long c);
 
-int write(int fd, const char *buf, int n) {
-    return (int)sys_call(SYS_write, fd, (long)buf, n);
+ssize_t write(int fd, const void *buf, size_t n) {
+    return sys_call(SYS_write, fd, (long)buf, (long)n);
 }
 
-int read(int fd, char *buf, int n) {
-    return (int)sys_call(SYS_read, fd, (long)buf, n);
+ssize_t read(int fd, void *buf, size_t n) {
+    return sys_call(SYS_read, fd, (long)buf, (long)n);
 }
 
-int open(const char *path) {
+int sys_open(const char *path) {
     return (int)sys_call(SYS_open, (long)path, 0, 0);
 }
 
@@ -28,7 +28,7 @@ int getpid(void) {
     return (int)sys_call(SYS_getpid, 0, 0, 0);
 }
 
-void user_exit(int status) {
+void _exit(int status) {
     sys_call(SYS_exit, status, 0, 0);
     for (;;) { }
 }
@@ -69,7 +69,7 @@ int dup2(int oldfd, int newfd) {
     return (int)sys_call(SYS_dup2, oldfd, newfd, 0);
 }
 
-int create(const char *path) {
+int sys_create(const char *path) {
     return (int)sys_call(SYS_create, (long)path, 0, 0);
 }
 
@@ -89,6 +89,6 @@ int psline(int index, char *buf, int max) {
     return (int)sys_call(SYS_psline, index, (long)buf, max);
 }
 
-void *sbrk(int n) {
+void *sbrk(intptr_t n) {
     return (void *)sys_call(SYS_sbrk, n, 0, 0);
 }

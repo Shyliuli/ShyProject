@@ -633,11 +633,10 @@ impl Emu {
     }
 
     /// `inutfa`：从标准输入读取一个 UTF-8 字符，解码为 code point 写入地址。
+    /// 输入结束时写入 `0xFFFFFFFF`：它不是合法 code point，程序能据此判断 EOF。
     fn op_inutfa(&mut self, addr: u32, cur: u32, watchpoints: &HashSet<Watchpoint>) -> Flow {
-        let Some(ch) = self.read_input_char() else {
-            return Flow::Exit(0);
-        };
-        match self.w(addr, ch as u32, watchpoints) {
+        let value = self.read_input_char().map_or(u32::MAX, |ch| ch as u32);
+        match self.w(addr, value, watchpoints) {
             Ok(()) => Flow::Continue,
             Err(MemAccessErr::Trap(cause)) => Flow::Trap { cause, epc: cur },
             Err(MemAccessErr::Watchpoint(addr)) => Flow::Watchpoint(addr),

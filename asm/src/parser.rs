@@ -432,13 +432,11 @@ impl Obj {
                         if symbol.is_empty() {
                             return Err(anyhow::anyhow!("`@` must be followed by a symbol name"));
                         }
-                        let (base, addend) = match symbol
-                            .strip_suffix(")")
-                            .and_then(|s| s.split_once("("))
-                        {
-                            Some((base, addend)) => (base, parse_u32_literal(addend)?),
-                            None => (symbol, 0),
-                        };
+                        let (base, addend) =
+                            match symbol.strip_suffix(")").and_then(|s| s.split_once("(")) {
+                                Some((base, addend)) => (base, parse_u32_literal(addend)?),
+                                None => (symbol, 0),
+                            };
                         reloc.push(ObjRelocation {
                             section: section.name.clone(),
                             offset: offset + 4 * (arg_i as u32 + 1),

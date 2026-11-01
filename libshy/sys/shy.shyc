@@ -1,0 +1,115 @@
+// The platform calls of <unistd.h> and <fcntl.h> for a bare Shy machine.
+// libshy.shyc builds the whole C library on these; ShyOS replaces this file
+// with system calls.
+
+#include <stddef.shyh>
+#include <stdint.shyh>
+#include <unistd.shyh>
+#include <fcntl.shyh>
+
+// `inutfa` reads one UTF-8 character as a code point, and 0xFFFFFFFF at the
+// end of input. read() is byte-oriented, so a multi-byte character waits here.
+static unsigned char pending[4];
+static int pending_len = 0;
+static int pending_pos = 0;
+
+static int next_byte(void) {
+  if (pending_pos == pending_len) {
+    unsigned int cp = 0;
+    asm!(cp) {
+      "inutfa {cp}"
+    };
+    if (cp == 0xFFFFFFFF)
+      return -1;
+    pending_pos = 0;
+    if (cp < 0x80) {
+      pending[0] = cp;
+      pending_len = 1;
+    } else if (cp < 0x800) {
+      pending[0] = 0xC0 | (cp >> 6);
+      pending[1] = 0x80 | (cp & 0x3F);
+      pending_len = 2;
+    } else if (cp < 0x10000) {
+      pending[0] = 0xE0 | (cp >> 12);
+      pending[1] = 0x80 | ((cp >> 6) & 0x3F);
+      pending[2] = 0x80 | (cp & 0x3F);
+      pending_len = 3;
+    } else {
+      pending[0] = 0xF0 | (cp >> 18);
+      pending[1] = 0x80 | ((cp >> 12) & 0x3F);
+      pending[2] = 0x80 | ((cp >> 6) & 0x3F);
+      pending[3] = 0x80 | (cp & 0x3F);
+      pending_len = 4;
+    }
+  }
+  int byte = pending[pending_pos];
+  pending_pos = pending_pos + 1;
+  return byte;
+}
+
+// Like a terminal: stop after a newline, return 0 at the end of input.
+ssize_t read(int fd, void *buf, size_t count) {
+  if (fd != STDIN_FILENO)
+    return -1;
+  unsigned char *p = buf;
+  size_t n = 0;
+  while (n < count) {
+    int c = next_byte();
+    if (c < 0)
+      break;
+    p[n] = c;
+    n = n + 1;
+    if (c == '\n')
+      break;
+  }
+  return (ssize_t)n;
+}
+
+// 0x70 is the UART data register; a write sends the low 8 bits.
+ssize_t write(int fd, const void *buf, size_t count) {
+  if (fd != STDOUT_FILENO && fd != STDERR_FILENO)
+    return -1;
+  const unsigned char *p = buf;
+  for (size_t i = 0; i < count; i++) {
+    int c = p[i];
+    asm!(c) {
+      "seta 0x70 {c}"
+    };
+  }
+  return (ssize_t)count;
+}
+
+// A bare machine has no file system.
+int open(const char *path, int flags, ...) {
+  (void)path;
+  (void)flags;
+  return -1;
+}
+
+int close(int fd) {
+  (void)fd;
+  return -1;
+}
+
+void _exit(int status) {
+  asm!(status) {
+    "seta exit {status}"
+  };
+  for (;;)
+    ;
+}
+
+// The heap grows from the end of the image (`_end`, set by the linker) up to
+// the stack, which starts at 0x00fff000.
+extern char _end[];
+static char *heap_end = NULL;
+
+void *sbrk(intptr_t increment) {
+  if (!heap_end)
+    heap_end = _end;
+  if ((uintptr_t)heap_end + increment > 0x00fff000)
+    return (void *)-1;
+  char *old = heap_end;
+  heap_end = heap_end + increment;
+  return old;
+}

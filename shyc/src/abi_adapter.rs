@@ -4,14 +4,11 @@
 //! place that knows both models: it reads functions, records, and arrays from
 //! a [`TypeStore`] and asks `abi-plan` for the Shy ABI v1 [`CallPlan`].
 //!
-//! No backend consumes the plan yet. The exact future hook is
-//! `lower/call.rs::emit_call`: it already has the sema function `TypeId` and
-//! `self.l.types`, so it can call [`plan_shy_function`] and attach the result
-//! to `ir::Call` (that would add a field in `ir/ops.rs`). A backend then moves
-//! bytes according to `plan.args` and `plan.return_value` instead of assuming
-//! a host calling convention. Planning must happen before lowering, because
-//! `ir::Type::Aggregate` keeps only `(size, align)` and cannot recover the
-//! field or element shapes this conversion needs.
+//! Lowering plans every function and call here while field layout is still
+//! known and stores the plan in the IR (`ir::Function.abi`, `ir::Call`); the
+//! backends move bytes according to it. Planning cannot wait for the backends,
+//! because `ir::Type::Aggregate` keeps only `(size, align)` and cannot recover
+//! the field or element shapes this conversion needs.
 //!
 //! Top-level qualifiers do not change an ABI, so they are dropped. Incomplete
 //! types are rejected rather than given a made-up size.
@@ -19,24 +16,6 @@
 use abi_plan::{AbiError, AbiField, AbiKind, AbiType, CallPlan, FunctionSignature};
 
 use crate::sema::types::{RecordKind, TypeId, TypeKind, TypeStore};
-
-/// Plan an already-converted signature under the Shy ABI v1.
-///
-/// This is the narrow surface for callers that do not have a ShyC
-/// [`TypeStore`], for example a simulator or a hand-built declaration.
-pub fn plan_shy(signature: &FunctionSignature) -> Result<CallPlan, AbiError> {
-    abi_plan::plan(AbiKind::ShyV1, signature)
-}
-
-/// Plan one ShyC function under the Shy ABI v1.
-///
-/// `function_ty` must be a [`TypeKind::Function`] from `types`. Aggregate
-/// returns become an sret plan, aggregates and arguments beyond the eighth
-/// register slot go on the stack, and a scalar wider than 64 bits is reported
-/// as [`AbiError::Unsupported`].
-pub fn plan_shy_function(types: &TypeStore, function_ty: TypeId) -> Result<CallPlan, AbiError> {
-    plan_shy(&function_signature(types, function_ty)?)
-}
 
 /// Plan one ShyC function for the target ABI the IR is being built for.
 ///

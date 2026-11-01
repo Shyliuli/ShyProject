@@ -22,8 +22,8 @@ ___CODE___
     syscall
     ret
 
-.section text.open
-.symbol open
+.section text.sys_open
+.symbol sys_open
     setn 0x 9
     seta 1x 4x
     syscall
@@ -48,12 +48,12 @@ ___CODE___
     syscall
     ret
 
-.section text.user_exit
-.symbol user_exit
+.section text._exit
+.symbol _exit
     setn 0x 4
     seta 1x 4x
     syscall
-    ujmpn user_exit
+    ujmpn _exit
 
 .section text.yield
 .symbol yield
@@ -119,8 +119,8 @@ ___CODE___
     syscall
     ret
 
-.section text.create
-.symbol create
+.section text.sys_create
+.symbol sys_create
     setn 0x 17
     seta 1x 4x
     syscall

@@ -1,8 +1,9 @@
 //! Building blocks for the independent, teaching-oriented ShyC compiler.
 //!
-//! The frontend and backend are under development. This library currently
-//! exposes source locations, lexical analysis, and the typed CFG IR; it is not
-//! yet an alternative executable compiler.
+//! This library is the whole pipeline: source locations, lexer, preprocessor,
+//! parser, semantic types, typed CFG IR, optimization passes, both code
+//! generators, and the C header/wrapper export. The `shyc` binary is the
+//! command-line driver over these modules.
 pub mod abi;
 pub mod abi_adapter;
 pub mod analysis;

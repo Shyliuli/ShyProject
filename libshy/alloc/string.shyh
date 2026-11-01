@@ -1,0 +1,22 @@
+#ifndef SHY_ALLOC_STRING_SHYH
+#define SHY_ALLOC_STRING_SHYH
+
+#include <core/str.shyh>
+
+/* An owned, growable text buffer. `data` always ends with a NUL, so it is
+   also a C string. Start with String::new(). */
+struct String {
+    char *data;
+    int len;
+    int cap;
+};
+
+impl String {
+    fn new(void) -> String;
+    fn push(self *s, int c);
+    fn push_str(self *s, Str text);
+    fn push_cstr(self *s, const char *text);
+    fn as_str(self *s) -> Str;
+}
+
+#endif

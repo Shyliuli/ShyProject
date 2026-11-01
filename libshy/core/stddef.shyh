@@ -3,9 +3,16 @@
 
 #define NULL ((void *)0)
 
+/* Shy is ILP32; the hosted LLVM targets are LP64. The compiler predefines
+   __SIZEOF_POINTER__ for both, so one header serves every target. */
+#if __SIZEOF_POINTER__ == 8
+typedef unsigned long size_t;
+typedef long ptrdiff_t;
+#else
 typedef unsigned int size_t;
 typedef int ptrdiff_t;
-typedef unsigned int wchar_t;
+#endif
+typedef int wchar_t;
 typedef long max_align_t;
 
 #define offsetof(type, member) ((size_t)&(((type *)0)->member))

@@ -84,7 +84,7 @@ This is a freestanding, bare-metal target.
 If a translation unit defines `main`, the backend emits `_start`:
 
 - initializes `sp` to `0x00fff000`;
-- calls `main`;
+- calls `main` with `argc = 0` and `argv = NULL`;
 - exits with `seta exit 1x`, using the value returned by `main`.
 
 This startup can be disabled with the ShyC source extension:
@@ -406,6 +406,28 @@ p.add(5);
 
 The dot operator also auto-dereferences struct and union pointers for both field
 access and method calls.
+
+A method of an inherent impl may be declared without a body, like a C
+prototype. A header declares the methods and one translation unit defines them:
+
+```c
+// str.shyh
+struct Str { const char *ptr; int len; };
+impl Str {
+  fn eq(self *s, Str other) -> int;
+}
+
+// str.shyc
+#include "str.shyh"
+impl Str {
+  fn eq(self *s, Str other) -> int { /* ... */ }
+}
+```
+
+`static` gives a method or a `fn` function internal linkage, so a header can
+define a private helper without a duplicate symbol in every unit that includes
+it: `static fn helper(void) -> int { ... }`. Methods of a generic or trait impl
+always have bodies; a generic impl is compiled where it is used.
 
 If a type implements `drop(self *s)`, local values of that type are treated as
 RAII values. ShyC inserts `drop` at scope exits, `return`, `break`, and

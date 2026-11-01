@@ -355,11 +355,9 @@ impl Lowerer {
                     (None, Some(trait_impl)) => {
                         self.trait_impl_method_symbol(trait_impl, &target.name, &name)
                     }
-                    (None, None) => format!(
-                        "____{}__{}",
-                        Self::sanitize_ident(&target.name),
-                        Self::sanitize_ident(&name)
-                    ),
+                    (None, None) => {
+                        self.inherent_method_symbol(&target.name, &name, declaration.specs.storage)
+                    }
                 };
                 (symbol.clone(), symbol)
             }
@@ -410,8 +408,14 @@ impl Lowerer {
                     );
                 }
                 None => {
-                    if info.methods.contains_key(&name) || info.generic_methods.contains_key(&name)
-                    {
+                    // A prototype of the same method may come first; a second
+                    // definition was already rejected by declare_function_symbol.
+                    let conflict = info.generic_methods.contains_key(&name)
+                        || info
+                            .methods
+                            .get(&name)
+                            .is_some_and(|previous| previous.symbol != symbol);
+                    if conflict {
                         return Err(Diagnostic::new(
                             declaration.span,
                             format!("redefinition of method '{name}'"),
@@ -440,6 +444,68 @@ impl Lowerer {
                 internal: false,
             });
         }
+        Ok(())
+    }
+
+    /// `____Type__method`, scoped to the translation unit when `static`, so a
+    /// header can also define a private helper method.
+    fn inherent_method_symbol(
+        &self,
+        type_name: &str,
+        method: &str,
+        storage: Option<ast::StorageClass>,
+    ) -> String {
+        let symbol = format!(
+            "____{}__{}",
+            Self::sanitize_ident(type_name),
+            Self::sanitize_ident(method)
+        );
+        match storage {
+            Some(ast::StorageClass::Static) => self.internal_symbol(&symbol),
+            _ => symbol,
+        }
+    }
+
+    /// Registers a bodiless method of an inherent impl: the method table gets
+    /// its signature and the symbol is declared but not defined, exactly like
+    /// a C prototype. The definition may follow in this unit or another one.
+    pub(super) fn collect_method_prototype(
+        &mut self,
+        prototype: &ast::MethodPrototype,
+        ty: TypeId,
+        type_name: &str,
+    ) -> Result<(), Diagnostic> {
+        self.reject_generic_declarator(&prototype.declarator)?;
+        let ResolvedSpecs { ty: base, qualifiers } = self.resolve_specs(&prototype.specs)?;
+        let resolved = self.resolve_declarator(base, qualifiers, &prototype.declarator)?;
+        let Some(name) = resolved.name else {
+            return Err(Diagnostic::new(prototype.span, "method declaration needs a name"));
+        };
+        if !self.types.is_function(resolved.ty) {
+            return Err(Diagnostic::new(
+                prototype.span,
+                "declarator is not a function",
+            ));
+        }
+        let symbol = self.inherent_method_symbol(type_name, &name, prototype.specs.storage);
+        self.declare_function_symbol(&symbol, &symbol, resolved.ty, false, prototype.span)?;
+        let info = self
+            .impls
+            .entry(ty)
+            .or_insert_with(|| super::ImplInfo::new(type_name.to_string()));
+        if info.generic_methods.contains_key(&name)
+            || info.methods.get(&name).is_some_and(|previous| previous.symbol != symbol)
+        {
+            return Err(Diagnostic::new(
+                prototype.span,
+                format!("conflicting declaration of method '{name}'"),
+            ));
+        }
+        info.methods.entry(name).or_insert(super::MethodInfo {
+            symbol,
+            ty: resolved.ty,
+            deferred: None,
+        });
         Ok(())
     }
 
@@ -1543,7 +1609,7 @@ impl FnLower<'_> {
                     ));
                 }
                 self.init_local_at(
-                    address.clone().with_offset(i64::from(sub_offset)),
+                    address.clone().offset_by(i64::from(sub_offset)),
                     sub_ty,
                     &entry.value,
                 )?;
@@ -1580,7 +1646,7 @@ impl FnLower<'_> {
                     (sub_ty, sub_offset)
                 };
                 self.init_local_at(
-                    address.clone().with_offset(i64::from(sub_offset)),
+                    address.clone().offset_by(i64::from(sub_offset)),
                     sub_ty,
                     &entry.value,
                 )?;

@@ -9,9 +9,9 @@ fn main(void) -> int {
     let arg = user_arg();
 
     if (arg[0]) {
-        puts(arg);
+        fputs(arg, stdout);
     }
-    puts("\n");
+    fputs("\n", stdout);
     exit(0);
     return 0;
 }

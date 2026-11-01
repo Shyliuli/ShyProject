@@ -8,7 +8,7 @@
 fn main(void) -> int {
     char buf[64];
     let path = user_arg();
-    let fd = path[0] ? open(path) : 0;
+    let fd = path[0] ? open(path, O_RDONLY) : 0;
 
     if (fd < 0) {
         exit(1);

@@ -89,7 +89,7 @@ static void run_program(const char *path, char *arg) {
     let pid = fork();
 
     if (pid < 0) {
-        puts("?\n");
+        fputs("?\n", stdout);
         return;
     }
     if (pid == 0) {
@@ -107,11 +107,11 @@ static void run_pipeline(char *left, char *right) {
     let left_path = parse_command(left, &left_arg);
     let right_path = parse_command(right, &right_arg);
     if (left_path == 0 || right_path == 0) {
-        puts("?\n");
+        fputs("?\n", stdout);
         return;
     }
     if (pipe(fds) < 0) {
-        puts("?\n");
+        fputs("?\n", stdout);
         return;
     }
 
@@ -119,7 +119,7 @@ static void run_pipeline(char *left, char *right) {
     if (left_pid < 0) {
         close(fds[0]);
         close(fds[1]);
-        puts("?\n");
+        fputs("?\n", stdout);
         return;
     }
     if (left_pid == 0) {
@@ -134,7 +134,7 @@ static void run_pipeline(char *left, char *right) {
     if (right_pid < 0) {
         close(fds[0]);
         close(fds[1]);
-        puts("?\n");
+        fputs("?\n", stdout);
         return;
     }
     if (right_pid == 0) {
@@ -154,9 +154,9 @@ fn main(void) -> int {
     char line[96];
 
     while (1) {
-        puts("$ ");
+        fputs("$ ", stdout);
         let n = read_line(line, 96);
-        if (n == 0) {
+        if (n < 0) {
             exit(2);
         }
 
@@ -197,7 +197,7 @@ fn main(void) -> int {
         if (path != 0) {
             run_program(path, arg);
         } else {
-            puts("?\n");
+            fputs("?\n", stdout);
         }
     }
 

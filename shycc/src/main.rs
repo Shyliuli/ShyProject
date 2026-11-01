@@ -207,6 +207,13 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                 opts.emit_debug_info = true;
                 opts.compile_args.push(arg.clone());
             }
+            // `-O` is a real option of the `shyc` frontend, so a level it does
+            // not accept is a usage error instead of a flag to pass along.
+            _ if arg.starts_with("-O")
+                && !matches!(arg.as_str(), "-O0" | "-O1" | "-O2" | "-O3") =>
+            {
+                bail!("unsupported optimization level: {arg} (expected -O0, -O1, -O2, or -O3)");
+            }
             _ if is_compile_option(arg) => opts.compile_args.push(arg.clone()),
             _ if arg.starts_with('-') => bail!("unknown option: {arg}"),
             _ => opts.inputs.push(arg.clone()),
@@ -267,6 +274,14 @@ fn is_compile_option(arg: &str) -> bool {
                 | "-fno-strict-aliasing"
                 | "-w"
         )
+}
+
+/// Options of `compile_args` that the `shyc` frontend accepts verbatim.
+///
+/// The rest belong to chibicc. Only `-O0`..`-O3` reach this point as `-O`
+/// spellings, because the parse loop rejects every other level.
+fn forwarded_to_shyc(arg: &str) -> bool {
+    arg.starts_with("-I") || arg.starts_with("-D") || arg.starts_with("-U") || arg.starts_with("-O")
 }
 
 fn run(opts: Options) -> Result<()> {
@@ -372,7 +387,7 @@ fn run(opts: Options) -> Result<()> {
 
     for lib in &libraries {
         match lib.as_str() {
-            "libshy" => objects.push(build_libshy(&repo, &opts, &mut temps)?),
+            "libshy" => objects.extend(build_libshy(&repo, &opts, &mut temps)?),
             "float" => objects.push(build_float_lib(&repo, &opts, &mut temps)?),
             _ => bail!("unknown internal Shy library: -l{lib}"),
         }
@@ -438,8 +453,7 @@ fn run_shyc(
     }
     add_libshy_includes(&mut cmd, repo);
     for arg in &opts.compile_args {
-        // Only the options the new driver understands are forwarded.
-        if arg.starts_with("-I") || arg.starts_with("-D") || arg.starts_with("-U") {
+        if forwarded_to_shyc(arg) {
             cmd.arg(arg);
         }
     }
@@ -467,9 +481,10 @@ fn shyc_command(repo: &Path, print_only: bool) -> Result<Command> {
         return Ok(Command::new(built));
     }
     let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-    cmd.current_dir(repo)
-        .arg("run")
+    cmd.arg("run")
         .arg("-q")
+        .arg("--manifest-path")
+        .arg(repo.join("Cargo.toml"))
         .arg("-p")
         .arg("shyc")
         .arg("--");
@@ -493,32 +508,28 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
     for input in &opts.inputs {
         match input_kind(input)? {
             InputKind::C => {
-                let ll = if opts.stage == Stage::Link {
+                // The IR is an intermediate file: `-o` names what clang makes
+                // from it, so `-S -o x.s` holds assembly, not IR.
+                let ll = if opts.stage == Stage::Link || opts.output.is_some() {
                     temps.temp_path(".ll")
                 } else {
-                    opts.output
-                        .clone()
-                        .unwrap_or_else(|| replace_ext(input, ".ll"))
+                    replace_ext(input, ".ll")
                 };
-                let mut cmd = shyc_command(repo, opts.print_only)?;
-                cmd.arg("--emit=llvm")
-                    .arg(format!("--target={}", opts.target));
-                if bare_target(&opts.target) {
-                    cmd.arg("-ffreestanding");
-                }
-                add_libshy_includes(&mut cmd, repo);
-                for arg in &opts.compile_args {
-                    if arg.starts_with("-I") || arg.starts_with("-D") || arg.starts_with("-U") {
-                        cmd.arg(arg);
-                    }
-                }
-                cmd.arg("-o").arg(&ll).arg(input);
-                run_command(opts, &mut cmd)?;
+                emit_llvm(repo, opts, Path::new(input), &ll, true)?;
                 clang_inputs.push(ll);
             }
             // `.S` files are target assembly text: clang assembles and preprocesses
             // them, so they pass straight through.
             InputKind::Asm | InputKind::Obj => clang_inputs.push(PathBuf::from(input)),
+        }
+    }
+    // A hosted target takes the C layer from the system libc and links
+    // libshy's core, alloc, and std on top of it, as Rust links its std.
+    if opts.stage == Stage::Link && !bare_target(&opts.target) && !opts.no_default_libs {
+        for source in LIBSHY_RUST_LAYERS {
+            let ll = temps.temp_path(".ll");
+            emit_llvm(repo, opts, &repo.join(source), &ll, false)?;
+            clang_inputs.push(ll);
         }
     }
 
@@ -627,6 +638,9 @@ fn run_linker(
     sym: Option<&Path>,
 ) -> Result<()> {
     let mut cmd = tool_command(repo, "linker", "shyld");
+    // libshy is linked as whole objects, not an archive, so drop the functions
+    // nothing reaches: a program that only calls `puts` keeps no `printf`.
+    cmd.arg("--gc-sections");
     cmd.args(inputs).arg("-o").arg(output);
     if let Some(sym) = sym {
         cmd.arg("--sym").arg(sym);
@@ -645,9 +659,10 @@ fn run_shy_dwarf(
         Command::new(path)
     } else {
         let mut cmd = Command::new("cargo");
-        cmd.current_dir(repo)
-            .arg("run")
+        cmd.arg("run")
             .arg("-q")
+            .arg("--manifest-path")
+            .arg(repo.join("Cargo.toml"))
             .arg("-p")
             .arg("shy-dwarf")
             .arg("--");
@@ -714,27 +729,55 @@ fn build_float_lib(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result
     Ok(obj)
 }
 
-fn build_libshy(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result<PathBuf> {
-    let src = repo.join("libshy/libshy.shyc");
-    if !src.exists() {
-        bail!("missing libshy source: {}", src.display());
+/// libshy's layers above the C library, in dependency order.
+const LIBSHY_RUST_LAYERS: [&str; 3] = ["libshy/core.shyc", "libshy/alloc.shyc", "libshy/std.shyc"];
+
+/// One unit through `shyc --emit=llvm`. A library unit gets only the
+/// optimization level, never the user's `-I`/`-D`/`-U`.
+fn emit_llvm(repo: &Path, opts: &Options, input: &Path, ll: &Path, user_unit: bool) -> Result<()> {
+    let mut cmd = shyc_command(repo, opts.print_only)?;
+    cmd.arg("--emit=llvm")
+        .arg(format!("--target={}", opts.target));
+    if bare_target(&opts.target) {
+        cmd.arg("-ffreestanding");
     }
+    add_libshy_includes(&mut cmd, repo);
+    for arg in &opts.compile_args {
+        if forwarded_to_shyc(arg) && (user_unit || arg.starts_with("-O")) {
+            cmd.arg(arg);
+        }
+    }
+    cmd.arg("-o").arg(ll).arg(input);
+    run_command(opts, &mut cmd)
+}
 
-    let asm = if opts.save_temps {
-        PathBuf::from("libshy.shy")
-    } else {
-        temps.temp_path(".libshy.shy")
-    };
-    let obj = if opts.save_temps {
-        PathBuf::from("libshy.sobj")
-    } else {
-        temps.temp_path(".libshy.sobj")
-    };
-
-    let input = src.to_string_lossy().into_owned();
-    run_compiler(repo, opts, &input, Some(&asm), false, true)?;
-    run_asm(repo, opts, &asm, &obj)?;
-    Ok(obj)
+/// The Shy target's whole library: the portable C layer, the Shy
+/// implementation of its platform calls, then core, alloc, and std. ShyOS
+/// links the same sources with its own system calls instead of `sys/shy`.
+fn build_libshy(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result<Vec<PathBuf>> {
+    let mut sources = vec!["libshy/libshy.shyc", "libshy/sys/shy.shyc"];
+    sources.extend(LIBSHY_RUST_LAYERS);
+    let mut objects = Vec::new();
+    for source in sources {
+        let name = Path::new(source)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("libshy");
+        let src = repo.join(source);
+        if !src.exists() {
+            bail!("missing libshy source: {}", src.display());
+        }
+        let (asm, obj) = if opts.save_temps {
+            (PathBuf::from(format!("{name}.shy")), PathBuf::from(format!("{name}.sobj")))
+        } else {
+            (temps.temp_path(&format!(".{name}.shy")), temps.temp_path(&format!(".{name}.sobj")))
+        };
+        let input = src.to_string_lossy().into_owned();
+        run_compiler(repo, opts, &input, Some(&asm), false, true)?;
+        run_asm(repo, opts, &asm, &obj)?;
+        objects.push(obj);
+    }
+    Ok(objects)
 }
 
 fn tool_command(repo: &Path, package: &str, installed_name: &str) -> Command {
@@ -754,10 +797,13 @@ fn tool_command(repo: &Path, package: &str, installed_name: &str) -> Command {
         }
     }
 
+    // Keep the caller's working directory so relative input and output paths
+    // keep their meaning; `--manifest-path` finds the workspace instead.
     let mut cmd = Command::new("cargo");
-    cmd.current_dir(repo)
-        .arg("run")
+    cmd.arg("run")
         .arg("-q")
+        .arg("--manifest-path")
+        .arg(repo.join("Cargo.toml"))
         .arg("-p")
         .arg(package)
         .arg("--");
@@ -891,6 +937,7 @@ fn print_usage() {
          debug: --shy-emit-source-lines, --shy-emit-debug-info\n\
          inputs: .shyc/.c, .shy, .sobj\n\
          backend: --backend shyc|chibicc (default shyc)\n\
+         optimization: -O0, -O1, -O2, or -O3 (forwarded to shyc; -O0 by default)\n\
          libraries: libshy and the soft-float runtime are linked by default;\n\
          \x20 -nostdlib/-nodefaultlibs disables that, -llibshy and -lfloat\n\
          \x20 are accepted and never duplicated"

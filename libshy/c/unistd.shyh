@@ -2,14 +2,22 @@
 #define __SHY_UNISTD_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #define STDIN_FILENO 0
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
 
-typedef int ssize_t;
+/* Pointer-sized and signed on every target, like POSIX ssize_t. */
+typedef ptrdiff_t ssize_t;
 
+/* The platform boundary: libshy builds the rest of the C library on these
+   calls and open() from <fcntl.h>. Shy implements them in sys/shy.shyc;
+   ShyOS implements them with system calls in its user library. */
 ssize_t read(int fd, void *buf, size_t count);
 ssize_t write(int fd, const void *buf, size_t count);
+int close(int fd);
+void _exit(int status);
+void *sbrk(intptr_t increment);
 
 #endif

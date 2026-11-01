@@ -1,9 +1,21 @@
 #![no_main]
 
+// ShyOS 的用户库：为 libshy 实现 open()，其余 C 库直接来自 libshy；
+// read/write/close/_exit/sbrk 是 usys 里的系统调用。
+
 #include "usys.h"
 #include "ulib.h"
 
-struct String {
+// O_CREAT 对应 create：它新建或截断文件，并以写方式打开。
+int open(const char *path, int flags, ...) {
+    if (flags & O_CREAT) {
+        return sys_create(path);
+    }
+    return sys_open(path);
+}
+
+// Local helpers; static so they cannot clash with libshy's String.
+struct Text {
     const char *data;
 };
 
@@ -13,8 +25,8 @@ struct Buffer {
     int len;
 };
 
-impl String {
-    fn len(self *s) -> int {
+impl Text {
+    static fn len(self *s) -> int {
         let mut n = 0;
 
         while (s.data[n]) {
@@ -23,7 +35,7 @@ impl String {
         return n;
     }
 
-    fn eq(self *s, const char *other) -> int {
+    static fn eq(self *s, const char *other) -> int {
         let mut i = 0;
 
         while (s.data[i] && other[i]) {
@@ -35,7 +47,7 @@ impl String {
         return s.data[i] == other[i];
     }
 
-    fn starts_with(self *s, const char *prefix) -> int {
+    static fn starts_with(self *s, const char *prefix) -> int {
         let mut i = 0;
 
         while (prefix[i]) {
@@ -47,9 +59,9 @@ impl String {
         return 1;
     }
 
-    fn find(self *s, const char *needle) -> int {
+    static fn find(self *s, const char *needle) -> int {
         let mut i = 0;
-        String pat;
+        Text pat;
 
         pat.data = needle;
         let n = pat.len();
@@ -72,13 +84,13 @@ impl String {
 }
 
 impl Buffer {
-    fn init(self *b, char *data, int max) {
+    static fn init(self *b, char *data, int max) {
         b.data = data;
         b.max = max;
         b.len = 0;
     }
 
-    fn has_room(self *b) -> int {
+    static fn has_room(self *b) -> int {
         return b.len < b.max - 1;
     }
 }
@@ -92,20 +104,10 @@ fn user_arg(void) -> char * {
 }
 
 fn streq(const char *a, const char *b) -> int {
-    String s;
+    Text s;
 
     s.data = a;
     return s.eq(b);
-}
-
-fn puts(const char *s) {
-    String text;
-
-    text.data = s;
-    let n = text.len();
-    if (n > 0) {
-        write(1, s, n);
-    }
 }
 
 fn read_line(char *buf, int max) -> int {
@@ -120,6 +122,10 @@ fn read_line(char *buf, int max) -> int {
         char c;
         let r = read(0, &c, 1);
         if (r <= 0) {
+            // 一个字节都没读到就 EOF，返回 -1，和空行区分开。
+            if (line.len == 0) {
+                return -1;
+            }
             break;
         }
 
@@ -131,25 +137,4 @@ fn read_line(char *buf, int max) -> int {
     }
     line.data[line.len] = 0;
     return line.len;
-}
-
-fn malloc(int n) -> void * {
-    if (n <= 0) {
-        return (void *)0;
-    }
-
-    let aligned = (n + 3) & ~3;
-    if (aligned < n) {
-        return (void *)0;
-    }
-
-    let p = sbrk(aligned);
-    if ((int)p == -1) {
-        return (void *)0;
-    }
-    return p;
-}
-
-fn free(void *p) {
-    (void)p;
 }

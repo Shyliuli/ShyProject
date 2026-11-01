@@ -73,7 +73,7 @@ impl EnumId {
 
 /// The four C type qualifiers. They belong to a [`QualifiedType`], not to a
 /// [`TypeKind`], so a pointer's target can be qualified independently.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Qualifiers {
     pub is_const: bool,
     pub is_volatile: bool,
@@ -106,7 +106,7 @@ impl Qualifiers {
 /// Nested types use this type too: a pointer stores its target as a
 /// `QualifiedType`, so `const int *` is a pointer whose target carries
 /// `Qualifiers::CONST`. The same type may appear unqualified elsewhere.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct QualifiedType {
     pub ty: TypeId,
     pub qualifiers: Qualifiers,
@@ -289,14 +289,16 @@ pub struct EnumVariant {
 
 /// Arena of target types with cached built-ins.
 ///
-/// All constructors return stable [`TypeId`]s. There is no interning: asking
-/// for `int *` twice creates two structurally equal pointer types, and
+/// All constructors return stable [`TypeId`]s, and
 /// [`TypeStore::is_compatible`] is the operation that decides type equality.
-/// Records and enums are the exception: their identity is their ID.
+/// Records and enums are identified by their ID. Pointers are interned: one
+/// pointee gives one `TypeId`, so a cache keyed by `TypeId`, such as the
+/// generic instance cache, sees `Vec<int *>` as one instance.
 pub struct TypeStore {
     pub(super) types: Vec<Type>,
     pub(super) records: Vec<RecordInfo>,
     pub(super) enums: Vec<EnumInfo>,
+    pointers: std::collections::HashMap<QualifiedType, TypeId>,
     builtins: Builtins,
     /// Pointer width of the target. ShyISA uses 32-bit addresses; other
     /// backends use the platform's own width, so this is never hard-coded
@@ -362,6 +364,7 @@ impl TypeStore {
             types,
             records: Vec::new(),
             enums: Vec::new(),
+            pointers: std::collections::HashMap::new(),
             builtins: Builtins {
                 void,
                 bool_,
@@ -435,12 +438,17 @@ impl TypeStore {
 
     /// Creates a `pointee`-pointing pointer type using this target's width.
     pub fn pointer_to(&mut self, pointee: QualifiedType) -> TypeId {
-        push_type(
+        if let Some(&ty) = self.pointers.get(&pointee) {
+            return ty;
+        }
+        let ty = push_type(
             &mut self.types,
             TypeKind::Pointer { pointee },
             Some(self.pointer_bytes),
             Some(self.pointer_align),
-        )
+        );
+        self.pointers.insert(pointee, ty);
+        ty
     }
 
     /// Creates an array type.

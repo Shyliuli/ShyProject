@@ -109,6 +109,18 @@ pub struct ImplBlock {
     pub trait_args: Vec<GenericArg>,
     pub self_type: TypeName,
     pub methods: Vec<FunctionDecl>,
+    /// Methods declared without a body, `fn len(self *s) -> int;`. Only an
+    /// inherent impl of a concrete type has them: a header declares the
+    /// methods and one translation unit defines them, as with C prototypes.
+    pub prototypes: Vec<MethodPrototype>,
+}
+
+/// One bodiless method declaration inside an `impl` block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MethodPrototype {
+    pub span: Span,
+    pub specs: DeclSpecs,
+    pub declarator: Declarator,
 }
 
 /// Shy's `trait Name { method signatures }` declaration.

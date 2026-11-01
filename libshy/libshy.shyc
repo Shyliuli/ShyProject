@@ -1,10 +1,14 @@
 #include <ctype.shyh>
-#include <stdarg.shyh>
+#include <stdarg.h>
 #include <stddef.shyh>
 #include <stdio.shyh>
 #include <stdlib.shyh>
 #include <string.shyh>
 #include <unistd.shyh>
+#include <fcntl.shyh>
+
+// The portable C library. Every platform service goes through the calls in
+// <unistd.h> and open(); this file has no inline assembly.
 
 void *memcpy(void *dest, const void *src, size_t n) {
   unsigned char *d = dest;
@@ -203,74 +207,136 @@ long strtol(const char *nptr, char **endptr, int base) {
 int atoi(const char *nptr) { return (int)strtol(nptr, NULL, 10); }
 long atol(const char *nptr) { return strtol(nptr, NULL, 10); }
 
-void exit(int status) {
-  asm!(status) {
-    "seta exit {status}"
-  };
-  for (;;)
-    ;
-}
+// Nothing is buffered, so there is nothing to flush before leaving.
+void exit(int status) { _exit(status); }
 
 void abort(void) { exit(EXIT_FAILURE); }
 
-int putchar(int c) {
-  // 0x70 is the ShyISA UART data register; writes emit the low 8 bits.
-  // C putchar is byte-oriented, so this preserves UTF-8 strings byte by byte.
-  asm!(c) {
-    "seta 0x70 {c}"
-  };
-  return c;
+// ---- malloc: a bump allocator over sbrk ----
+//
+// Each block starts with its size, so realloc knows how much to copy. free
+// keeps nothing: a short-lived program such as a compiler never needs the
+// memory back, and the next sbrk call is always the end of the heap.
+
+void *malloc(size_t size) {
+  size_t total = (size + sizeof(size_t) + 7) & ~(size_t)7;
+  size_t *block = sbrk((intptr_t)total);
+  if (block == (void *)-1)
+    return NULL;
+  block[0] = size;
+  return block + 1;
 }
 
-int getchar(void) {
-  int c = 0;
-  asm!(c) {
-    "inutfa {c}"
-  };
-  return c;
+void *calloc(size_t count, size_t size) {
+  void *p = malloc(count * size);
+  if (p)
+    memset(p, 0, count * size);
+  return p;
 }
 
-ssize_t read(int fd, void *buf, size_t count) {
-  if (fd != STDIN_FILENO)
-    return -1;
-
-  unsigned char *p = buf;
-  for (size_t i = 0; i < count; i++) {
-    int c = 0;
-    asm!(c) {
-      "seta {c} 0x70"
-    };
-    p[i] = (unsigned char)c;
+void *realloc(void *p, size_t size) {
+  void *q = malloc(size);
+  if (p && q) {
+    size_t old = ((size_t *)p)[-1];
+    memcpy(q, p, old < size ? old : size);
   }
-  return (ssize_t)count;
+  return q;
 }
 
-ssize_t write(int fd, const void *buf, size_t count) {
-  if (fd != STDOUT_FILENO && fd != STDERR_FILENO)
-    return -1;
+void free(void *p) { (void)p; }
 
-  const unsigned char *p = buf;
-  for (size_t i = 0; i < count; i++)
-    putchar(p[i]);
-  return (ssize_t)count;
+// ---- stdio: unbuffered streams over read and write ----
+
+struct FILE {
+  int fd;
+  int eof;
+};
+
+static FILE stdin_file = {STDIN_FILENO, 0};
+static FILE stdout_file = {STDOUT_FILENO, 0};
+static FILE stderr_file = {STDERR_FILENO, 0};
+FILE *stdin = &stdin_file;
+FILE *stdout = &stdout_file;
+FILE *stderr = &stderr_file;
+
+FILE *fopen(const char *path, const char *mode) {
+  int flags = O_RDONLY;
+  if (mode[0] == 'w')
+    flags = O_WRONLY | O_CREAT | O_TRUNC;
+  else if (mode[0] == 'a')
+    flags = O_WRONLY | O_CREAT | O_APPEND;
+  int fd = open(path, flags, 0644);
+  if (fd < 0)
+    return NULL;
+  FILE *f = malloc(sizeof(FILE));
+  f.fd = fd;
+  f.eof = 0;
+  return f;
 }
+
+int fclose(FILE *f) { return close(f.fd); }
+int fflush(FILE *f) {
+  (void)f;
+  return 0;
+}
+int feof(FILE *f) { return f.eof; }
+
+int fgetc(FILE *f) {
+  unsigned char c;
+  if (read(f.fd, &c, 1) != 1) {
+    f.eof = 1;
+    return EOF;
+  }
+  return c;
+}
+
+int fputc(int c, FILE *f) {
+  unsigned char byte = (unsigned char)c;
+  return write(f.fd, &byte, 1) == 1 ? byte : EOF;
+}
+
+int fputs(const char *s, FILE *f) {
+  size_t n = strlen(s);
+  return write(f.fd, s, n) == (ssize_t)n ? (int)n : EOF;
+}
+
+size_t fread(void *buf, size_t size, size_t count, FILE *f) {
+  unsigned char *p = buf;
+  size_t total = size * count;
+  size_t done = 0;
+  while (done < total) {
+    ssize_t n = read(f.fd, p + done, total - done);
+    if (n <= 0) {
+      f.eof = 1;
+      break;
+    }
+    done = done + (size_t)n;
+  }
+  return size ? done / size : 0;
+}
+
+size_t fwrite(const void *buf, size_t size, size_t count, FILE *f) {
+  ssize_t n = write(f.fd, buf, size * count);
+  return n > 0 && size ? (size_t)n / size : 0;
+}
+
+int putchar(int c) { return fputc(c, stdout); }
+int getchar(void) { return fgetc(stdin); }
 
 int puts(const char *s) {
-  int n = 0;
-  while (*s) {
-    putchar(*s);
-    s = s + 1;
-    n = n + 1;
-  }
-  putchar('\n');
-  return n + 1;
+  if (fputs(s, stdout) == EOF || fputc('\n', stdout) == EOF)
+    return EOF;
+  return 1;
 }
 
+// One formatter for every printf: `buf` collects the text for the s*printf
+// family, `file` receives it for the f*printf family.
 typedef struct {
   char *buf;
   size_t cap;
   size_t pos;
   int count;
+  FILE *file;
 } Out;
 
 static void out_ch(Out *out, int c) {
@@ -282,8 +348,8 @@ static void out_ch(Out *out, int c) {
   }
   out.pos = out.pos + 1;
   out.count = out.count + 1;
-  if (!out.buf)
-    putchar(c);
+  if (out.file)
+    fputc(c, out.file);
 }
 
 static void out_strn(Out *out, const char *s, int len) {
@@ -425,8 +491,8 @@ static void emit_fixed_double(Out *out, double value, int precision, int width,
     out_padding(out, width > total ? width - total : 0, 0);
 }
 
-int vsnprintf(char *s, size_t n, const char *fmt, va_list ap) {
-  Out out = {s, n, 0, 0};
+static void format(Out *output, const char *fmt, va_list ap) {
+  Out out = *output;
 
   for (; *fmt; fmt = fmt + 1) {
     if (*fmt != '%') {
@@ -457,7 +523,13 @@ int vsnprintf(char *s, size_t n, const char *fmt, va_list ap) {
       }
     }
 
+    // `*` takes the width or precision from the arguments, so `%.*s` prints
+    // a string that is not NUL-terminated.
     int width = 0;
+    if (*fmt == '*') {
+      width = va_arg(ap, int);
+      fmt = fmt + 1;
+    }
     while (isdigit(*fmt)) {
       width = width * 10 + (*fmt - '0');
       fmt = fmt + 1;
@@ -467,6 +539,10 @@ int vsnprintf(char *s, size_t n, const char *fmt, va_list ap) {
     if (*fmt == '.') {
       fmt = fmt + 1;
       precision = 0;
+      if (*fmt == '*') {
+        precision = va_arg(ap, int);
+        fmt = fmt + 1;
+      }
       while (isdigit(*fmt)) {
         precision = precision * 10 + (*fmt - '0');
         fmt = fmt + 1;
@@ -533,7 +609,12 @@ int vsnprintf(char *s, size_t n, const char *fmt, va_list ap) {
         out_ch(&out, *fmt);
     }
   }
+  *output = out;
+}
 
+int vsnprintf(char *s, size_t n, const char *fmt, va_list ap) {
+  Out out = {s, n, 0, 0, NULL};
+  format(&out, fmt, ap);
   if (s && n) {
     if (out.pos < n)
       s[out.pos] = 0;
@@ -541,6 +622,20 @@ int vsnprintf(char *s, size_t n, const char *fmt, va_list ap) {
       s[n - 1] = 0;
   }
   return out.count;
+}
+
+int vfprintf(FILE *f, const char *fmt, va_list ap) {
+  Out out = {NULL, 0, 0, 0, f};
+  format(&out, fmt, ap);
+  return out.count;
+}
+
+int fprintf(FILE *f, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int r = vfprintf(f, fmt, ap);
+  va_end(ap);
+  return r;
 }
 
 int vsprintf(char *s, const char *fmt, va_list ap) {
@@ -563,9 +658,7 @@ int sprintf(char *s, const char *fmt, ...) {
   return r;
 }
 
-int vprintf(const char *fmt, va_list ap) {
-  return vsnprintf(NULL, 0, fmt, ap);
-}
+int vprintf(const char *fmt, va_list ap) { return vfprintf(stdout, fmt, ap); }
 
 int printf(const char *fmt, ...) {
   va_list ap;

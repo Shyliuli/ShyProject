@@ -7,16 +7,17 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use shy_isa_lib::file::shyfile::File;
 
-use crate::link::{link, raii_drop_warnings};
+use crate::link::{gc_sections, link, raii_drop_warnings};
 use crate::obj::ObjectFile;
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    // usage: linker <input.sobj>... [-o <output.sfs>] [--sym <symfile>]
+    // usage: linker <input.sobj>... [-o <output.sfs>] [--sym <symfile>] [--gc-sections]
     let mut inputs: Vec<String> = Vec::new();
     let mut output: Option<String> = None;
     let mut sym: Option<String> = None;
+    let mut gc = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -35,6 +36,7 @@ fn main() -> Result<()> {
                 };
                 sym = Some(v.clone());
             }
+            "--gc-sections" => gc = true,
             s if s.starts_with('-') => bail!("unknown option: {s}"),
             s => inputs.push(s.to_string()),
         }
@@ -43,7 +45,7 @@ fn main() -> Result<()> {
 
     if inputs.is_empty() {
         bail!(
-            "usage:{} <input.sobj>... [-o <output.sfs>] [--sym <symfile>]",
+            "usage:{} <input.sobj>... [-o <output.sfs>] [--sym <symfile>] [--gc-sections]",
             args[0]
         );
     }
@@ -75,6 +77,9 @@ fn main() -> Result<()> {
     }
 
     // 2. 链接。
+    if gc {
+        gc_sections(&mut objects);
+    }
     let linked = link(objects)?;
 
     // 3. 写出 .sfs raw 内存镜像。shyfile 只能追加写入，所以先删掉旧输出文件。

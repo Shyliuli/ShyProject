@@ -150,11 +150,11 @@ static void print_int(int value) {
     let mut n = value;
 
     if (n == 0) {
-        puts("0");
+        fputs("0", stdout);
         return;
     }
     if (n < 0) {
-        puts("-");
+        fputs("-", stdout);
         n = 0 - n;
     }
     while (n > 0 && i < 11) {
@@ -263,7 +263,7 @@ static void apply_redirs(Args *args) {
         let w = arg_at(args, i);
 
         if (streq(w, "<") && i + 1 < args->argc) {
-            let fd = open(arg_at(args, i + 1));
+            let fd = open(arg_at(args, i + 1), O_RDONLY);
             if (fd < 0 || dup2(fd, 0) < 0) {
                 exit(1);
             }
@@ -272,7 +272,7 @@ static void apply_redirs(Args *args) {
             continue;
         }
         if (streq(w, ">") && i + 1 < args->argc) {
-            let fd = create(arg_at(args, i + 1));
+            let fd = open(arg_at(args, i + 1), O_WRONLY | O_CREAT | O_TRUNC);
             if (fd < 0 || dup2(fd, 1) < 0) {
                 exit(1);
             }
@@ -305,7 +305,7 @@ static int run_simple(char *cmdline) {
 
     let pid = fork();
     if (pid < 0) {
-        puts("?\n");
+        fputs("?\n", stdout);
         return 1;
     }
     if (pid == 0) {
@@ -325,13 +325,13 @@ static int run_pipeline(char *left, char *right) {
     left = skip_spaces(left);
     right = skip_spaces(right);
     if (!left[0] || !right[0]) {
-        puts("?\n");
+        fputs("?\n", stdout);
         return 1;
     }
     largs.parse(left);
     rargs.parse(right);
     if (pipe(fds) < 0) {
-        puts("?\n");
+        fputs("?\n", stdout);
         return 1;
     }
 
@@ -339,7 +339,7 @@ static int run_pipeline(char *left, char *right) {
     if (lpid < 0) {
         close(fds[0]);
         close(fds[1]);
-        puts("?\n");
+        fputs("?\n", stdout);
         return 1;
     }
     if (lpid == 0) {
@@ -354,7 +354,7 @@ static int run_pipeline(char *left, char *right) {
     if (rpid < 0) {
         close(fds[0]);
         close(fds[1]);
-        puts("?\n");
+        fputs("?\n", stdout);
         return 1;
     }
     if (rpid == 0) {
@@ -406,9 +406,9 @@ static int applet_sh(int argc, char *argv[]) {
     char line[LINE_MAX];
 
     while (1) {
-        puts("$ ");
+        fputs("$ ", stdout);
         let n = read_line(line, LINE_MAX);
-        if (n == 0) {
+        if (n < 0) {
             exit(2);
         }
         run_line(line);
@@ -421,12 +421,12 @@ static int applet_echo(int argc, char *argv[]) {
 
     while (i < argc) {
         if (i > 0) {
-            puts(" ");
+            fputs(" ", stdout);
         }
-        puts(argv[i]);
+        fputs(argv[i], stdout);
         i = i + 1;
     }
-    puts("\n");
+    fputs("\n", stdout);
     return 0;
 }
 
@@ -453,7 +453,7 @@ static int applet_cat(int argc, char *argv[]) {
         return cat_fd(0);
     }
     for (int i = 0; i < argc; i++) {
-        let fd = open(argv[i]);
+        let fd = open(argv[i], O_RDONLY);
 
         if (fd < 0) {
             status = 1;
@@ -480,8 +480,8 @@ static int applet_ls(int argc, char *argv[]) {
         if (r == 0) {
             return 0;
         }
-        puts(name);
-        puts("\n");
+        fputs(name, stdout);
+        fputs("\n", stdout);
         i = i + 1;
     }
 }
@@ -509,7 +509,7 @@ static int applet_rm(int argc, char *argv[]) {
 }
 
 static int applet_pwd(int argc, char *argv[]) {
-    puts("/\n");
+    fputs("/\n", stdout);
     return 0;
 }
 
@@ -545,15 +545,15 @@ static int wc_fd(int fd, const char *name) {
         }
     }
     print_int(lines);
-    puts(" ");
+    fputs(" ", stdout);
     print_int(words);
-    puts(" ");
+    fputs(" ", stdout);
     print_int(bytes);
     if (name != 0) {
-        puts(" ");
-        puts(name);
+        fputs(" ", stdout);
+        fputs(name, stdout);
     }
-    puts("\n");
+    fputs("\n", stdout);
     return 0;
 }
 
@@ -564,7 +564,7 @@ static int applet_wc(int argc, char *argv[]) {
         return wc_fd(0, (const char *)0);
     }
     for (int i = 0; i < argc; i++) {
-        let fd = open(argv[i]);
+        let fd = open(argv[i], O_RDONLY);
 
         if (fd < 0) {
             status = 1;
@@ -580,8 +580,8 @@ static int applet_wc(int argc, char *argv[]) {
 
 static void grep_line(const char *pattern, char *line) {
     if (contains(line, pattern)) {
-        puts(line);
-        puts("\n");
+        fputs(line, stdout);
+        fputs("\n", stdout);
     }
 }
 
@@ -630,7 +630,7 @@ static int applet_grep(int argc, char *argv[]) {
         return grep_fd(0, pattern);
     }
     for (int i = 1; i < argc; i++) {
-        let fd = open(argv[i]);
+        let fd = open(argv[i], O_RDONLY);
 
         if (fd < 0) {
             status = 1;
@@ -657,7 +657,7 @@ static int applet_ps(int argc, char *argv[]) {
         if (r == 0) {
             return 0;
         }
-        puts(line);
+        fputs(line, stdout);
         i = i + 1;
     }
 }
@@ -715,7 +715,7 @@ static int dispatch(const char *name, int argc, char *argv[]) {
     if (streq(name, "exit")) {
         return applet_exit(argc, argv);
     }
-    puts("unknown applet\n");
+    fputs("unknown applet\n", stdout);
     return 1;
 }
 

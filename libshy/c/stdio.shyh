@@ -6,6 +6,24 @@
 
 #define EOF (-1)
 
+/* Opaque, as in every libc: only FILE * crosses the boundary, so a hosted
+   build can use the system library's streams. */
+typedef struct FILE FILE;
+
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
+
+FILE *fopen(const char *path, const char *mode);
+int fclose(FILE *f);
+int fflush(FILE *f);
+int feof(FILE *f);
+int fgetc(FILE *f);
+int fputc(int c, FILE *f);
+int fputs(const char *s, FILE *f);
+size_t fread(void *buf, size_t size, size_t count, FILE *f);
+size_t fwrite(const void *buf, size_t size, size_t count, FILE *f);
+
 int putchar(int c);
 int getchar(void);
 int puts(const char *s);
@@ -13,6 +31,8 @@ int puts(const char *s);
 int printf(const char *fmt, ...);
 int println(const char *fmt, ...);
 int vprintf(const char *fmt, va_list ap);
+int fprintf(FILE *f, const char *fmt, ...);
+int vfprintf(FILE *f, const char *fmt, va_list ap);
 
 int sprintf(char *s, const char *fmt, ...);
 int snprintf(char *s, size_t n, const char *fmt, ...);

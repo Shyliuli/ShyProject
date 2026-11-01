@@ -1753,14 +1753,15 @@ impl FnLower<'_> {
         })
     }
 
+    /// The caller has already lowered the object: lowering it again here made
+    /// `f().field` emit `f` twice.
     pub(super) fn member_target(
         &mut self,
-        object: &ast::Expr,
+        object_value: ExprVal,
         name: &ast::Name,
         op: ast::MemberOp,
         span: Span,
     ) -> Result<MemberTarget, Diagnostic> {
-        let object_value = self.lower_expr(object)?;
         let object_ty = object_value.ty;
         let object_volatile = object_value.qualifiers.is_volatile;
         if op == ast::MemberOp::Arrow && !self.l.types.is_pointer(object_ty) {
@@ -1780,11 +1781,7 @@ impl FnLower<'_> {
             is_restrict: false,
             is_atomic: false,
         };
-        // `with_offset` replaces the displacement, so a nested member has to
-        // add to the base object's offset instead of overwriting it:
-        // `o.v.x` is `o + offsetof(v) + offsetof(x)`, not `o + offsetof(x)`.
-        let displacement = address.offset + i64::from(offset);
-        let address = address.with_offset(displacement);
+        let address = address.offset_by(i64::from(offset));
         Ok(MemberTarget {
             address,
             ty: field_ty,

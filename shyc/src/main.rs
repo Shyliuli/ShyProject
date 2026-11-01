@@ -444,10 +444,6 @@ fn arguments() -> Result<Option<Options>, String> {
                 "c-wrapper" => Stage::CWrapper,
                 other => return Err(format!("unknown --emit value: {other}")),
             }),
-            _ if arg.starts_with("--target=") => {
-                target = Some(arg[9..].to_string());
-                None
-            }
             _ if arg.starts_with("-I") || arg.starts_with("-D") || arg.starts_with("-U") => {
                 preprocess_option(&mut preprocess, &arg[..2], &arg[2..])?;
                 None
@@ -473,6 +469,11 @@ fn arguments() -> Result<Option<Options>, String> {
     if target.as_deref().is_some_and(is_bare_target) {
         freestanding = true;
     }
+    // `__shy__` means the ShyISA target. A freestanding riscv64 build is not
+    // Shy: it must get LLVM's varargs, not the Shy descriptor.
+    if target.as_deref().is_some_and(|target| target != "shy") {
+        preprocess.undefines.push("__shy__".to_string());
+    }
     // Target facts that a hosted C library needs before it includes anything.
     if target.as_deref().is_some_and(|target| target != "shy") && !freestanding {
         // The host C library only applies to a hosted target, and these
@@ -490,9 +491,6 @@ fn arguments() -> Result<Option<Options>, String> {
                 preprocess.include_dirs.push(path.to_path_buf());
             }
         }
-        // `__shy__` is predefined for the Shy target; a hosted build must not
-        // see it, or headers pick the Shy variant.
-        preprocess.undefines.push("__shy__".to_string());
         for (name, value) in [
             ("__STDC__", "1"),
             ("__STDC_HOSTED__", "1"),
@@ -503,7 +501,6 @@ fn arguments() -> Result<Option<Options>, String> {
             ("__CHAR_BIT__", "8"),
             ("__INT_MAX__", "2147483647"),
             ("__LONG_MAX__", "9223372036854775807L"),
-            ("__x86_64__", "1"),
             ("__linux__", "1"),
             ("__unix__", "1"),
             ("__LP64__", "1"),
@@ -538,7 +535,26 @@ fn arguments() -> Result<Option<Options>, String> {
                 .defines
                 .push((name.to_string(), value.to_string()));
         }
+        // The architecture macro comes from the triple, not from the host.
+        let arch = target.as_deref().and_then(|t| t.split('-').next());
+        let arch_macros: &[&str] = match arch {
+            Some("x86_64") => &["__x86_64__"],
+            Some("aarch64") => &["__aarch64__"],
+            Some("riscv64") => &["__riscv", "__riscv64"],
+            Some("loongarch64") => &["__loongarch64"],
+            _ => &[],
+        };
+        for name in arch_macros {
+            preprocess.defines.push((name.to_string(), "1".to_string()));
+        }
     }
+    // Every target, hosted or freestanding: Shy is ILP32 and every LLVM target
+    // shyc supports is LP64. Headers pick `size_t` and friends from this, the
+    // way they do with gcc and clang.
+    let pointer_size = if target.as_deref().is_none_or(|t| t == "shy") { "4" } else { "8" };
+    preprocess
+        .defines
+        .push(("__SIZEOF_POINTER__".to_string(), pointer_size.to_string()));
     Ok(Some(Options {
         stage: stage.unwrap_or(Stage::Emit(Backend::Shy)),
         input: input.ok_or("no input source file")?,

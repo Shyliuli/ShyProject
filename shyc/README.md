@@ -1,8 +1,8 @@
 # shyc
 
 `shyc` is an independent ShyC compiler: its own preprocessor, parser, type
-checker, typed IR, optimiser, and two code generators. It is not yet the
-default toolchain; `shycc` still drives chibicc.
+checker, typed IR, optimiser, and two code generators. It is the default
+backend of `shycc`; `--backend=chibicc` keeps the old bootstrap path.
 
 ## Pipeline
 
@@ -137,10 +137,16 @@ The two backends have different C libraries, and each one gets its own default:
 | Shy (`--backend shyc`, `-S`) | libshy plus the soft-float runtime | `-nostdlib`, `-nodefaultlibs` |
 | LLVM (`--emit=llvm`) | the system libc, linked by `clang` | `clang -nostdlib` |
 
-`shycc` links libshy by default because it owns the whole Shy link step;
-`-llibshy` and `-lfloat` are still accepted and never duplicated. LLVM
-emission stops at LLVM IR — the module is hosted, its `main` is called by the
-C runtime — so the system libc comes from whatever links the IR.
+`shycc` links libshy by default because it owns the whole Shy link step, and
+passes `--gc-sections` so only the reachable functions stay; `-llibshy` and
+`-lfloat` are still accepted and never duplicated. On a hosted LLVM target
+`shycc` links libshy's core, alloc, and std over the system libc. `shyc
+--emit=llvm` alone stops at LLVM IR, so the libraries come from whatever links
+the IR.
+
+The preprocessor defines `__SIZEOF_POINTER__` (4 on Shy, 8 on every LLVM
+target) for hosted and freestanding builds, and `__shy__` only for the Shy
+target.
 
 ## C ABI
 

@@ -243,6 +243,9 @@ impl Writer<'_> {
             self.line(".section text._start");
             self.line(".symbol _start");
             self.line(format!("setn sp 0x{stack_pointer:08x}"));
+            // 裸机没有命令行：`main(int argc, char **argv)` 看到 argc = 0、argv = NULL。
+            self.line("setn 4x 0");
+            self.line("setn 5x 0");
             self.line(format!("calln {entry}"));
             self.line("seta exit 1x");
         }

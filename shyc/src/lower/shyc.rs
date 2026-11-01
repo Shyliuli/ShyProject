@@ -276,6 +276,9 @@ impl super::Lowerer {
             self.bind_generic_args(&info.params, args);
         }
         let result = (|| {
+            for prototype in &block.prototypes {
+                self.collect_method_prototype(prototype, ty, &name)?;
+            }
             for method in &block.methods {
                 self.collect_function(
                     method,
@@ -969,7 +972,7 @@ impl FnLower<'_> {
             let (field_ty, offset) = self.l.field_of(ty, &name, span)?;
             let value = ir::Operand::Value(self.emit_value(ir::InstKind::SymbolAddr { symbol }));
             self.store_value(
-                ir::Address::slot(slot).with_offset(i64::from(offset)),
+                ir::Address::slot(slot).offset_by(i64::from(offset)),
                 value,
                 field_ty,
                 super::Qualifiers::NONE,

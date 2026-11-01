@@ -1,0 +1,35 @@
+// std: files and streams, built on the C library's FILE.
+
+#include <stdio.h>
+#include <std/io.shyh>
+#include <std/fs.shyh>
+
+fn read_to_string(FILE *f) -> String {
+    let mut s = String::new();
+    let mut c = fgetc(f);
+    while (c != EOF) {
+        s.push(c);
+        c = fgetc(f);
+    }
+    return s;
+}
+
+fn read_file(const char *path) -> Option<String> {
+    let f = fopen(path, "r");
+    if (!f) {
+        return Option<String>::None;
+    }
+    let s = read_to_string(f);
+    fclose(f);
+    return Option<String>::Some(s);
+}
+
+fn write_file(const char *path, Str text) -> int {
+    let f = fopen(path, "w");
+    if (!f) {
+        return 0;
+    }
+    let written = fwrite(text.ptr, 1, text.len, f);
+    fclose(f);
+    return written == (size_t)text.len;
+}

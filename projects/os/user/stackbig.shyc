@@ -22,7 +22,7 @@ fn main(void) -> int {
         i = i + 1;
     }
 
-    puts("stack ok\n");
+    fputs("stack ok\n", stdout);
     exit(0);
     return 0;
 }

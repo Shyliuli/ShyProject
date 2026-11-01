@@ -6,7 +6,7 @@
 #include "ulib.h"
 
 static void fail(void) {
-    puts("p7malloc fail\n");
+    fputs("p7malloc fail\n", stdout);
     exit(1);
 }
 
@@ -70,7 +70,7 @@ fn main(void) -> int {
     fill(a, 16, 33);
     check(a, 16, 33);
 
-    puts("p7malloc ok\n");
+    fputs("p7malloc ok\n", stdout);
     exit(0);
     return 0;
 }

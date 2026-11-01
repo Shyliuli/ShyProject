@@ -49,7 +49,7 @@ impl FnLower<'_> {
                 self.l.bit_field(record, &name.text)
         {
             let (_, base) = self.record_and_address(object_value, span)?;
-            let address = base.with_offset(i64::from(offset));
+            let address = base.offset_by(i64::from(offset));
             let value = self.bit_field_value(address, field_ty, width, bit_offset, span);
             return Ok(ExprVal {
                 ty: field_ty,
@@ -57,7 +57,7 @@ impl FnLower<'_> {
                 kind: ExprKind::Value(value),
             });
         }
-        let target = self.member_target(object, name, op, span)?;
+        let target = self.member_target(object_value, name, op, span)?;
         Ok(ExprVal {
             ty: target.ty,
             qualifiers: target.qualifiers,
@@ -112,14 +112,10 @@ impl FnLower<'_> {
                     .enum_info(enum_ty)
                     .map(|info| info.payload_offset)
                     .unwrap_or(0);
-                // `with_offset` replaces the displacement, so keep the base
-                // object's own offset: the payload of a nested enum sits at
-                // the outer payload plus this enum's payload offset.
-                let displacement = address.offset + i64::from(payload_offset);
                 return Ok(Some(ExprVal {
                     ty: payload_ty,
                     qualifiers,
-                    kind: ExprKind::Place(address.with_offset(displacement)),
+                    kind: ExprKind::Place(address.offset_by(i64::from(payload_offset))),
                 }));
             }
         }
@@ -284,7 +280,7 @@ impl FnLower<'_> {
                 .enum_info(ty)
                 .map(|info| info.payload_offset)
                 .unwrap_or(0);
-            let address = ir::Address::slot(slot).with_offset(i64::from(payload_offset));
+            let address = ir::Address::slot(slot).offset_by(i64::from(payload_offset));
             self.store_value(address, operand, payload_ty, Qualifiers::NONE);
         }
         Ok(ExprVal {
@@ -348,8 +344,7 @@ impl FnLower<'_> {
             let byte_offset = value
                 .checked_mul(i64::from(size))
                 .ok_or_else(|| Diagnostic::new(span, "subscript offset overflow"))?;
-            let offset = base_address.offset + byte_offset;
-            let address = base_address.with_offset(offset);
+            let address = base_address.offset_by(byte_offset);
             return Ok(ExprVal {
                 ty: element.ty,
                 qualifiers: element.qualifiers,

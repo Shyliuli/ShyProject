@@ -5,7 +5,7 @@ ShyOS is a minimal xv6-like operating system for ShyISA, written in ShyC with sm
 ## Architecture
 
 - Kernel entry starts at `kernel/entry.shy`, sets the kernel stack, and calls `kmain`.
-- Memory isolation is segment-based. Each user process receives a 1 MiB segment starting in the user segment region (256 KiB with `SHYOS_SMALL`). User images declare `#![mem(256K)]` and `#![stack(...)]`; the kernel reads those linked-image hints during `exec`.
+- Memory isolation is segment-based. Each user process receives a 1 MiB segment starting in the user segment region (384 KiB with `SHYOS_SMALL`). User images declare `#![mem(256K)]` and `#![stack(...)]`; the kernel reads those linked-image hints during `exec`.
 - The process table in `kernel/proc.shyc` has 16 slots (12 with `SHYOS_SMALL`) and tracks process state, pid, parent pid, kernel stack, user segment base, size, heap break, stack base, exit status, sleep channel, and killed flag.
 - The scheduler is round-robin over runnable non-idle processes. An idle process with pid 0 yields when no user process is runnable.
 - Trap entry and context save/restore live in `kernel/trapentry.shy`, `kernel/ctx.shy`, and `kernel/scheduler.shy`. Syscall dispatch is in `kernel/trap.shyc`.
@@ -20,7 +20,7 @@ All user addresses are segment-relative virtual addresses. The scheduler loads
 layout is backed by a different physical segment for each process.
 
 - `0x00000100`: user entry point (`_start`), with linked text/data following it.
-- `0x000ef000..0x000ef07f`: exec argument buffer (`USER_ARG_ADDR`, `USER_ARG_MAX`). With `SHYOS_SMALL` it sits at `0x0002f000`.
+- `0x000ef000..0x000ef07f`: exec argument buffer (`USER_ARG_ADDR`, `USER_ARG_MAX`). With `SHYOS_SMALL` it sits at `0x0004f000`.
 - Heap grows upward from the end of the loaded image, managed by `sbrk`.
 - `USER_STACK_BASE(stack_hint)..0x000fff00`: user stack area. ShyC stack frames grow upward, so the kernel initializes `sp` to the low end of the declared stack reservation.
 - `0x000fff00..0x000fffff`: guard gap below the segment ceiling.
@@ -74,12 +74,13 @@ make os-run
 ### Small-memory build
 
 `make small_mem` compiles the same sources with `-DSHYOS_SMALL`: user segments
-shrink to 256 KiB, the process table to 12 slots, and the heap and scheduler
-stack move below 1 MiB so the kernel runs in 4 MiB of RAM.
+shrink to 384 KiB, the process table to 12 slots, and the heap and scheduler
+stack move below 1.5 MiB so the kernel runs in 6 MiB of RAM. A user image must
+stay below the argument area at `0x0004ef80`.
 
 ```sh
 make -C projects/os small_mem
-make -C projects/os small_run      # shyemu target/small/kernel.sfs --mem 4M
+make -C projects/os small_run      # shyemu target/small/kernel.sfs --mem 6M
 ```
 
 The image is written to `target/small/kernel.sfs`; the default `target/` build

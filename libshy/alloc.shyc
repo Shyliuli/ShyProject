@@ -1,0 +1,36 @@
+// alloc: owned types built on malloc.
+
+#include <stdlib.h>
+#include <alloc/string.shyh>
+
+impl String {
+    fn new(void) -> String {
+        String s = {calloc(1, 16), 0, 16};
+        return s;
+    }
+
+    fn push(self *s, int c) {
+        if (s.len + 1 >= s.cap) {
+            s.cap = s.cap ? s.cap * 2 : 16;
+            s.data = realloc(s.data, s.cap);
+        }
+        s.data[s.len] = c;
+        s.len = s.len + 1;
+        s.data[s.len] = 0;
+    }
+
+    fn push_str(self *s, Str text) {
+        for (int i = 0; i < text.len; i++) {
+            s.push(text.ptr[i]);
+        }
+    }
+
+    fn push_cstr(self *s, const char *text) {
+        s.push_str(Str::from_cstr(text));
+    }
+
+    fn as_str(self *s) -> Str {
+        Str view = {s.data, s.len};
+        return view;
+    }
+}

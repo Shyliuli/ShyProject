@@ -1,0 +1,10 @@
+#ifndef SHY_STD_IO_SHYH
+#define SHY_STD_IO_SHYH
+
+#include <stdio.h>
+#include <alloc/string.shyh>
+
+/* Everything left in the stream, up to the end of input. */
+fn read_to_string(FILE *f) -> String;
+
+#endif

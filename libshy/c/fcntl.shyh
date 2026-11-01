@@ -1,0 +1,14 @@
+#ifndef __SHY_FCNTL_H
+#define __SHY_FCNTL_H
+
+/* The Linux values, so a hosted build passes them straight to the system. */
+#define O_RDONLY 0
+#define O_WRONLY 1
+#define O_RDWR 2
+#define O_CREAT 0100
+#define O_TRUNC 01000
+#define O_APPEND 02000
+
+int open(const char *path, int flags, ...);
+
+#endif

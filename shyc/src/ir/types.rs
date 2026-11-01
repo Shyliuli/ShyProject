@@ -410,8 +410,10 @@ impl Address {
         Address::new(AddressBase::Symbol(symbol.into()), 0)
     }
 
-    pub fn with_offset(mut self, offset: i64) -> Address {
-        self.offset = offset;
+    /// The address `offset` bytes after this one. It adds to the existing
+    /// displacement, so a member of a member is `base + outer + inner`.
+    pub fn offset_by(mut self, offset: i64) -> Address {
+        self.offset += offset;
         self
     }
 

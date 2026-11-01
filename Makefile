@@ -11,11 +11,12 @@ CHIBICC := third_party/chibicc/chibicc
 # stdint are included by the others, so they are generated first. The list is
 # also the recipe order when make runs without -j; the explicit prerequisites
 # below keep the order under -j.
+# core/stddef.h and core/stdint.h are hand-written routers: their types follow
+# the target's pointer width, which a generated header would freeze.
 LIBSHY_HEADERS := \
-	libshy/core/stddef.h \
-	libshy/core/stdint.h \
 	libshy/core/stdtype.h \
 	libshy/c/ctype.h \
+	libshy/c/fcntl.h \
 	libshy/c/stdio.h \
 	libshy/c/stdlib.h \
 	libshy/c/string.h \
@@ -50,8 +51,7 @@ $(SHYC_RELEASE): $(SHYC_SOURCES)
 libshy/%.h: libshy/%.shyh $(SHYC_RELEASE)
 	$(SHYC_RELEASE) --emit=c-header $(LIBSHY_INCLUDES) -o $@ $<
 
-libshy/core/stdtype.h: libshy/core/stddef.h libshy/core/stdint.h
-$(LIBSHY_C_HEADERS): libshy/core/stddef.h
+
 
 install-bin: bin
 	$(INSTALL) -d $(DESTDIR)$(PREFIX)/bin

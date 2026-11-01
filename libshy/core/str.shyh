@@ -1,0 +1,18 @@
+#ifndef SHY_CORE_STR_SHYH
+#define SHY_CORE_STR_SHYH
+
+/* A borrowed view of bytes: a pointer and a length, not NUL-terminated and
+   never owning. Print one with printf("%.*s", s.len, s.ptr). */
+struct Str {
+    const char *ptr;
+    int len;
+};
+
+impl Str {
+    fn from_cstr(const char *s) -> Str;
+    fn eq(self *s, Str other) -> int;
+    fn eq_cstr(self *s, const char *other) -> int;
+    fn starts_with(self *s, const char *prefix) -> int;
+}
+
+#endif

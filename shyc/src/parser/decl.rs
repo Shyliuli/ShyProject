@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use crate::ast::{
     BuiltinType, DeclSpecs, Declaration, Declarator, DerivedDeclarator, FunctionDecl,
-    GenericArgKind, GenericParam, GenericParamKind, ImplBlock, InitDeclarator, Item, StorageClass,
-    TraitDecl, TraitMethod, TypeName, TypeSpecifier, UseDecl,
+    GenericArgKind, GenericParam, GenericParamKind, ImplBlock, InitDeclarator, Item,
+    MethodPrototype, StorageClass, TraitDecl, TraitMethod, TypeName, TypeSpecifier, UseDecl,
 };
 use crate::lexer::{Token, TokenKind};
 use crate::source::{Diagnostic, Span};
@@ -261,20 +261,25 @@ impl Parser {
 
     // -- Shy `fn` declarations --------------------------------------------
 
-    /// Whether the cursor starts `fn name(...)` or `fn name<...>(...)`.
+    /// Whether the cursor starts `[static] fn name(...)` or
+    /// `[static] fn name<...>(...)`.
     ///
     /// `fn` is a soft keyword: `int fn;` and calls to a function named `fn`
     /// remain ordinary C.
     pub(crate) fn at_fn_declaration(&self) -> bool {
-        self.at_ident("fn")
-            && matches!(&self.peek_ahead(1).kind, TokenKind::Ident(name) if !is_keyword(name))
-            && (self.at_punct_ahead(2, "(") || self.at_punct_ahead(2, "<"))
+        let at = usize::from(self.at_ident("static"));
+        self.at_ident_ahead(at, "fn")
+            && matches!(&self.peek_ahead(at + 1).kind, TokenKind::Ident(name) if !is_keyword(name))
+            && (self.at_punct_ahead(at + 2, "(") || self.at_punct_ahead(at + 2, "<"))
     }
 
-    /// Parses `fn name [<generics>] (params) [-> return-type]` and leaves the
-    /// generic-parameter scope open for the caller's body or prototype.
+    /// Parses `[static] fn name [<generics>] (params) [-> return-type]` and
+    /// leaves the generic-parameter scope open for the caller's body or
+    /// prototype.
     fn fn_signature(&mut self) -> Result<(Span, DeclSpecs, Declarator), Diagnostic> {
-        let start = self.bump().span;
+        let start = self.here();
+        let storage = self.eat_ident("static").then_some(StorageClass::Static);
+        self.bump();
         self.push_scope();
         let name = self.expect_ident()?;
         let generics = if self.at_punct("<") {
@@ -317,6 +322,7 @@ impl Parser {
             name: Some(name),
             derived,
         };
+        let specs = DeclSpecs { storage, ..specs };
         Ok((start, specs, declarator))
     }
 
@@ -347,22 +353,57 @@ impl Parser {
         Ok(item)
     }
 
-    fn fn_method(&mut self) -> Result<FunctionDecl, Diagnostic> {
-        let (start, specs, declarator) = self.fn_signature()?;
-        if !self.at_punct("{") {
-            return Err(Diagnostic::new(
+    /// One method of an `impl` block, in `fn` or C spelling. A `;` instead of
+    /// a body makes a prototype; `allow_prototype` is false for generic and
+    /// trait impls, whose methods are always defined where they are written.
+    fn impl_method(
+        &mut self,
+        allow_prototype: bool,
+        methods: &mut Vec<FunctionDecl>,
+        prototypes: &mut Vec<MethodPrototype>,
+    ) -> Result<(), Diagnostic> {
+        let is_fn = self.at_fn_declaration();
+        let (start, specs, declarator) = if is_fn {
+            self.fn_signature()?
+        } else {
+            let specs = self.decl_specs()?;
+            let declarator = self.declarator(false)?;
+            (specs.span, specs, declarator)
+        };
+        let result = if self.at_punct("{") {
+            if is_fn {
+                self.block_with_params(Some(&declarator)).map(|body| {
+                    methods.push(FunctionDecl {
+                        span: start.join(body.span),
+                        specs,
+                        declarator,
+                        body,
+                    });
+                })
+            } else {
+                self.function_definition(specs, declarator)
+                    .map(|method| methods.push(method))
+            }
+        } else if !self.at_punct(";") {
+            Err(self.expected("'{' or ';'"))
+        } else if allow_prototype {
+            let semicolon = self.bump().span;
+            prototypes.push(MethodPrototype {
+                span: start.join(semicolon),
+                specs,
+                declarator,
+            });
+            Ok(())
+        } else {
+            Err(Diagnostic::new(
                 self.here(),
-                "method declarations inside impl must have a body",
-            ));
+                "methods of a generic or trait impl must have a body",
+            ))
+        };
+        if is_fn {
+            self.pop_scope();
         }
-        let body = self.block_with_params(Some(&declarator))?;
-        self.pop_scope();
-        Ok(FunctionDecl {
-            span: start.join(body.span),
-            specs,
-            declarator,
-            body,
-        })
+        result
     }
 
     fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {
@@ -401,36 +442,20 @@ impl Parser {
             self.expect_punct("{")?;
 
             self.impl_depth += 1;
-            let methods = (|| {
-                let mut methods = Vec::new();
+            let allow_prototype = generics.is_empty() && trait_name.is_none();
+            let mut methods = Vec::new();
+            let mut prototypes = Vec::new();
+            let parsed = (|| {
                 while !self.at_punct("}") {
                     if self.at_eof() {
                         return Err(Diagnostic::new(self.here(), "unterminated impl block"));
                     }
-                    if self.at_fn_declaration() {
-                        methods.push(self.fn_method()?);
-                        continue;
-                    }
-                    let specs = self.decl_specs()?;
-                    if self.at_punct(";") {
-                        return Err(Diagnostic::new(
-                            self.here(),
-                            "method declarations inside impl must have a body",
-                        ));
-                    }
-                    let declarator = self.declarator(false)?;
-                    if !self.at_punct("{") {
-                        return Err(Diagnostic::new(
-                            self.here(),
-                            "method declarations inside impl must have a body",
-                        ));
-                    }
-                    methods.push(self.function_definition(specs, declarator)?);
+                    self.impl_method(allow_prototype, &mut methods, &mut prototypes)?;
                 }
-                Ok(methods)
+                Ok(())
             })();
             self.impl_depth -= 1;
-            let methods = methods?;
+            parsed?;
             let close = self.expect_punct("}")?;
             Ok(ImplBlock {
                 span: start.join(close),
@@ -439,6 +464,7 @@ impl Parser {
                 trait_args,
                 self_type,
                 methods,
+                prototypes,
             })
         })();
         self.pop_scope();

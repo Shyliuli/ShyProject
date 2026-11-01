@@ -1,0 +1,36 @@
+// core: types that need no allocator and no operating system.
+
+#include <core/str.shyh>
+
+static fn same_bytes(const char *a, const char *b, int n) -> int {
+    for (int i = 0; i < n; i++) {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+impl Str {
+    fn from_cstr(const char *s) -> Str {
+        let mut n = 0;
+        while (s[n]) {
+            n = n + 1;
+        }
+        Str result = {s, n};
+        return result;
+    }
+
+    fn eq(self *s, Str other) -> int {
+        return s.len == other.len && same_bytes(s.ptr, other.ptr, s.len);
+    }
+
+    fn eq_cstr(self *s, const char *other) -> int {
+        return s.eq(Str::from_cstr(other));
+    }
+
+    fn starts_with(self *s, const char *prefix) -> int {
+        let p = Str::from_cstr(prefix);
+        return p.len <= s.len && same_bytes(s.ptr, p.ptr, p.len);
+    }
+}

@@ -57,31 +57,33 @@ typedef struct __shy_va_list va_list[1];
 //
 // The value is materialized in a local of type ty, so aggregate and scalar
 // results use the same expression shape and arbitrary struct/union sizes are
-// supported.
+// supported. The copy itself is one function, not a macro body, so each
+// va_arg is a single call; it is static, so every unit carries its own copy
+// and a program that never calls va_arg loses it to --gc-sections.
+static void __shy_va_next(struct __shy_va_list *ap, unsigned char *dst,
+                          unsigned int sz, unsigned int cls) {
+  unsigned int slots = sz > 4 ? 2u : 1u;
+  if (cls != 2 && sz <= 8 && ap->reg_slot + slots <= 8) {
+    unsigned char *src = (unsigned char *)ap->reg_save + ap->reg_slot * 4;
+    if (sz > 4) {
+      __shy_va_copy_bytes(dst + 0, src + 4, 4);
+      __shy_va_copy_bytes(dst + 4, src + 0, 4);
+    } else {
+      __shy_va_copy_bytes(dst, src + (4 - sz), sz);
+    }
+    ap->reg_slot = ap->reg_slot + slots;
+  } else {
+    ap->stack = ap->stack - ((sz + 3u) & ~3u);
+    __shy_va_copy_bytes(dst, ap->stack, sz);
+  }
+}
+
 #define va_arg(ap, ty)                                                      \
   ({                                                                        \
     ty __shy_va_v;                                                          \
-    unsigned char *__shy_va_dst = (unsigned char *)&__shy_va_v;             \
-    unsigned int __shy_va_sz = (unsigned int)sizeof(ty);                    \
-    unsigned int __shy_va_cls = (unsigned int)__builtin_reg_class(ty);      \
-    unsigned int __shy_va_slots = __shy_va_sz > 4 ? 2u : 1u;                \
-    if (__shy_va_cls != 2 && __shy_va_sz <= 8 &&                            \
-        (ap)[0].reg_slot + __shy_va_slots <= 8) {                           \
-      unsigned char *__shy_va_src =                                         \
-          (unsigned char *)(ap)[0].reg_save + (ap)[0].reg_slot * 4;         \
-      if (__shy_va_sz > 4) {                                                \
-        __shy_va_copy_bytes(__shy_va_dst + 0, __shy_va_src + 4, 4);         \
-        __shy_va_copy_bytes(__shy_va_dst + 4, __shy_va_src + 0, 4);         \
-      } else {                                                              \
-        __shy_va_copy_bytes(__shy_va_dst,                                   \
-                            __shy_va_src + (4 - __shy_va_sz),               \
-                            __shy_va_sz);                                   \
-      }                                                                     \
-      (ap)[0].reg_slot = (ap)[0].reg_slot + __shy_va_slots;                 \
-    } else {                                                                \
-      (ap)[0].stack = (ap)[0].stack - ((__shy_va_sz + 3u) & ~3u);           \
-      __shy_va_copy_bytes(__shy_va_dst, (ap)[0].stack, __shy_va_sz);        \
-    }                                                                       \
+    __shy_va_next(&(ap)[0], (unsigned char *)&__shy_va_v,                   \
+                  (unsigned int)sizeof(ty),                                 \
+                  (unsigned int)__builtin_reg_class(ty));                   \
     __shy_va_v;                                                             \
   })
 

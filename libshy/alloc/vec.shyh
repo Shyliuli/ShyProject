@@ -1,0 +1,35 @@
+#ifndef SHY_ALLOC_VEC_SHYH
+#define SHY_ALLOC_VEC_SHYH
+
+#include <stdlib.h>
+
+/* A growable array. A zero-initialized Vec is empty: `Vec<int> v = {0};`.
+   Elements are v.data[0] .. v.data[v.len - 1]. A generic impl is compiled
+   in each unit that uses it, so this header carries the whole definition. */
+struct Vec<T> {
+    T *data;
+    int len;
+    int cap;
+};
+
+impl Vec<T> {
+    fn push(self *v, T value) {
+        if (v.len == v.cap) {
+            v.cap = v.cap ? v.cap * 2 : 8;
+            v.data = realloc(v.data, v.cap * sizeof(T));
+        }
+        v.data[v.len] = value;
+        v.len = v.len + 1;
+    }
+
+    fn pop(self *v) -> T {
+        v.len = v.len - 1;
+        return v.data[v.len];
+    }
+
+    fn last(self *v) -> T * {
+        return &v.data[v.len - 1];
+    }
+}
+
+#endif

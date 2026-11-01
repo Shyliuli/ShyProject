@@ -2,7 +2,7 @@
 
 use crate::ast::{AsmStmt, Block, Declarator, DerivedDeclarator, ForInit, LetDecl, Stmt};
 use crate::lexer::TokenKind;
-use crate::source::Diagnostic;
+use crate::source::{Diagnostic, Span};
 
 use super::Parser;
 use super::cursor::is_keyword;
@@ -233,10 +233,23 @@ impl Parser {
 
     fn for_statement(&mut self) -> Result<Stmt, Diagnostic> {
         let start = self.bump().span;
+        // A name declared in the first clause belongs to the loop, as in C.
+        self.push_scope();
+        let result = self.for_clauses_and_body(start);
+        self.pop_scope();
+        result
+    }
+
+    fn for_clauses_and_body(&mut self, start: Span) -> Result<Stmt, Diagnostic> {
         self.expect_punct("(")?;
 
         let init = if self.eat_punct(";") {
             None
+        } else if self.at_let_declaration() {
+            let Stmt::Let(decl) = self.let_statement()? else {
+                unreachable!("let_statement returns Stmt::Let");
+            };
+            Some(Box::new(ForInit::Let(decl)))
         } else if self.starts_type_name(0) {
             Some(Box::new(ForInit::Decl(self.declaration()?)))
         } else {

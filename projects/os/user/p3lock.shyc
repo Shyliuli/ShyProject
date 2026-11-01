@@ -14,11 +14,11 @@ static void print_int(int value) {
     let mut n = value;
 
     if (n == 0) {
-        puts("0");
+        fputs("0", stdout);
         return;
     }
     if (n < 0) {
-        puts("-");
+        fputs("-", stdout);
         n = 0 - n;
     }
     while (n > 0 && i < 11) {
@@ -50,7 +50,7 @@ fn main(void) -> int {
 
     let pid1 = fork();
     if (pid1 < 0) {
-        puts("p3lock fork failed\n");
+        fputs("p3lock fork failed\n", stdout);
         exit(1);
     }
     if (pid1 == 0) {
@@ -59,7 +59,7 @@ fn main(void) -> int {
 
     let pid2 = fork();
     if (pid2 < 0) {
-        puts("p3lock fork failed\n");
+        fputs("p3lock fork failed\n", stdout);
         exit(1);
     }
     if (pid2 == 0) {
@@ -73,21 +73,21 @@ fn main(void) -> int {
         } else if (pid == 0) {
             yield();
         } else {
-            puts("p3lock wait failed\n");
+            fputs("p3lock wait failed\n", stdout);
             exit(1);
         }
     }
 
     let count = p3counter(2);
-    puts("p3lock count ");
+    fputs("p3lock count ", stdout);
     print_int(count);
-    puts("\n");
+    fputs("\n", stdout);
     if (count == P3_EXPECTED) {
-        puts("p3lock ok\n");
+        fputs("p3lock ok\n", stdout);
         exit(0);
     }
 
-    puts("p3lock failed\n");
+    fputs("p3lock failed\n", stdout);
     exit(1);
     return 0;
 }

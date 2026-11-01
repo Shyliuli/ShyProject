@@ -197,10 +197,15 @@ fn arch_space_copy(proc *parent, proc *child) -> int {
     return 0;
 }
 
-fn arch_space_load(proc *p, const void *src, unsigned int n) {
-    for (unsigned int va = 0; va < USER_SEG_SIZE; va = va + 4096) {
+// 镜像只覆盖段的前 n 个字节，其余页清零，复用旧地址空间时不会读到上一份数据。
+static void clear_tail(proc *p, unsigned int n) {
+    for (unsigned int va = (n / 4096) * 4096; va < USER_SEG_SIZE; va = va + 4096) {
         zero_page((unsigned long *)translate(root_for(p), va));
     }
+}
+
+fn arch_space_load(proc *p, const void *src, unsigned int n) {
+    clear_tail(p, n);
     arch_space_write(p, 0, src, n);
 }
 

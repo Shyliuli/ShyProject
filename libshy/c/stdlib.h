@@ -12,6 +12,14 @@
 extern "C" {
 #endif
 
+extern void *malloc(size_t size);
+
+extern void *calloc(size_t count, size_t size);
+
+extern void *realloc(void *p, size_t size);
+
+extern void free(void *p);
+
 extern void abort(void);
 
 extern void exit(int status);
