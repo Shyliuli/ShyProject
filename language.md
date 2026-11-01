@@ -9,6 +9,10 @@ bootstrap and ShyOS compatibility validator.
 
 ShyC keeps C's direct memory model:
 
+- linkage is the one deliberate difference: C declarations are externally
+  visible unless `static`, while a ShyC `fn`, method, or global is file-local
+  unless `pub` (see *Linkage and `pub`* below), and
+  `#![disable_default_static]` restores the C default for one file;
 - pointers are ordinary addresses and may alias;
 - there is no ownership, borrowing, lifetime, garbage collection, or hidden
   allocation model;
@@ -130,6 +134,51 @@ the remaining Rustic checks land. `#![disable_rustic_mut]` makes the unit use
 ordinary C writable defaults for `let` too. This only affects checking and
 optimization; it does not change the ABI, object layout, pointer representation,
 or lifetime.
+
+## Linkage and `pub`
+
+`mut` opens up writability; `pub` opens up visibility. Both follow the same
+shape: the conservative default is implicit, and opening it up is written out.
+
+| Declaration | Default | `pub` | `static` |
+|---|---|---|---|
+| `fn` function | file-local | exported | file-local |
+| impl method | file-local | exported | file-local |
+| global object | file-local | exported | file-local |
+| struct/union field | always accessible | — | — |
+
+A file-local symbol is scoped to its translation unit, so two units may each
+define their own `helper` without colliding, and a header may carry a private
+implementation. Struct and union fields are C style: they carry no `pub` and
+are always accessible.
+
+A prototype is never file-local — it names something defined elsewhere — and a
+definition in the same unit adopts the prototype's symbol.
+
+`#![disable_default_static]` restores C's linkage default for one file, so only
+`static` gives a file-local symbol and `pub` becomes an empty token. It is the
+linkage twin of `#![disable_rustic_mut]`: nothing about the ABI, object layout,
+or calling convention changes, and a C-compatible library is expected to carry
+it.
+
+```c
+// bare Shy: 默认私有
+fn helper(void) -> int {         // 本单元
+    return 1;
+}
+
+pub fn entry(void) -> int {      // 对外
+    return helper();
+}
+
+// C-compatible library
+#![disable_default_static]
+
+fn helper(void) -> int;          // 对外（C 默认）
+static fn local(void) -> int {   // 只在本文件
+    return 1;
+}
+```
 
 ## Slices and library types
 
