@@ -58,6 +58,10 @@ impl Parser {
                     specs.is_noreturn = true;
                     self.bump();
                 }
+                // `pub` 是空 token：默认就是文件级私有，写它只为可读性。
+                "pub" => {
+                    self.bump();
+                }
                 "const" => {
                     specs.qualifiers.push(Qualifier::Const);
                     self.bump();

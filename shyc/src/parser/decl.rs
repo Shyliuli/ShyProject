@@ -51,6 +51,11 @@ impl Parser {
         if self.at_ident("impl") {
             return Ok(Item::Impl(self.impl_block()?));
         }
+        // `pub impl`：`pub` 是空 token，跳过它再看是不是 impl 块。
+        if self.at_ident("pub") && self.at_ident_ahead(1, "impl") {
+            self.bump();
+            return Ok(Item::Impl(self.impl_block()?));
+        }
         if self.at_fn_declaration() {
             return self.fn_item();
         }
