@@ -1,0 +1,11 @@
+#ifndef SHY_RESULT_SHYH
+#define SHY_RESULT_SHYH
+
+/* Transparent payload enum. Both variants carry one payload in this first
+   version; Result<void, E> and the zero-success niche are future extensions. */
+enum Result<T, E> {
+    Ok(T),
+    Err(E)
+};
+
+#endif

@@ -1,15 +1,5 @@
-#ifndef __SHY_UNISTD_H
-#define __SHY_UNISTD_H
-
-#include <stddef.shyh>
-
-#define STDIN_FILENO 0
-#define STDOUT_FILENO 1
-#define STDERR_FILENO 2
-
-typedef int ssize_t;
-
-ssize_t read(int fd, void *buf, size_t count);
-ssize_t write(int fd, const void *buf, size_t count);
-
+/* Compatibility wrapper: C headers live in c/. */
+#ifndef __SHY_COMPAT_C_UNISTD_SHYH
+#define __SHY_COMPAT_C_UNISTD_SHYH
+#include <c/unistd.shyh>
 #endif

@@ -4,10 +4,23 @@
 header names where useful, but only exposes functions that can be implemented
 without an OS, file descriptors, files, processes, locale, signals, or threads.
 
-Header naming:
+Header layout:
 
-- `.shyh` is the native ShyC header suffix.
-- `.h` wrappers are kept for C compatibility.
+- `include/c/` is the C compatibility layer: `ctype`, `stdio`, `stdlib`,
+  `string`, and `unistd`.
+- `include/core/` is the language/runtime foundation: `stddef`, `stdint`,
+  `stdarg`, `stdtype`, `option`, and `result`.
+- `include/*.h` and `include/*.shyh` are compatibility wrappers. They keep the
+  flat names such as `<stdio.h>` and `<stdint.shyh>` working with
+  `-Ilibshy/include`, and route them into `c/` or `core/`.
+
+`.shyh` is the native ShyC header suffix; `.h` is the C-compatible spelling.
+`shycc` adds only `libshy/include` to the search path, so existing sources and
+ShyOS builds do not need to change their includes.
+
+`<stdarg.h>` is target-routed: a Shy build gets the native `core/stdarg.shyh`
+descriptor, while a hosted LLVM build gets `stdarg-hosted.h` from the compiler
+(`shyc` ships that file).
 
 Initial scope:
 
@@ -18,6 +31,8 @@ Initial scope:
 - `<unistd.shyh>` / `<unistd.h>`: byte-oriented stdin/stdout/stderr `read` and `write`.
 - `<stdint.shyh>` / `<stdint.h>`: fixed-width integer typedefs for the Shy ABI.
 - `<stdtype.shyh>` / `<stdtype.h>`: Rust-style aliases such as `i32`, `u64`, `usize`, and `f32`.
+- `<option.shyh>` / `<option.h>` and `<result.shyh>` / `<result.h>`: ShyC
+  payload-enum language types.
 
 ABI typedefs follow ShyC's 32-bit address model: pointers, `size_t`,
 `ptrdiff_t`, `intptr_t`, `uintptr_t`, `usize`, and `isize` are 32-bit. `long`,

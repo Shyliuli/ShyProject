@@ -1,10 +1,5 @@
-#ifndef SHY_OPTION_SHYH
-#define SHY_OPTION_SHYH
-
-/* Transparent payload enum. `None` has no payload; `Some` stores T. */
-enum Option<T> {
-    None,
-    Some(T)
-};
-
+/* Compatibility wrapper: core language/runtime headers live in core/. */
+#ifndef __SHY_COMPAT_CORE_OPTION_SHYH
+#define __SHY_COMPAT_CORE_OPTION_SHYH
+#include <core/option.shyh>
 #endif

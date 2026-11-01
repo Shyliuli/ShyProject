@@ -1,0 +1,10 @@
+#ifndef SHY_OPTION_SHYH
+#define SHY_OPTION_SHYH
+
+/* Transparent payload enum. `None` has no payload; `Some` stores T. */
+enum Option<T> {
+    None,
+    Some(T)
+};
+
+#endif

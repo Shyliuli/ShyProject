@@ -1,9 +1,5 @@
-/* The Shy target uses its own descriptor; hosted targets use the compiler's. */
-#ifndef __SHY_STDARG_WRAPPER_H
-#define __SHY_STDARG_WRAPPER_H
-#if defined(__shy__)
-#include <stdarg.shyh>
-#else
-#include <stdarg-hosted.h>
-#endif
+/* Compatibility wrapper: core language/runtime headers live in core/. */
+#ifndef __SHY_COMPAT_CORE_STDARG_H
+#define __SHY_COMPAT_CORE_STDARG_H
+#include <core/stdarg.h>
 #endif

@@ -1,16 +1,5 @@
-#ifndef __SHY_STDLIB_H
-#define __SHY_STDLIB_H
-
-#include <stddef.shyh>
-
-#define EXIT_SUCCESS 0
-#define EXIT_FAILURE 1
-
-void abort(void);
-void exit(int status);
-int atoi(const char *nptr);
-long atol(const char *nptr);
-long strtol(const char *nptr, char **endptr, int base);
-unsigned long strtoul(const char *nptr, char **endptr, int base);
-
+/* Compatibility wrapper: C headers live in c/. */
+#ifndef __SHY_COMPAT_C_STDLIB_SHYH
+#define __SHY_COMPAT_C_STDLIB_SHYH
+#include <c/stdlib.shyh>
 #endif
