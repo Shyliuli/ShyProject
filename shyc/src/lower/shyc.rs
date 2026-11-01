@@ -39,6 +39,19 @@ impl super::Lowerer {
                     format!("redefinition of trait '{}'", declaration.name.text),
                 ));
             }
+            if let Some(bound) = declaration
+                .generics
+                .iter()
+                .find_map(|parameter| parameter.bounds.first())
+            {
+                return Err(Diagnostic::new(
+                    bound.span,
+                    format!(
+                        "trait bounds on generic trait '{}' are not implemented yet",
+                        declaration.name.text
+                    ),
+                ));
+            }
             for (index, method) in declaration.methods.iter().enumerate() {
                 let Some(name) = &method.declarator.name else {
                     return Err(Diagnostic::new(

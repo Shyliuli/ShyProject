@@ -113,6 +113,16 @@ that binds one parameter inconsistently or not at all are not inferred; those
 calls report that explicit generic arguments are needed. A local binding or
 ordinary function of the same name shadows the template.
 
+A generic function may constrain its type parameters with a static trait bound:
+`fn render<T: Drawable>(T *value) -> ...`. The bound is checked when the
+template is instantiated, after an explicit argument or inference binds `T`, and
+the call is accepted only when the unit contains `impl Drawable for Type`.
+Several bounds may be written with `+`. The check is compile-time only: the call
+still becomes the ordinary monomorphized function, with no dispatch or ABI
+change. A bound on a `const` parameter, a generic record, a generic enum, or a
+generic trait, a bound that writes trait arguments such as `T: From<int>`, and
+a generic trait method each get an explicit diagnostic instead.
+
 `trait Drawable { void draw(self *value); }` declares method signatures, and
 `impl Drawable for Circle { ... }` checks that the implementation defines exactly
 those methods with matching signatures. The methods are lowered exactly like an
@@ -147,8 +157,8 @@ other parameter and the return type stay as written. This is why a trait method
 that takes or returns `self` by value still works for static dispatch but is
 rejected when the trait is used as a value type. A second implementation of the
 same trait for one type, a duplicate method name across two traits on one type,
-generic trait methods, and `<T: Drawable>` bounds also get an explicit
-diagnostic. Construction at file scope must follow the `impl` in source order;
+and generic trait methods also get an explicit diagnostic. Construction at file
+scope must follow the `impl` in source order;
 function bodies are lowered after the whole unit is collected, so their
 construction does not depend on declaration order. There is no other dynamic
 dispatch mechanism.

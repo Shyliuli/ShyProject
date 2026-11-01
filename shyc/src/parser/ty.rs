@@ -628,8 +628,12 @@ impl Parser {
 
     // -- generic parameters and arguments --------------------------------
 
-    /// Parses `<T, const N>` and declares the names in the current scope.
+    /// Parses `<T, T: Drawable, const N>` and declares the names in the current
+    /// scope.
     ///
+    /// A bound is one or more trait names after `:` separated by `+`. Trait
+    /// arguments and bounds on a `const` parameter are rejected here; the
+    /// lowering pass checks the bound against each instantiation.
     /// The caller opens the scope that should contain the parameters.
     pub(crate) fn generic_params(&mut self) -> Result<Vec<GenericParam>, Diagnostic> {
         self.expect_punct("<")?;
@@ -642,13 +646,30 @@ impl Parser {
                 GenericParamKind::Type
             };
             let name = self.expect_ident()?;
-            if self.at_punct(":") {
-                // Parse the bound would only feed unused metadata today, so
-                // say so rather than accepting a constraint that does nothing.
-                return Err(Diagnostic::new(
-                    self.here(),
-                    "trait bounds on generic parameters are not implemented yet",
-                ));
+            let mut bounds = Vec::new();
+            if self.eat_punct(":") {
+                if kind == GenericParamKind::Const {
+                    return Err(Diagnostic::new(
+                        name.span,
+                        format!(
+                            "const generic parameter '{}' cannot have a trait bound",
+                            name.text
+                        ),
+                    ));
+                }
+                loop {
+                    let bound = self.expect_ident()?;
+                    if self.at_punct("<") || self.at_punct("(") {
+                        return Err(Diagnostic::new(
+                            self.here(),
+                            "trait bounds with type arguments are not implemented yet",
+                        ));
+                    }
+                    bounds.push(bound);
+                    if !self.eat_punct("+") {
+                        break;
+                    }
+                }
             }
             match kind {
                 GenericParamKind::Type => self.declare_typedef(&name.text),
@@ -658,6 +679,7 @@ impl Parser {
                 span: start.join(name.span),
                 name,
                 kind,
+                bounds,
             });
             if !self.eat_punct(",") {
                 break;

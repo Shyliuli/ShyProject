@@ -93,12 +93,17 @@ pub enum GenericParamKind {
     Const,
 }
 
-/// One generic parameter in a declaration, for example `T` or `const N`.
+/// One generic parameter in a declaration, for example `T`, `T: Drawable`, or
+/// `const N`.
+///
+/// `bounds` lists the traits written after `:`, separated by `+`. Only a type
+/// parameter may have bounds; a `const` parameter keeps `bounds` empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenericParam {
     pub span: Span,
     pub name: Name,
     pub kind: GenericParamKind,
+    pub bounds: Vec<Name>,
 }
 
 /// One generic argument at a use site or call site.

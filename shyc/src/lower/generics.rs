@@ -23,7 +23,7 @@ use super::{
     PendingFunction, ResolvedSpecs,
 };
 use crate::ast;
-use crate::sema::types::{Builtin, TypeId, TypeKind};
+use crate::sema::types::{Builtin, IntegerRank, TypeId, TypeKind};
 use crate::source::{Diagnostic, Span};
 
 /// How deep generic instantiation may nest before lowering gives up.
@@ -321,6 +321,138 @@ impl Lowerer {
         ))
     }
 
+    /// Verifies every trait bound once the concrete type arguments are known.
+    ///
+    /// A bound is satisfied by an `impl Bound for Type` already collected for
+    /// the unit: the same [`Self::trait_impls`] table that rejects a duplicate
+    /// implementation answers the check. Only a bound that writes no type
+    /// arguments is supported, matching the AST's `Vec<Name>` bounds.
+    fn check_generic_bounds(
+        &self,
+        function: &str,
+        span: Span,
+        params: &[ast::GenericParam],
+        args: &[GenericArgKey],
+    ) -> Result<(), Diagnostic> {
+        for (parameter, argument) in params.iter().zip(args) {
+            let GenericArgKey::Type(ty) = argument else {
+                continue;
+            };
+            for bound in &parameter.bounds {
+                let Some(info) = self.traits.get(&bound.text) else {
+                    return Err(Diagnostic::new(
+                        bound.span,
+                        format!(
+                            "trait bound '{}: {}' on generic function '{}' names unknown \
+                             trait '{}'",
+                            parameter.name.text, bound.text, function, bound.text
+                        ),
+                    ));
+                };
+                if !info.params.is_empty() {
+                    return Err(Diagnostic::new(
+                        bound.span,
+                        format!(
+                            "trait bound '{}: {}' on generic function '{}' needs type \
+                             arguments, which are not implemented yet",
+                            parameter.name.text, bound.text, function
+                        ),
+                    ));
+                }
+                let implemented = self.impls.get(ty).is_some_and(|implementation| {
+                    self.trait_impls.contains(&(
+                        bound.text.clone(),
+                        Vec::new(),
+                        implementation.name.clone(),
+                    ))
+                });
+                if !implemented {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "type parameter '{}' of generic function '{}' requires trait \
+                             '{}', but '{}' does not implement it",
+                            parameter.name.text,
+                            function,
+                            bound.text,
+                            self.concrete_type_name(*ty)
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A readable spelling of a concrete type for a bound diagnostic.
+    ///
+    /// The type store keeps no names, so a record or enum is named from the
+    /// metadata that already refers to it: its implementation, its generic
+    /// instance, or the scope that declared its tag.
+    fn concrete_type_name(&self, ty: TypeId) -> String {
+        match self.types.kind(ty) {
+            TypeKind::Void => "void".to_string(),
+            TypeKind::Bool => "bool".to_string(),
+            TypeKind::Integer { rank, unsigned } => {
+                let base = match rank {
+                    IntegerRank::Char => "char",
+                    IntegerRank::Short => "short",
+                    IntegerRank::Int => "int",
+                    IntegerRank::Long => "long",
+                    IntegerRank::LongLong => "long long",
+                };
+                if *unsigned {
+                    format!("unsigned {base}")
+                } else {
+                    base.to_string()
+                }
+            }
+            TypeKind::Float32 => "float".to_string(),
+            TypeKind::Float64 => "double".to_string(),
+            TypeKind::Pointer { pointee } => {
+                format!("{} *", self.concrete_type_name(pointee.ty))
+            }
+            TypeKind::Array { element, .. } => {
+                format!("{} []", self.concrete_type_name(element.ty))
+            }
+            TypeKind::Function { .. } => "function".to_string(),
+            TypeKind::Record { .. } | TypeKind::Enum(_) | TypeKind::PayloadEnum(_) => self
+                .named_type(ty)
+                .unwrap_or_else(|| match self.types.kind(ty) {
+                    TypeKind::Record { .. } => "struct".to_string(),
+                    _ => "enum".to_string(),
+                }),
+        }
+    }
+
+    /// A source name already attached to a record or enum type, if any.
+    fn named_type(&self, ty: TypeId) -> Option<String> {
+        if let Some(implementation) = self.impls.get(&ty) {
+            return Some(implementation.name.clone());
+        }
+        if let Some((key, _)) = self
+            .record_instances
+            .iter()
+            .find(|(_, instance)| **instance == ty)
+        {
+            return Some(key.name.clone());
+        }
+        if let Some((key, _)) = self
+            .enum_instances
+            .iter()
+            .find(|(_, instance)| **instance == ty)
+        {
+            return Some(key.name.clone());
+        }
+        self.type_scopes.iter().rev().find_map(|scope| {
+            scope
+                .tags
+                .iter()
+                .find(|(_, declared)| **declared == ty)
+                .map(|(name, _)| name.clone())
+        })
+    }
+
     /// The shared instantiation tail: an explicit and an inferred call differ
     /// only in how the concrete arguments were obtained.
     fn instantiate_concrete(
@@ -345,6 +477,7 @@ impl Lowerer {
         if let Some(instance) = self.function_instances.get(&key) {
             return Ok(instance.clone());
         }
+        self.check_generic_bounds(&name.text, name.span, &template.params, &key.args)?;
         let Some(mut decl) = template.decl.clone() else {
             return Err(Diagnostic::new(
                 name.span,

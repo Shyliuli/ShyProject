@@ -69,6 +69,19 @@ impl Lowerer {
                     format!("redefinition of generic record '{}'", tag.text),
                 ));
             }
+            if let Some(bound) = record
+                .generics
+                .iter()
+                .find_map(|parameter| parameter.bounds.first())
+            {
+                return Err(Diagnostic::new(
+                    bound.span,
+                    format!(
+                        "trait bounds on generic record '{}' are not implemented yet",
+                        tag.text
+                    ),
+                ));
+            }
             self.generic_records.insert(
                 tag.text.clone(),
                 super::GenericRecord {
@@ -108,6 +121,19 @@ impl Lowerer {
                 return Err(Diagnostic::new(
                     enumeration.span,
                     format!("redefinition of generic enum '{}'", tag.text),
+                ));
+            }
+            if let Some(bound) = enumeration
+                .generics
+                .iter()
+                .find_map(|parameter| parameter.bounds.first())
+            {
+                return Err(Diagnostic::new(
+                    bound.span,
+                    format!(
+                        "trait bounds on generic enum '{}' are not implemented yet",
+                        tag.text
+                    ),
                 ));
             }
             self.generic_enums.insert(

@@ -463,9 +463,22 @@ fn generic_params_text(params: &[GenericParam]) -> String {
     }
     let params = params
         .iter()
-        .map(|param| match param.kind {
-            GenericParamKind::Type => param.name.text.clone(),
-            GenericParamKind::Const => format!("const {}", param.name.text),
+        .map(|param| {
+            let mut text = match param.kind {
+                GenericParamKind::Type => param.name.text.clone(),
+                GenericParamKind::Const => format!("const {}", param.name.text),
+            };
+            if !param.bounds.is_empty() {
+                let bounds = param
+                    .bounds
+                    .iter()
+                    .map(|bound| bound.text.clone())
+                    .collect::<Vec<_>>()
+                    .join(" + ");
+                text.push_str(": ");
+                text.push_str(&bounds);
+            }
+            text
         })
         .collect::<Vec<_>>()
         .join(", ");
