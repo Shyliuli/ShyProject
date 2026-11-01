@@ -25,10 +25,9 @@ enum InputKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Backend {
-    /// The local chibicc fork, still the default while the ShyOS regression
-    /// under `shyc` is open.
+    /// The local chibicc fork, kept for early bootstrap and compatibility.
     Chibicc,
-    /// The independent `shyc` compiler: the main implementation.
+    /// The independent `shyc` compiler, which is the default.
     Shyc,
 }
 
@@ -96,8 +95,8 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
     let mut opts = Options {
         stage: Stage::Link,
         backend: match env::var("SHYCC_BACKEND").as_deref() {
-            Ok("shyc") => Backend::Shyc,
-            Ok("chibicc") | Err(_) => Backend::Chibicc,
+            Ok("chibicc") => Backend::Chibicc,
+            Ok("shyc") | Err(_) => Backend::Shyc,
             Ok(other) => bail!("unknown SHYCC_BACKEND: {other}"),
         },
         output: None,
@@ -883,7 +882,7 @@ fn print_usage() {
          outputs: -o <file>, --sym <file>, -save-temps, -###\n\
          debug: --shy-emit-source-lines, --shy-emit-debug-info\n\
          inputs: .shyc/.c, .shy, .sobj\n\
-         backend: --backend shyc|chibicc (default chibicc)\n\
+         backend: --backend shyc|chibicc (default shyc)\n\
          libraries: libshy and the soft-float runtime are linked by default;\n\
          \x20 -nostdlib/-nodefaultlibs disables that, -llibshy and -lfloat\n\
          \x20 are accepted and never duplicated"

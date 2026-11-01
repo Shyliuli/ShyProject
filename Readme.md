@@ -31,7 +31,7 @@ ShyProject 是一个面向教学的完整计算机系统实验项目。它从零
 | **linker** | `linker/` | 链接器，将一个或多个 `.sobj` 链接为 `.sfs` raw 内存镜像 |
 | **emu** | `emu/` | 模拟器，加载并执行 `.sfs` 镜像，是整个项目最重要的验证工具 |
 | **shyc** | `shyc/` | 独立 ShyC 编译器：自有前端、类型化 IR、优化与 Shy/LLVM 后端 |
-| **shycc** | `shycc/` | 编译驱动：`--backend=shyc` 使用独立编译器（默认仍是 chibicc） |
+| **shycc** | `shycc/` | 编译驱动：默认调用独立 `shyc`，`--backend=chibicc` 保留旧自举后端 |
 | **libshy** | `libshy/` | 裸机 C 支持库——`stdio`、`string`、`ctype`、`stdlib` 等 |
 | **chibicc\_shy** | `projects/chibicc_shy/` | 自举实验——在 Shy 裸机上运行的 chibicc/ShyC 编译器移植 |
 | **ShyOS** | `projects/os/` | 最小操作系统：进程、段式隔离、Trap、调度、只读文件系统与 shell |
@@ -56,9 +56,8 @@ ShyISA 是为教学设计的精简指令集架构，核心理念是"一切皆地
 ## ShyC 语言
 
 ShyC 是面向 ShyISA 的裸机 C 前端。主实现是独立编译器 `shyc`，由 `shycc`
-驱动（`--backend shyc`）；chibicc 分支暂时仍是默认后端，作为早期自举与回归
-验证，待 ShyOS 在 `shyc` 下的回归修好后切换。语言边界与 ABI 约定见
-[language.md](language.md)。当前提供：
+默认驱动；`--backend=chibicc` 保留 chibicc 分支作为早期自举和兼容验证。
+语言边界与 ABI 约定见 [language.md](language.md)。当前提供：
 
 - C 语言核心子集——整数、指针、结构体、联合体、数组、控制流、`goto`
 - ILP32 指针模型，`long` 保持 64 位
