@@ -1,5 +1,5 @@
 /* Compatibility wrapper: the generated C header lives in ../c/. */
 #ifndef __SHY_COMPAT_C_STRING_H
 #define __SHY_COMPAT_C_STRING_H
-#include "../c/string.h"
+#include "../libc/string.h"
 #endif

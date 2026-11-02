@@ -1,5 +1,5 @@
 /* Compatibility wrapper: the native ShyC header lives in ../c/. */
 #ifndef __SHY_COMPAT_C_UNISTD_SHYH
 #define __SHY_COMPAT_C_UNISTD_SHYH
-#include "../c/unistd.shyh"
+#include "../libc/unistd.shyh"
 #endif

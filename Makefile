@@ -14,7 +14,10 @@ CHIBICC := third_party/chibicc/chibicc
 # core/stddef.h and core/stdint.h are hand-written routers: their types follow
 # the target's pointer width, which a generated header would freeze.
 LIBSHY_HEADERS := \
-	libshy/core/stdtype.h \
+	libshy/c/stdtype.h \
+	libshy/c/stdarg.h \
+	libshy/c/option.h \
+	libshy/c/result.h \
 	libshy/c/ctype.h \
 	libshy/c/fcntl.h \
 	libshy/c/stdio.h \
@@ -48,7 +51,11 @@ libshy-headers: $(LIBSHY_HEADERS)
 $(SHYC_RELEASE): $(SHYC_SOURCES)
 	$(CARGO) build --release -p shyc
 
-libshy/%.h: libshy/%.shyh $(SHYC_RELEASE)
+# c/ 是给 C 的 include 视图，只有 .h：声明源在 libc/(C 库风格) 与 core/(ShyC 风格)。
+libshy/c/%.h: libshy/libc/%.shyh $(SHYC_RELEASE)
+	$(SHYC_RELEASE) --emit=c-header $(LIBSHY_INCLUDES) -o $@ $<
+
+libshy/c/%.h: libshy/core/%.shyh $(SHYC_RELEASE)
 	$(SHYC_RELEASE) --emit=c-header $(LIBSHY_INCLUDES) -o $@ $<
 
 

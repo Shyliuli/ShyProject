@@ -1,5 +1,5 @@
 /* Compatibility wrapper: the native ShyC header lives in ../c/. */
 #ifndef __SHY_COMPAT_C_FCNTL_SHYH
 #define __SHY_COMPAT_C_FCNTL_SHYH
-#include "../c/fcntl.shyh"
+#include "../libc/fcntl.shyh"
 #endif

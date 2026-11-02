@@ -1,4 +1,4 @@
 #ifndef __SHY_PATH_CORE_STDINT_H_SHYH
 #define __SHY_PATH_CORE_STDINT_H_SHYH
-#include "../../core/stdint.shyh"
+#include "../../libc/stdint.shyh"
 #endif

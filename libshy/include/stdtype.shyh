@@ -1,5 +1,5 @@
 /* Compatibility wrapper: the native ShyC header lives in ../core/. */
 #ifndef __SHY_COMPAT_CORE_STDTYPE_SHYH
 #define __SHY_COMPAT_CORE_STDTYPE_SHYH
-#include "../core/stdtype.shyh"
+#include "../libc/stdtype.shyh"
 #endif

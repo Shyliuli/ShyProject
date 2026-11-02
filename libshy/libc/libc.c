@@ -256,9 +256,9 @@ struct FILE {
 static FILE stdin_file = {STDIN_FILENO, 0};
 static FILE stdout_file = {STDOUT_FILENO, 0};
 static FILE stderr_file = {STDERR_FILENO, 0};
-pub FILE *stdin = &stdin_file;
-pub FILE *stdout = &stdout_file;
-pub FILE *stderr = &stderr_file;
+FILE *stdin = &stdin_file;
+FILE *stdout = &stdout_file;
+FILE *stderr = &stderr_file;
 
 FILE *fopen(const char *path, const char *mode) {
   int flags = O_RDONLY;
@@ -270,22 +270,22 @@ FILE *fopen(const char *path, const char *mode) {
   if (fd < 0)
     return NULL;
   FILE *f = malloc(sizeof(FILE));
-  f.fd = fd;
-  f.eof = 0;
+  f->fd = fd;
+  f->eof = 0;
   return f;
 }
 
-int fclose(FILE *f) { return close(f.fd); }
+int fclose(FILE *f) { return close(f->fd); }
 int fflush(FILE *f) {
   (void)f;
   return 0;
 }
-int feof(FILE *f) { return f.eof; }
+int feof(FILE *f) { return f->eof; }
 
 int fgetc(FILE *f) {
   unsigned char c;
-  if (read(f.fd, &c, 1) != 1) {
-    f.eof = 1;
+  if (read(f->fd, &c, 1) != 1) {
+    f->eof = 1;
     return EOF;
   }
   return c;
@@ -293,12 +293,12 @@ int fgetc(FILE *f) {
 
 int fputc(int c, FILE *f) {
   unsigned char byte = (unsigned char)c;
-  return write(f.fd, &byte, 1) == 1 ? byte : EOF;
+  return write(f->fd, &byte, 1) == 1 ? byte : EOF;
 }
 
 int fputs(const char *s, FILE *f) {
   size_t n = strlen(s);
-  return write(f.fd, s, n) == (ssize_t)n ? (int)n : EOF;
+  return write(f->fd, s, n) == (ssize_t)n ? (int)n : EOF;
 }
 
 size_t fread(void *buf, size_t size, size_t count, FILE *f) {
@@ -306,9 +306,9 @@ size_t fread(void *buf, size_t size, size_t count, FILE *f) {
   size_t total = size * count;
   size_t done = 0;
   while (done < total) {
-    ssize_t n = read(f.fd, p + done, total - done);
+    ssize_t n = read(f->fd, p + done, total - done);
     if (n <= 0) {
-      f.eof = 1;
+      f->eof = 1;
       break;
     }
     done = done + (size_t)n;
@@ -317,7 +317,7 @@ size_t fread(void *buf, size_t size, size_t count, FILE *f) {
 }
 
 size_t fwrite(const void *buf, size_t size, size_t count, FILE *f) {
-  ssize_t n = write(f.fd, buf, size * count);
+  ssize_t n = write(f->fd, buf, size * count);
   return n > 0 && size ? (size_t)n / size : 0;
 }
 
@@ -341,16 +341,16 @@ typedef struct {
 } Out;
 
 static void out_ch(Out *out, int c) {
-  if (out.buf && out.cap) {
-    if (out.cap == (size_t)-1 || out.pos + 1 < out.cap)
-      out.buf[out.pos] = (char)c;
-    else if (out.pos + 1 == out.cap)
-      out.buf[out.pos] = 0;
+  if (out->buf && out->cap) {
+    if (out->cap == (size_t)-1 || out->pos + 1 < out->cap)
+      out->buf[out->pos] = (char)c;
+    else if (out->pos + 1 == out->cap)
+      out->buf[out->pos] = 0;
   }
-  out.pos = out.pos + 1;
-  out.count = out.count + 1;
-  if (out.file)
-    fputc(c, out.file);
+  out->pos = out->pos + 1;
+  out->count = out->count + 1;
+  if (out->file)
+    fputc(c, out->file);
 }
 
 static void out_strn(Out *out, const char *s, int len) {
@@ -693,30 +693,30 @@ typedef struct {
 } ScanNum;
 
 static int scan_get(ScanIn *in) {
-  if (in.has_ungot) {
-    in.has_ungot = 0;
-    return in.ungot;
+  if (in->has_ungot) {
+    in->has_ungot = 0;
+    return in->ungot;
   }
 
   int c;
-  if (in.from_string) {
-    if (!*in.s)
+  if (in->from_string) {
+    if (!*in->s)
       return EOF;
-    c = (unsigned char)*in.s;
-    in.s = in.s + 1;
+    c = (unsigned char)*in->s;
+    in->s = in->s + 1;
   } else {
     c = getchar();
   }
-  in.count = in.count + 1;
+  in->count = in->count + 1;
   return c;
 }
 
 static void scan_unget(ScanIn *in, int c) {
   if (c == EOF)
     return;
-  in.has_ungot = 1;
-  in.ungot = c;
-  in.count = in.count - 1;
+  in->has_ungot = 1;
+  in->ungot = c;
+  in->count = in->count - 1;
 }
 
 static void scan_skip_space(ScanIn *in) {
@@ -740,38 +740,38 @@ static int scan_digit_value(int c) {
 static int scan_number(ScanIn *in, ScanNum *num) {
   int c = scan_get(in);
   int consumed = 0;
-  num.neg = 0;
-  num.val = 0;
+  num->neg = 0;
+  num->val = 0;
 
-  if (num.sign && (c == '+' || c == '-')) {
-    num.neg = c == '-';
+  if (num->sign && (c == '+' || c == '-')) {
+    num->neg = c == '-';
     consumed = consumed + 1;
     c = scan_get(in);
   }
 
-  if ((num.base == 0 || num.base == 16) && c == '0') {
+  if ((num->base == 0 || num->base == 16) && c == '0') {
     int x = scan_get(in);
     if (x == 'x' || x == 'X') {
-      num.base = 16;
+      num->base = 16;
       consumed = consumed + 2;
       c = scan_get(in);
     } else {
       scan_unget(in, x);
-      if (num.base == 0)
-        num.base = 8;
+      if (num->base == 0)
+        num->base = 8;
     }
-  } else if (num.base == 0) {
-    num.base = 10;
+  } else if (num->base == 0) {
+    num->base = 10;
   }
 
   int digits = 0;
   while (c != EOF) {
-    if (num.width && consumed >= num.width)
+    if (num->width && consumed >= num->width)
       break;
     int d = scan_digit_value(c);
-    if (d < 0 || d >= num.base)
+    if (d < 0 || d >= num->base)
       break;
-    num.val = num.val * (unsigned long)num.base + (unsigned long)d;
+    num->val = num->val * (unsigned long)num->base + (unsigned long)d;
     consumed = consumed + 1;
     digits = digits + 1;
     c = scan_get(in);
@@ -905,7 +905,7 @@ static int scan_format(ScanIn *input, const char *fmt, va_list ap) {
       if (!suppress) {
         if (long_arg) {
           long *p = va_arg(ap, long *);
-          *p = in.count;
+          *p = in->count;
         } else {
           int *p = va_arg(ap, int *);
           *p = in.count;

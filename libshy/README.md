@@ -3,26 +3,37 @@
 libshy is ShyC's standard library. Like Rust's, it has a C library at the
 bottom and three layers above it:
 
-| Layer | Headers | Implementation | Needs |
-|---|---|---|---|
-| `c` | `stdio`, `stdlib`, `string`, `ctype`, `unistd`, `fcntl` | `libshy.shyc` | the platform calls below |
-| `core` | `stddef`, `stdint`, `stdtype`, `stdarg`, `option`, `result`, `str` | `core.shyc` | nothing |
-| `alloc` | `vec`, `string` | `alloc.shyc` | `malloc` |
-| `std` | `io`, `fs` | `std.shyc` | `FILE` |
+| View | Contents |
+|---|---|
+| `c/` | the C include view: only `.h` — `stdio`, `stdlib`, `string`, `ctype`, `unistd`, `fcntl`, `stddef`, `stdint`, `stdtype`, `stdarg`, `option`, `result` |
+| `core/` | ShyC declarations (`str.shyh`, `option.shyh`, `result.shyh`) and `core.shyc` |
+| `alloc/` | `vec.shyh`, `string.shyh`, `alloc.shyc` |
+| `std/` | `fs.shyh`, `io.shyh`, `std.shyc` |
+| `libc/` | the C library in ShyC spelling: `*.shyh` declarations and the `libc.c` implementation |
+| `sys/` | the bare-machine platform calls, `shy.shyc` |
+
+The C library layer is written as plain C (`libc.c` uses `->`, never ShyC's
+automatic dereference): a C implementation should read as C. ShyC sugar is
+desugared on the way *out*, by the compiler, not carried in the source.
+
+`c/*.h` are generated from the `.shyh` sources in `libc/` and `core/` with
+`shyc --emit=c-header` and committed; `make libshy-headers` regenerates them.
+`c/stddef.h` and `c/stdint.h` are hand-written routers because their contents
+follow the target pointer width, which a generated header would freeze.
 
 The C layer is libc-compatible, so ordinary C code compiles against it.
 `<stdtype.h>` adds Rust-style aliases such as `i32`, `u64`, and `usize`.
 
 ## Platforms
 
-`libshy.shyc` contains no assembly. Every platform service goes through six
+`libc/libc.c` contains no assembly. Every platform service goes through six
 POSIX calls: `read`, `write`, `close`, `_exit`, `sbrk` (`<unistd.h>`), and
 `open` (`<fcntl.h>`).
 
 | Platform | Platform calls | C layer | core/alloc/std |
 |---|---|---|---|
-| bare Shy | `sys/shy.shyc` | `libshy.shyc` | linked |
-| ShyOS | system calls in `projects/os/user` | `libshy.shyc` | linked |
+| bare Shy | `sys/shy.shyc` | `libc/libc.c` | linked |
+| ShyOS | system calls in `projects/os/user` | `libc/libc.c` | linked |
 | hosted LLVM target | system libc | system libc | linked |
 
 On bare Shy, `read` returns 0 at the end of input, `open` fails because there
@@ -81,16 +92,17 @@ libshy         # explicit paths: <c/stdio.h>, <core/str.shyh>, <alloc/vec.shyh>
 libshy/include # flat compatibility names: <stddef.h>, <stdint.h>
 ```
 
-The `.h` files in `c/` and `core/stdtype.h` are generated from their `.shyh`
-with `shyc --emit=c-header` and committed:
+The `.h` files in `c/` are generated from their `.shyh` with
+`shyc --emit=c-header` and committed:
 
 ```sh
 make libshy-headers
 ```
 
-`core/stddef.h`, `core/stdint.h`, and `core/stdarg.h` are hand-written: their
-contents depend on the target (`__SIZEOF_POINTER__`, the varargs ABI), which a
-generated header would freeze at one value.
+`c/stddef.h` and `c/stdint.h` are hand-written routers: their contents depend on
+the target (`__SIZEOF_POINTER__`), which a generated header would freeze at one
+value. `c/stdarg.h` is generated but expands to the Shy varargs builtin, so it
+serves `shyc`; a plain C compiler needs its own `<stdarg.h>`.
 
 Floating-point code on Shy also needs the soft-float runtime, `-lfloat`.
 `printf` prints `%f` with simple truncation; `scanf` reads no floats.

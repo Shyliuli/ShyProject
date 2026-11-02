@@ -730,7 +730,11 @@ fn build_float_lib(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result
 }
 
 /// libshy's layers above the C library, in dependency order.
-const LIBSHY_RUST_LAYERS: [&str; 3] = ["libshy/core.shyc", "libshy/alloc.shyc", "libshy/std.shyc"];
+const LIBSHY_RUST_LAYERS: [&str; 3] = [
+    "libshy/core/core.shyc",
+    "libshy/alloc/alloc.shyc",
+    "libshy/std/std.shyc",
+];
 
 /// One unit through `shyc --emit=llvm`. A library unit gets only the
 /// optimization level, never the user's `-I`/`-D`/`-U`.
@@ -755,7 +759,7 @@ fn emit_llvm(repo: &Path, opts: &Options, input: &Path, ll: &Path, user_unit: bo
 /// implementation of its platform calls, then core, alloc, and std. ShyOS
 /// links the same sources with its own system calls instead of `sys/shy`.
 fn build_libshy(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result<Vec<PathBuf>> {
-    let mut sources = vec!["libshy/libshy.shyc", "libshy/sys/shy.shyc"];
+    let mut sources = vec!["libshy/libc/libc.c", "libshy/sys/shy.shyc"];
     sources.extend(LIBSHY_RUST_LAYERS);
     let mut objects = Vec::new();
     for source in sources {
