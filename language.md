@@ -167,6 +167,10 @@ declarations plus the commented attribute, while a ShyC layer writes `pub` on
 what it exports and leaves everything else file-local. Generated C headers stay
 plain C: they carry neither `pub` nor `mut`.
 
+Visibility is written per declaration, not per block: an `impl` block marks each
+method it exports, and a file lists the fields it exports next to the fields it
+keeps to itself.
+
 ```c
 // bare Shy: 默认私有
 fn helper(void) -> int {         // 本单元
@@ -177,6 +181,20 @@ pub fn entry(void) -> int {      // 对外
     return helper();
 }
 
+struct Counter {
+    int value;
+};
+
+impl Counter {
+    pub fn bump(self *c) {       // 每个方法自己写 pub
+        c.value = c.value + 1;
+    }
+
+    fn reset(self *c) {          // 不写就只在本单元
+        c.value = 0;
+    }
+}
+
 // C-compatible library
 #![disable_default_static]
 
@@ -185,6 +203,10 @@ static fn local(void) -> int {   // 只在本文件
     return 1;
 }
 ```
+
+`pub` on a prototype adds nothing: a prototype always names an external symbol.
+A definition that follows an `extern` declaration adopts the declared symbol, so
+the declaration is the one place that decides the name.
 
 ## Slices and library types
 
