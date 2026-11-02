@@ -232,6 +232,9 @@ pub struct EnumSpec {
     /// `#[result_niche]`: this template may use the `Result<void, E>` zero-value
     /// layout when an instance's shape allows it.
     pub result_niche: bool,
+    /// `#[option_niche]`: this template asks for the `Option<*T>` null-pointer
+    /// layout. Accepted by the parser; the layout is not implemented yet.
+    pub option_niche: bool,
     /// Generic parameters of an enum definition, empty if none.
     pub generics: Vec<GenericParam>,
     pub enumerators: Option<Vec<Enumerator>>,

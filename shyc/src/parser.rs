@@ -194,6 +194,10 @@ pub(crate) struct Parser {
     /// Nesting depth of a generic argument list being parsed. Inside one, `>`
     /// and `>=` are closers, not comparison operators.
     angle_depth: usize,
+    /// `#[result_niche]` seen before the item currently being parsed.
+    pending_enum_niche: bool,
+    /// `#[option_niche]` seen before the item currently being parsed.
+    pending_option_niche: bool,
     /// Name scopes, innermost last. `scopes[0]` is file scope.
     pub(crate) scopes: Vec<Scope>,
     /// Nesting depth of `impl` and `trait` bodies; `self` is a type only
@@ -232,6 +236,8 @@ impl Parser {
             pos: 0,
             last,
             angle_depth: 0,
+            pending_enum_niche: false,
+            pending_option_niche: false,
             scopes: vec![Scope::default()],
             impl_depth: 0,
             prescan,

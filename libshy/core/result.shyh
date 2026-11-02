@@ -3,6 +3,7 @@
 
 /* Transparent payload enum. Both variants carry one payload in this first
    version; Result<void, E> and the zero-success niche are future extensions. */
+#[result_niche]
 enum Result<T, E> {
     Ok(T),
     Err(E)

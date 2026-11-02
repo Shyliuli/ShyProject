@@ -319,7 +319,11 @@ impl Parser {
 
     fn enum_spec(&mut self) -> Result<EnumSpec, Diagnostic> {
         // `#[result_niche]` 写在声明处，说明这个模板想用零值 niche 布局。
-        let mut result_niche = false;
+        // 条目解析器已经吃掉了前缀，标记通过 `pending_enum_niche` 传进来。
+        let mut result_niche = self.pending_enum_niche;
+        self.pending_enum_niche = false;
+        let option_niche = self.pending_option_niche;
+        self.pending_option_niche = false;
         while self.at_punct("#") {
             self.bump();
             self.expect_punct("[")?;
@@ -428,6 +432,7 @@ impl Parser {
 
         Ok(EnumSpec {
             result_niche,
+            option_niche,
             span: self.finish(start),
             underlying,
             tag,

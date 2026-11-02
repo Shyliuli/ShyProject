@@ -42,6 +42,24 @@ impl Parser {
     /// Parses one file-scope item: a declaration, a function definition, an
     /// `impl` block, a `trait` declaration, or a `use` import.
     pub(crate) fn item(&mut self) -> Result<Item, Diagnostic> {
+        // 声明级属性 `#[result_niche]` 出现在条目之前：读进解析器状态，
+        // 由紧随其后的 `enum` 声明消费。
+        while self.at_punct("#") {
+            self.bump();
+            self.expect_punct("[")?;
+            let name = self.expect_ident()?;
+            self.expect_punct("]")?;
+            match name.text.as_str() {
+                "result_niche" => self.pending_enum_niche = true,
+                "option_niche" => self.pending_option_niche = true,
+                other => {
+                    return Err(Diagnostic::new(
+                        name.span,
+                        format!("unknown declaration attribute '#[{other}]'"),
+                    ))
+                }
+            }
+        }
         if self.at_use_declaration() {
             return Ok(Item::Use(self.use_declaration()?));
         }

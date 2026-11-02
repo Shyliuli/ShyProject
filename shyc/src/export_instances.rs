@@ -856,6 +856,14 @@ impl<'a> CPrinter<'a> {
                 format!("{keyword} shyc_R{}", ty.index())
             }
             TypeKind::Enum(_) => format!("shyc_E{}", ty.index()),
+            // niche 的 payload enum 就是底层类型的值（`0` = `Ok`），C 这边跟着用
+            // 底层类型的名字，别名 typedef 才不会退化成结构体。
+            TypeKind::PayloadEnum(_)
+                if self.types.enum_info(ty).is_some_and(|info| info.niche) =>
+            {
+                let underlying = self.types.enum_info(ty).unwrap().underlying;
+                self.declaration(underlying, "").trim().to_string()
+            }
             TypeKind::PayloadEnum(_) => format!("struct shyc_E{}", ty.index()),
             _ => String::new(),
         }

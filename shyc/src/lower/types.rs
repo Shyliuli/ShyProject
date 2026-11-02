@@ -735,6 +735,12 @@ impl Lowerer {
             .map_err(|error| {
                 Diagnostic::new(template.spec.span, format!("invalid enum layout: {error}"))
             })?;
+            if template.spec.option_niche {
+                return Err(Diagnostic::new(
+                    template.spec.span,
+                    "#![option_niche] is not implemented yet: Option<*T> still uses the tagged layout",
+                ));
+            }
             self.enum_instances.insert(key.clone(), ty);
             self.define_enum(
                 ty,
