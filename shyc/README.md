@@ -343,18 +343,28 @@ and the conversion is selected by the actual source and target types. A
 payload-free `Ok` produces no value, so `?` on it is only usable as a
 statement.
 
-An instantiated `Result<void, E>` whose `E` is a payload-free enum with no
-zero enumerator takes the zero-value niche instead of the tagged aggregate: the
-object is `E`'s integer, `0` means `Ok`, and any other value is the error.
-`Ok` must be the first enumerator so its tag is `0`. The niche is an integer
-(`.tag` reads that value, and arithmetic and integer conversion treat it as
-`E`'s underlying type), has `E`'s size and alignment, and crosses both backends
-as an integer. An instance whose `E` contains `0`, and a hand-written
-`enum { Ok, Err(E) }`, keep the ordinary tagged representation. `switch` on a
-niche Result is diagnosed because its cases would compare the `Err` tag with an
-error code; switch on `result.tag` and the error enumerators instead. Global
-initialisers keep the payload-enum restriction, and `?` needs the same error
-enum because `impl` targets must be records, not enums.
+`#[result_niche]` on a generic enum declaration enables the compact
+`Result<void, E>` representation when `E` is a payload-free enum without a
+zero enumerator. The object has `E`'s underlying integer size and alignment:
+zero means `Ok`, and nonzero is the `Err` payload. `#[option_niche]` enables
+compact `Option<T *>`: the object is a pointer, NULL means `None`, and a
+non-null value is `Some`. The attributes also accept the commented forms
+`// #[result_niche]` and `// #[option_niche]`. Export instance tables only
+select concrete types and aliases; they do not carry these attributes.
+
+These are C-compatible representation contracts. In particular, `Some(NULL)`
+is equivalent to `None`; it does not preserve a separate null payload.
+Ineligible instances retain their ordinary tag and union representation.
+
+`switch` works with logical variant labels for both compact representations:
+`case Option<int *>::None:` / `case Option<int *>::Some:`, and
+`case Result<void, Error>::Ok:` / `case Result<void, Error>::Err:`. Payloads
+remain accessible through `.payload.Some` and `.payload.Err`. The scrutinee is
+evaluated once, then a zero/nonzero comparison supplies the logical variant
+tag. `.tag` remains the raw stored value. `?` propagates failure on NULL for
+Option and on nonzero for Result. Generated C headers and wrappers use the
+same pointer/integer types, with no extra tag or union. Global initialisers
+keep the payload-enum restriction.
 
 A file-scope `use` writes the namespace a name comes from and imports its last
 segment: `use core::Option;` and `use c::stdio::printf;` make `Option` and

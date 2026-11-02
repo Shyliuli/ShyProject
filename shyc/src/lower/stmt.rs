@@ -314,28 +314,29 @@ impl FnLower<'_> {
     ) -> Result<(), Diagnostic> {
         let value = self.lower_expr(condition)?;
         let scrutinee = value.ty;
-        // A niche enum stores the payload itself, not a variant tag, so its
-        // cases would only match by accident: `Result<void, E>` keeps the error
-        // code, `Option<*T>` keeps the pointer.
-        if self.l.types.is_niche_enum(scrutinee) {
-            let pointer = matches!(
-                self.l.types.kind(self.l.types.enum_underlying(scrutinee).unwrap_or(scrutinee)),
-                crate::sema::types::TypeKind::Pointer { .. }
-            );
-            return Err(Diagnostic::new(
-                span,
-                if pointer {
-                    "an `Option<*T>` niche stores the pointer itself, not a variant tag; \
-                     compare it against `0` instead of switching on it"
-                } else {
-                    "a `Result<void, E>` niche stores the error code rather than the `Err` tag; \
-                     switch on `result.tag` and the error enumerators instead"
-                },
-            ));
-        }
-        // A payload enum is an aggregate. Switch on its tag at offset 0; every
-        // other scrutinee keeps the ordinary integer rvalue path.
-        let (operand, ty) = if self.l.types.is_payload_enum(scrutinee) {
+        // C-compatible niche values store the payload itself. Normalize it to
+        // the logical variant tag (zero/nonzero) before the ordinary switch.
+        let (operand, ty) = if self.l.types.is_niche_enum(scrutinee) {
+            let qualifiers = value.qualifiers;
+            let address = self.object_address(value, span)?;
+            let underlying = self
+                .l
+                .types
+                .enum_underlying(scrutinee)
+                .expect("niche enum underlying type");
+            let raw = self.load_value(address, underlying, qualifiers);
+            let raw_ty = self.l.ir_type(underlying);
+            let nonzero = self.emit_value(ir::InstKind::ICmp {
+                pred: ir::IntPredicate::Ne,
+                lhs: raw,
+                rhs: ir::Operand::Constant(ir::Constant::zero(raw_ty)),
+                ty: raw_ty,
+            });
+            (
+                self.bool_to_int(ir::Operand::Value(nonzero)),
+                self.int_type(),
+            )
+        } else if self.l.types.is_payload_enum(scrutinee) {
             let qualifiers = value.qualifiers;
             let address = self.object_address(value, span)?;
             let Some(tag_ty) = self.l.types.enum_underlying(scrutinee) else {
@@ -455,9 +456,16 @@ impl FnLower<'_> {
             return Err(Diagnostic::new(span, "`case` outside a switch"));
         };
         let value_ty = context.value_ty;
-        let value = self.l.eval_const(value)?;
-        let value = self.l.const_cast(value, value_ty, span)?;
-        let constant = self.l.const_int_of_ir(&value, span)?;
+        let niche = self.l.types.is_niche_enum(context.scrutinee);
+        let ir_ty = context.ir_ty;
+        let constant = if niche {
+            let tag = self.l.eval_const_int(value)?;
+            ir::Constant::int(ir_ty, tag)
+        } else {
+            let value = self.l.eval_const(value)?;
+            let value = self.l.const_cast(value, value_ty, span)?;
+            self.l.const_int_of_ir(&value, span)?
+        };
         let block = self.f.alloc_block();
         if !self.terminated {
             self.jump_to(block);

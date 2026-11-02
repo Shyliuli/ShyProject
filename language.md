@@ -82,12 +82,28 @@ hidden runtime operation.
 
 ## Result, Option, and `?`
 
-`Result<T, E>` and `Option<T>` are library types. `Result<void, E>` uses an
-integer niche when `E` is a payload-free enum that does not contain zero; zero
-then represents success. If the condition is not met, the compiler uses the
-ordinary transparent tagged representation. The niche is the error enum's
-integer: `switch` on it is not available because its cases would compare the
-`Err` tag with an error code, so switch on the error value instead.
+`Result<T, E>` and `Option<T>` are library types. Their declarations opt into
+compact C-compatible representations using `#[result_niche]` and
+`#[option_niche]`; these attributes are not part of the export instance table.
+They may also be written as `// #[result_niche]` and `// #[option_niche]`.
+
+For a marked `Result<void, E>`, a payload-free error enum with no zero
+enumerator permits the representation of `E`'s underlying integer: zero is
+`Ok`, and a nonzero value is `Err`. For a marked `Option<T *>`, the
+representation is the pointer itself: NULL is `None` and a non-null pointer is
+`Some`. This is an explicit C interop convention: `Some(NULL)` is equivalent
+to `None`, rather than a distinct value. Instances that do not meet these
+conditions retain the ordinary tag and payload union.
+
+`switch` on either compact enum dispatches on its logical variant, using a
+zero/nonzero comparison of the stored value. Existing C-style case labels and
+payload access remain available: `case Option<int *>::Some:` followed by
+`value.payload.Some`, or `case Result<void, Error>::Err:` followed by
+`value.payload.Err`. The condition is evaluated once. `.tag` still exposes the
+raw pointer or error code: compare the pointer directly, or switch on
+`result.tag` to distinguish individual error codes.
+`?` treats NULL as Option failure and a nonzero error code as Result failure.
+Generated C interfaces use the same pointer or integer representation.
 
 `?` propagates only when the error types are equal or a later `From<Source>`
 trait implementation explicitly converts the source error to the destination

@@ -705,7 +705,10 @@ impl<'a> CPrinter<'a> {
         for export in self.exports {
             match &export.kind {
                 ExportedKind::Record { ty, .. } | ExportedKind::Enum { ty } => {
-                    text.push_str(&format!("typedef {} {};\n", self.base(*ty), export.alias));
+                    text.push_str(&format!(
+                        "typedef {};\n",
+                        self.declaration(*ty, &export.alias)
+                    ));
                 }
                 ExportedKind::Function { .. } => {}
             }
@@ -810,9 +813,13 @@ impl<'a> CPrinter<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         let call = format!("{symbol}({arguments})");
-        let result_text = self.declaration(result, "");
-        self.output
-            .push_str(&format!("{result_text} {name}({parameters}) {{\n"));
+        let parameters = if parameters.is_empty() {
+            "void"
+        } else {
+            &parameters
+        };
+        let signature = self.declaration(result, &format!("{name}({parameters})"));
+        self.output.push_str(&format!("{signature} {{\n"));
         if self.types.is_void(result) {
             self.output.push_str(&format!("    {call};\n"));
         } else {
@@ -858,9 +865,7 @@ impl<'a> CPrinter<'a> {
             TypeKind::Enum(_) => format!("shyc_E{}", ty.index()),
             // niche 的 payload enum 就是底层类型的值（`0` = `Ok`），C 这边跟着用
             // 底层类型的名字，别名 typedef 才不会退化成结构体。
-            TypeKind::PayloadEnum(_)
-                if self.types.enum_info(ty).is_some_and(|info| info.niche) =>
-            {
+            TypeKind::PayloadEnum(_) if self.types.enum_info(ty).is_some_and(|info| info.niche) => {
                 let underlying = self.types.enum_info(ty).unwrap().underlying;
                 self.declaration(underlying, "").trim().to_string()
             }
@@ -887,6 +892,13 @@ impl<'a> CPrinter<'a> {
         qualifiers: crate::sema::types::Qualifiers,
         declarator: String,
     ) -> (String, String) {
+        if self.types.is_niche_enum(ty) {
+            let underlying = self
+                .types
+                .enum_underlying(ty)
+                .expect("niche enum underlying type");
+            return self.apply(underlying, qualifiers, declarator);
+        }
         match self.types.kind(ty) {
             TypeKind::Pointer { pointee } => {
                 let mut inner = if qualifiers.is_empty() {

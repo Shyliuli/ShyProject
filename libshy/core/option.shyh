@@ -1,7 +1,10 @@
 #ifndef SHY_OPTION_SHYH
 #define SHY_OPTION_SHYH
 
-/* Transparent payload enum. `None` has no payload; `Some` stores T. */
+/* Pointer instances use the C-compatible representation: NULL is None and
+   a non-null pointer is Some. Some(NULL) is therefore equivalent to None.
+   Other instances retain their tag and payload. */
+#[option_niche]
 enum Option<T> {
     None,
     Some(T)
