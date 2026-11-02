@@ -314,13 +314,23 @@ impl FnLower<'_> {
     ) -> Result<(), Diagnostic> {
         let value = self.lower_expr(condition)?;
         let scrutinee = value.ty;
-        // A niche Result holds the error code, not the `Err` variant tag, so
-        // its cases would only match by accident.
+        // A niche enum stores the payload itself, not a variant tag, so its
+        // cases would only match by accident: `Result<void, E>` keeps the error
+        // code, `Option<*T>` keeps the pointer.
         if self.l.types.is_niche_enum(scrutinee) {
+            let pointer = matches!(
+                self.l.types.kind(self.l.types.enum_underlying(scrutinee).unwrap_or(scrutinee)),
+                crate::sema::types::TypeKind::Pointer { .. }
+            );
             return Err(Diagnostic::new(
                 span,
-                "a `Result<void, E>` niche stores the error code rather than the `Err` tag; \
-                 switch on `result.tag` and the error enumerators instead",
+                if pointer {
+                    "an `Option<*T>` niche stores the pointer itself, not a variant tag; \
+                     compare it against `0` instead of switching on it"
+                } else {
+                    "a `Result<void, E>` niche stores the error code rather than the `Err` tag; \
+                     switch on `result.tag` and the error enumerators instead"
+                },
             ));
         }
         // A payload enum is an aggregate. Switch on its tag at offset 0; every
