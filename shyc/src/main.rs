@@ -599,25 +599,29 @@ fn preprocess_option(
     Ok(())
 }
 
+/// 预处理结果的一段可以原样喂给下一次 shyc 运行（`-E`）。
+///
+/// 属性行写成注释形式 `// #![...]`：这份输出同时可能作为 C 兼容源码被普通 C
+/// 编译器编译，裸属性会让它编译失败；写成注释，shyc 仍然认得。
 fn render_preprocessed(tokens: &[Token], attributes: &Attributes) -> String {
     let mut output = String::new();
     if attributes.no_main {
-        output.push_str("#![no_main]\n");
+        output.push_str("// #![no_main]\n");
     }
     if let Some(bytes) = attributes.memory {
-        output.push_str(&format!("#![mem({bytes})]\n"));
+        output.push_str(&format!("// #![mem({bytes})]\n"));
     }
     if let Some(bytes) = attributes.stack {
-        output.push_str(&format!("#![stack({bytes})]\n"));
+        output.push_str(&format!("// #![stack({bytes})]\n"));
     }
     if attributes.disable_nonexhaustive_switch {
-        output.push_str("#![disable_nonexhaustive_switch]\n");
+        output.push_str("// #![disable_nonexhaustive_switch]\n");
     }
     if attributes.disable_rustic_mut {
-        output.push_str("#![disable_rustic_mut]\n");
+        output.push_str("// #![disable_rustic_mut]\n");
     }
     if attributes.disable_default_static {
-        output.push_str("#![disable_default_static]\n");
+        output.push_str("// #![disable_default_static]\n");
     }
     output.push_str(&export::render_c_source(tokens));
     output
