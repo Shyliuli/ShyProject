@@ -81,6 +81,57 @@ Both print `2 lines`. `read_file(path)` from `<std/fs.shyh>` returns
 carries its whole definition; the other types declare their methods in the
 header and define them once in the layer's `.shyc`.
 
+## Calling the library from C
+
+A generic template has no single C spelling: `Vec<T>` becomes one concrete
+struct per element type. The instance table says which ones a C client may use.
+Each layer keeps its own, next to the template it names:
+
+```text
+libshy/alloc/vec.shyinst      Vec<int> as vec_int, Vec<unsigned char> as vec_u8
+libshy/core/option.shyinst    Option<int> as opt_int
+libshy/core/result.shyinst    Result<int, int> as res_int
+```
+
+The table is compile-time input, never C. Three builds produce what a C client
+links against:
+
+```sh
+R=$PWD
+shyc --emit=c-header  -I$R/libshy/c -I$R/libshy/include \
+     $R/libshy/alloc/vec.shyh --instances $R/libshy/alloc/vec.shyinst -o vec_api.h
+shyc --emit=llvm --target=x86_64-pc-linux-gnu \
+     -I$R/libshy/c -I$R/libshy/include \
+     $R/libshy/alloc/vec.shyh --instances $R/libshy/alloc/vec.shyinst -o vec.ll
+shyc --emit=c-wrapper --target=x86_64-pc-linux-gnu \
+     -I$R/libshy/c -I$R/libshy/include \
+     $R/libshy/alloc/vec.shyh --instances $R/libshy/alloc/vec.shyinst -o vec_wrap.c
+
+clang -x ir -c vec.ll -o vec.o
+clang -c vec_wrap.c -o vec_wrap.o
+clang client.c vec_wrap.o vec.o -o client
+```
+
+```c
+#include <stdio.h>
+#include "vec_api.h"
+
+int main(void) {
+    vec_int v = {0};
+    for (int i = 0; i < 5; i++) {
+        vec_int_push(&v, i * 3);
+    }
+    printf("%d %d\n", v.len, *vec_int_last(&v));   /* 5 12 */
+    return 0;
+}
+```
+
+`vec_api.h` carries the concrete layouts (`typedef struct shyc_R28 vec_int`),
+so the C client owns the storage; the `.ll` object supplies the method bodies
+and `vec_wrap.c` is the thin C-named shim over their stable symbols. A payload
+enum exports the same way: `Option<int>` becomes a tagged union with a `tag`
+field and a `payload` union.
+
 ## Headers
 
 `.shyh` is the native ShyC header; `.h` is its C spelling. `shycc` searches
