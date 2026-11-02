@@ -2,8 +2,6 @@
 #ifndef SHYC_GENERATED_CORE_OPTION_H
 #define SHYC_GENERATED_CORE_OPTION_H
 
-#define SHY_OPTION_SHYH
-
 #ifdef __cplusplus
 extern "C" {
 #endif

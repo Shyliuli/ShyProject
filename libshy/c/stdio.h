@@ -5,7 +5,6 @@
 #include <stddef.h>
 #include <stdarg.h>
 
-#define __SHY_STDIO_H
 #define EOF (-1)
 
 #ifdef __cplusplus

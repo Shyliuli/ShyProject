@@ -5,8 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define __SHY_STDTYPE_H
-
 #ifdef __cplusplus
 extern "C" {
 #endif

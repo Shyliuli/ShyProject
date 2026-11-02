@@ -21,7 +21,14 @@ impl Preprocessor<'_> {
         match name {
             "include" => self.handle_include(file, arguments, hash_span),
             "define" => {
-                if file == self.root {
+                // The file's own include guard stays out of the generated C
+                // header; that header has a guard of its own.
+                let is_guard = matches!(
+                    arguments.iter().find(|token| !matches!(token.kind, TokenKind::Newline)),
+                    Some(Token { kind: TokenKind::Ident(name), .. })
+                        if self.guard_macro.as_deref() == Some(name.as_str())
+                );
+                if file == self.root && !is_guard {
                     self.defines.push(define_line(arguments));
                 }
                 self.define_directive(arguments, hash_span)

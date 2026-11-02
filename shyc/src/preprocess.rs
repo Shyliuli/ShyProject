@@ -154,6 +154,7 @@ pub fn preprocess(
         file_keys: HashMap::from([(file, root_key)]),
         token_cache: HashMap::new(),
         once_files: HashSet::new(),
+        guard_macro: None,
         disabled_builtins: HashSet::new(),
         expansion_depth: 0,
     };
@@ -200,6 +201,8 @@ pub(crate) struct Preprocessor<'a> {
     pub(crate) file_keys: HashMap<FileId, PathBuf>,
     pub(crate) token_cache: HashMap<FileId, Rc<Vec<Token>>>,
     pub(crate) once_files: HashSet<PathBuf>,
+    /// The main file's own include guard, kept out of generated C headers.
+    pub(crate) guard_macro: Option<String>,
     pub(crate) disabled_builtins: HashSet<String>,
     pub(crate) expansion_depth: usize,
 }
@@ -307,6 +310,12 @@ impl Preprocessor<'_> {
         tokens: &[Token],
         root: bool,
     ) -> Result<(), Diagnostic> {
+        if root {
+            // A generated C header must not re-export the source header's
+            // include guard: the two views are separate files, and defining the
+            // same macro in both would make the later include a no-op.
+            self.guard_macro = include_guard(tokens);
+        }
         let mut conditions: Vec<Conditional> = Vec::new();
         let mut i = 0;
         while i < tokens.len() {
@@ -687,6 +696,32 @@ fn line_end(tokens: &[Token], start: usize) -> usize {
         }
     }
     tokens.len()
+}
+
+/// The classic `#ifndef NAME` / `#define NAME` include guard of one file.
+fn include_guard(tokens: &[Token]) -> Option<String> {
+    let significant: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token.kind, TokenKind::Newline))
+        .take(6)
+        .collect();
+    let is_punct_at = |index: usize, punct: &str| {
+        significant
+            .get(index)
+            .is_some_and(|token| macros::is_punct(token, punct))
+    };
+    let ident_at = |index: usize| match significant.get(index).map(|token| &token.kind) {
+        Some(TokenKind::Ident(name)) => Some(name.as_str()),
+        _ => None,
+    };
+    if !is_punct_at(0, "#") || ident_at(1) != Some("ifndef") {
+        return None;
+    }
+    let guard = ident_at(2)?;
+    if !is_punct_at(3, "#") || ident_at(4) != Some("define") || ident_at(5) != Some(guard) {
+        return None;
+    }
+    Some(guard.to_string())
 }
 
 /// Prefer native declarations, but permit ordinary C API headers outside c/.

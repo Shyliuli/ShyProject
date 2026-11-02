@@ -2,8 +2,6 @@
 #ifndef SHYC_GENERATED_C_CTYPE_H
 #define SHYC_GENERATED_C_CTYPE_H
 
-#define __SHY_CTYPE_H
-
 #ifdef __cplusplus
 extern "C" {
 #endif

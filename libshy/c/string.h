@@ -4,8 +4,6 @@
 
 #include <stddef.h>
 
-#define __SHY_STRING_H
-
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -2,7 +2,6 @@
 #ifndef SHYC_GENERATED_C_FCNTL_H
 #define SHYC_GENERATED_C_FCNTL_H
 
-#define __SHY_FCNTL_H
 #define O_RDONLY 0
 #define O_WRONLY 1
 #define O_RDWR 2

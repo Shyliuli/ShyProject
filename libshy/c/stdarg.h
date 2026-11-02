@@ -2,7 +2,6 @@
 #ifndef SHYC_GENERATED_C_STDARG_H
 #define SHYC_GENERATED_C_STDARG_H
 
-#define __SHY_STDARG_H
 #define va_start(ap, last) do { (ap)[0].reg_slot = *(unsigned int *)((char *)__va_area__ + 0); (ap)[0].reg_save = *(char **)((char *)__va_area__ + 4); (ap)[0].stack = *(char **)((char *)__va_area__ + 8); } while (0)
 #define va_end(ap) ((void)0)
 #define va_copy(dest, src) ((dest)[0] = (src)[0])
