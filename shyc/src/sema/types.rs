@@ -640,7 +640,12 @@ impl TypeStore {
             return None;
         }
         let ok = variants.iter().find(|variant| variant.name == "Ok")?;
-        if ok.payload.is_some() || ok.value != 0 {
+        // `Result<void, E>`: a `void` payload carries no bytes, so it counts as
+        // payload-free just like a variant written without one.
+        let ok_payload = ok
+            .payload
+            .filter(|ty| !matches!(self.kind(*ty), TypeKind::Void));
+        if ok_payload.is_some() || ok.value != 0 {
             return None;
         }
         let error = variants.iter().find(|variant| variant.name == "Err")?;

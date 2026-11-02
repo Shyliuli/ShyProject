@@ -539,6 +539,9 @@ impl<'a> CPrinter<'a> {
                     }
                 }
                 TypeKind::PayloadEnum(_) => {
+                    if self.types.enum_info(ty).is_some_and(|info| info.niche) {
+                        continue;
+                    }
                     if let Some(tag) = self.base(ty).strip_prefix("struct ") {
                         forward.push_str(&format!("struct {tag};\n"));
                     }
@@ -655,6 +658,10 @@ impl<'a> CPrinter<'a> {
                 self.output.push_str(&format!("{head} {{\n{fields}}};\n\n"));
             }
             TypeKind::PayloadEnum(_) => {
+                if self.types.enum_info(ty).is_some_and(|info| info.niche) {
+                    // 底层整数已经由名字注册点表达，这里没有结构体可打印。
+                    return;
+                }
                 let base = self.base(ty);
                 let tag = base
                     .strip_prefix("struct ")

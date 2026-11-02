@@ -349,6 +349,15 @@ impl Lowerer {
 
     /// The C spelling of one concrete type, when it is a record or enum.
     fn c_type_name(&self, ty: TypeId) -> Option<CTypeName> {
+        // `Result<void, E>` 的 niche 用 `E` 的整数值（0 = Ok）表示，C 这边
+        // 直接沿用底层类型的拼写，既没有 tag 也没有 payload union。
+        if let TypeKind::PayloadEnum(_) = self.types.kind(ty) {
+            if let Some(info) = self.types.enum_info(ty) {
+                if info.niche {
+                    return self.c_type_name(info.underlying);
+                }
+            }
+        }
         let scope = self.type_scopes.first()?;
         match self.types.kind(ty) {
             TypeKind::Record { kind, .. } => {
