@@ -228,6 +228,7 @@ fn instance_requests(
         .entries
         .into_iter()
         .map(|entry| lower::ExportRequest {
+            niche: entry.niche,
             name: entry.name,
             args: entry.args,
             alias: entry.alias,

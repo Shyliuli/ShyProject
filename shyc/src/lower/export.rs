@@ -354,7 +354,14 @@ impl Lowerer {
         if let TypeKind::PayloadEnum(_) = self.types.kind(ty) {
             if let Some(info) = self.types.enum_info(ty) {
                 if info.niche {
-                    return self.c_type_name(info.underlying);
+                    let base = self
+                        .c_type_name(info.underlying)
+                        .map(|name| name.base)
+                        .unwrap_or_else(|| "int".to_string());
+                    return Some(CTypeName {
+                        base,
+                        emit_header: false,
+                    });
                 }
             }
         }
