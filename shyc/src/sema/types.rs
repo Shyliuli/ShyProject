@@ -574,6 +574,7 @@ impl TypeStore {
         ty: TypeId,
         variants: Vec<EnumVariant>,
         allow_niche: bool,
+        allow_option_niche: bool,
     ) -> Result<Layout, TypeError> {
         let TypeKind::PayloadEnum(id) = *self.kind(ty) else {
             return Err(TypeError::NotAnEnum);
@@ -589,6 +590,25 @@ impl TypeStore {
             let underlying = self.enum_underlying(error).ok_or(TypeError::NotAnEnum)?;
             self.enums[id.index()] = EnumInfo {
                 underlying,
+                variants,
+                payload_offset: 0,
+                payload_size: size,
+                payload_align: align,
+                niche: true,
+            };
+            let enum_type = &mut self.types[ty.index()];
+            enum_type.size = Some(size);
+            enum_type.align = Some(align);
+            return Ok(Layout { size, align });
+        }
+
+        // `Option<*T>`：两个 variant（`None` 无 payload、`Some(T *)`），布局就是
+        // 那个指针，NULL 表示 `None`。
+        if allow_option_niche && let Some(payload) = self.niche_option_pointer(&variants) {
+            let size = self.size_of(payload)?;
+            let align = self.align_of(payload)?;
+            self.enums[id.index()] = EnumInfo {
+                underlying: payload,
                 variants,
                 payload_offset: 0,
                 payload_size: size,
@@ -661,6 +681,21 @@ impl TypeStore {
             return None;
         }
         Some(error_ty)
+    }
+
+    /// The payload type when `variants` is exactly `Option<*T>`: `None` is
+    /// payload-free at value 0 and `Some` carries one pointer.
+    fn niche_option_pointer(&self, variants: &[EnumVariant]) -> Option<TypeId> {
+        if variants.len() != 2 {
+            return None;
+        }
+        let none = variants.iter().find(|variant| variant.name == "None")?;
+        if none.payload.is_some() || none.value != 0 {
+            return None;
+        }
+        let some = variants.iter().find(|variant| variant.name == "Some")?;
+        let payload = some.payload?;
+        matches!(self.kind(payload), TypeKind::Pointer { .. }).then_some(payload)
     }
 
     /// Records the enumerators of a plain enum. The representation stays the

@@ -735,12 +735,6 @@ impl Lowerer {
             .map_err(|error| {
                 Diagnostic::new(template.spec.span, format!("invalid enum layout: {error}"))
             })?;
-            if template.spec.option_niche {
-                return Err(Diagnostic::new(
-                    template.spec.span,
-                    "#![option_niche] is not implemented yet: Option<*T> still uses the tagged layout",
-                ));
-            }
             self.enum_instances.insert(key.clone(), ty);
             self.define_enum(
                 ty,
@@ -749,6 +743,7 @@ impl Lowerer {
                 template.spec.span,
                 true,
                 template.spec.result_niche,
+                template.spec.option_niche,
             )?;
             Ok::<TypeId, Diagnostic>(ty)
         })();
@@ -898,7 +893,15 @@ impl Lowerer {
             }
             self.declare_tag(&tag.text, ty, spec.span)?;
         }
-        self.define_enum(ty, underlying, enumerators, spec.span, false, spec.result_niche)
+        self.define_enum(
+            ty,
+            underlying,
+            enumerators,
+            spec.span,
+            false,
+            spec.result_niche,
+            spec.option_niche,
+        )
     }
 
     /// Defines an enum's variants and constants.
@@ -917,6 +920,7 @@ impl Lowerer {
         span: Span,
         instantiated: bool,
         niche_allowed: bool,
+        option_niche_allowed: bool,
     ) -> Result<TypeId, Diagnostic> {
         let (min, max, bits, unsigned) = self.enum_value_range(underlying);
         let payload_enum = self.types.is_payload_enum(ty);
@@ -1014,7 +1018,12 @@ impl Lowerer {
         }
         if payload_enum {
             self.types
-                .complete_payload_enum(ty, variants, instantiated && niche_allowed)
+                .complete_payload_enum(
+                    ty,
+                    variants,
+                    instantiated && niche_allowed,
+                    instantiated && option_niche_allowed,
+                )
                 .map_err(|error| {
                     Diagnostic::new(span, format!("invalid payload enum layout: {error}"))
                 })?;
