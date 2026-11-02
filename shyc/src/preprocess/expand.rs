@@ -441,6 +441,17 @@ fn next_source_token(cursor: &mut FileCursor) -> Option<ExpToken> {
             }
             TokenKind::Eof => return None,
             TokenKind::Punct(punct) if punct == "#" && token.at_line_start => return None,
+            TokenKind::Ident(name)
+                if name == "use"
+                    && super::parse_use_include(
+                        cursor.tokens,
+                        cursor.pos,
+                        super::use_statement_end(cursor.tokens, cursor.pos),
+                    )
+                    .is_some() =>
+            {
+                return None;
+            }
             _ => {
                 let mut token = token.clone();
                 if crossed_newline {

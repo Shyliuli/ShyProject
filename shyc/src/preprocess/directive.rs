@@ -52,7 +52,7 @@ impl Preprocessor<'_> {
         }
     }
 
-    fn handle_include(
+    pub(super) fn handle_include(
         &mut self,
         current: FileId,
         arguments: &[Token],

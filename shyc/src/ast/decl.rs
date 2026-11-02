@@ -36,16 +36,16 @@ pub enum Item {
 
 /// A file-scope `use path::Name;` import.
 ///
-/// The last path segment is the imported name; the segments before it are the
-/// namespace it is written to come from. The node is kept whole so diagnostics
-/// can print the path as written and `--emit=c-header` can leave the import out
-/// of the C view of the unit. Resolution, including whether the name exists,
-/// belongs to semantic analysis; the parser only checks the syntax.
+/// The path names the module and, for a named import, its final symbol.
+/// Preprocessing loads the module header before parsing; the retained node
+/// lets semantic analysis check the name and lets the LSP index the import.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UseDecl {
     pub span: Span,
-    /// The path as written, at least two segments: namespace plus name.
+    /// The path segments before an optional imported name.
     pub path: Vec<Name>,
+    /// Import every declaration from the included module (`::*`).
+    pub glob: bool,
 }
 
 /// A declaration with its specifiers and declarators.

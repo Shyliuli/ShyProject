@@ -243,6 +243,20 @@ impl Collector<'_> {
         }
     }
 
+    /// The final segment of a named `use` may name a type or a value, so it
+    /// resolves against every file-scope kind rather than types alone.
+    fn add_import_ref(&mut self, name: &Name) {
+        let target = self
+            .index
+            .lookup(&name.text)
+            .iter()
+            .copied()
+            .find(|&id| is_import_kind(self.index.symbols[id].kind));
+        if let Some(target) = target {
+            self.add_ref(name, target);
+        }
+    }
+
     fn add_member_ref(&mut self, container: Option<&str>, name: &Name, call: bool) {
         let candidates: Vec<usize> = self
             .index
@@ -610,8 +624,13 @@ impl Collector<'_> {
                     self.pop_frame(declaration.span.end);
                 }
                 ast::Item::Use(declaration) => {
-                    if let Some(last) = declaration.path.last() {
-                        self.add_type_ref(last);
+                    // A named import's last segment is the imported symbol. A
+                    // glob's last segment names the module, so it has no
+                    // definition to navigate to.
+                    if !declaration.glob {
+                        if let Some(last) = declaration.path.last() {
+                            self.add_import_ref(last);
+                        }
                     }
                 }
             }
@@ -1306,6 +1325,22 @@ fn is_type_kind(kind: SymKind) -> bool {
             | SymKind::Trait
             | SymKind::TypeAlias
             | SymKind::TypeParam
+    )
+}
+
+/// Kinds that a `use path::Name;` can import: the compiler's file-scope
+/// typedefs, tags, traits, enumerators, objects, and functions.
+fn is_import_kind(kind: SymKind) -> bool {
+    matches!(
+        kind,
+        SymKind::Struct
+            | SymKind::Union
+            | SymKind::Enum
+            | SymKind::Trait
+            | SymKind::TypeAlias
+            | SymKind::Function
+            | SymKind::Global
+            | SymKind::Variant
     )
 }
 

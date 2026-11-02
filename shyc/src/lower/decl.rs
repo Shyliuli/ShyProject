@@ -44,30 +44,23 @@ impl Lowerer {
         Ok(())
     }
 
-    /// Checks every file-scope `use` import.
-    ///
-    /// ShyC has no module system: headers are included textually, so the set of
-    /// file-scope names is already one flat namespace. An import therefore
-    /// introduces no second name and no symbol; it records that the last path
-    /// segment names a declaration that is really there. The check runs after
-    /// the collection loop, so an import may precede the declaration it names
-    /// and it sees names from included headers as well as from this file.
-    ///
-    /// A name that is not a file-scope typedef, tag, trait, enumerator, generic
-    /// template, object, or function is reported as unknown, and importing the
-    /// same final name twice is a duplicate. The namespace segments themselves
-    /// are not checked against include provenance: headers carry no module path,
-    /// so there is nothing this stage could compare them with.
+    /// Check named imports after preprocessing has loaded their module headers.
+    /// Includes share the ordinary C file-scope namespace; a glob needs no
+    /// additional name check. Repeating a named import in the same source file
+    /// is diagnosed independently of imports in other headers.
     fn check_imports(&self, unit: &ast::TranslationUnit) -> Result<(), Diagnostic> {
-        let mut imported: HashSet<&str> = HashSet::new();
+        let mut imported = HashSet::new();
         for item in &unit.items {
             let ast::Item::Use(import) = item else {
                 continue;
             };
+            if import.glob {
+                continue;
+            }
             let Some(name) = import.path.last() else {
                 continue;
             };
-            if !imported.insert(name.text.as_str()) {
+            if !imported.insert((import.span.file, name.text.as_str())) {
                 return Err(Diagnostic::new(
                     import.span,
                     format!("duplicate import of '{}'", name.text),
@@ -363,16 +356,14 @@ impl Lowerer {
                     (None, Some(trait_impl)) => {
                         self.trait_impl_method_symbol(trait_impl, &target.name, &name)
                     }
-                    (None, None) => {
-                        self.inherent_method_symbol(
-                            &target.name,
-                            &name,
-                            declaration.specs.storage,
-                            declaration.specs.is_shy_fn,
-                            declaration.specs.is_pub,
-                            true,
-                        )
-                    }
+                    (None, None) => self.inherent_method_symbol(
+                        &target.name,
+                        &name,
+                        declaration.specs.storage,
+                        declaration.specs.is_shy_fn,
+                        declaration.specs.is_pub,
+                        true,
+                    ),
                 };
                 (symbol.clone(), symbol)
             }
@@ -505,10 +496,16 @@ impl Lowerer {
         type_name: &str,
     ) -> Result<(), Diagnostic> {
         self.reject_generic_declarator(&prototype.declarator)?;
-        let ResolvedSpecs { ty: base, qualifiers } = self.resolve_specs(&prototype.specs)?;
+        let ResolvedSpecs {
+            ty: base,
+            qualifiers,
+        } = self.resolve_specs(&prototype.specs)?;
         let resolved = self.resolve_declarator(base, qualifiers, &prototype.declarator)?;
         let Some(name) = resolved.name else {
-            return Err(Diagnostic::new(prototype.span, "method declaration needs a name"));
+            return Err(Diagnostic::new(
+                prototype.span,
+                "method declaration needs a name",
+            ));
         };
         if !self.types.is_function(resolved.ty) {
             return Err(Diagnostic::new(
@@ -530,7 +527,10 @@ impl Lowerer {
             .entry(ty)
             .or_insert_with(|| super::ImplInfo::new(type_name.to_string()));
         if info.generic_methods.contains_key(&name)
-            || info.methods.get(&name).is_some_and(|previous| previous.symbol != symbol)
+            || info
+                .methods
+                .get(&name)
+                .is_some_and(|previous| previous.symbol != symbol)
         {
             return Err(Diagnostic::new(
                 prototype.span,
@@ -1430,15 +1430,13 @@ impl FnLower<'_> {
                         "a function cannot have an initializer",
                     ));
                 }
-                let symbol =
-                    self.l
-                        .declared_function_symbol(
-                            &name,
-                            storage,
-                            declaration.specs.is_shy_fn,
-                            declaration.specs.is_pub,
-                            false,
-                        );
+                let symbol = self.l.declared_function_symbol(
+                    &name,
+                    storage,
+                    declaration.specs.is_shy_fn,
+                    declaration.specs.is_pub,
+                    false,
+                );
                 self.l
                     .declare_function_symbol(&name, &symbol, resolved.ty, false, init.span)?;
                 self.bind(

@@ -56,7 +56,7 @@ impl Parser {
                     return Err(Diagnostic::new(
                         name.span,
                         format!("unknown declaration attribute '#[{other}]'"),
-                    ))
+                    ));
                 }
             }
         }
@@ -139,40 +139,36 @@ impl Parser {
         self.at_ident("use") && !self.is_type_name("use")
     }
 
-    /// Parses `use path::Name;` and returns the import.
-    ///
-    /// The supported syntax is deliberately small: a plain path of at least two
-    /// identifiers. Brace lists, globs, `as` renames, and a leading `::` get a
-    /// diagnostic instead of being parsed as a declaration. Resolution of the
-    /// path is semantic analysis' job.
+    /// Parses `use path::Name;` and `use path::*;`. The preprocessor expands the
+    /// module path as an include; semantic analysis checks the imported name.
     fn use_declaration(&mut self) -> Result<UseDecl, Diagnostic> {
         let keyword = self.bump().span;
         let mut path = vec![self.expect_ident()?];
+        let mut glob = false;
         while self.eat_punct("::") {
-            if self.at_punct("{") || self.at_punct("*") {
-                return Err(Diagnostic::new(
-                    self.here(),
-                    "only `use path::name;` is supported; `{...}` and `*` imports are not",
-                ));
+            if self.eat_punct("*") {
+                glob = true;
+                break;
             }
             path.push(self.expect_ident()?);
         }
         if self.at_ident("as") {
             return Err(Diagnostic::new(
                 self.here(),
-                "renaming an import with `as` is not supported; the last path segment is the imported name",
+                "renaming an import with `as` is not supported",
             ));
         }
-        if path.len() < 2 {
+        if path.is_empty() || (!glob && path.len() < 2) {
             return Err(Diagnostic::new(
                 keyword,
-                "an import needs a path with at least two segments, as in `use core::Option;`",
+                "an import needs a module path, as in `use core::option::Option;`",
             ));
         }
         let semicolon = self.expect_punct(";")?;
         Ok(UseDecl {
             span: keyword.join(semicolon),
             path,
+            glob,
         })
     }
 

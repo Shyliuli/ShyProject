@@ -180,6 +180,16 @@ fn include_dirs(path: &Path, root: Option<&Path>, extra: &[PathBuf]) -> Vec<Path
         push_dir(&mut dirs, &dir);
     }
 
+    if let Some(root) = root {
+        push_dir(&mut dirs, root);
+    }
+
+    // `crate::` imports are rooted at the repository, not at whichever
+    // workspace folder the editor happened to open.
+    if let Some(root) = repo_root(path) {
+        push_dir(&mut dirs, &root);
+    }
+
     let mut ancestors: Vec<&Path> = path.ancestors().skip(1).collect();
     if let Some(root) = root {
         if !ancestors.contains(&root) {
@@ -203,4 +213,15 @@ fn push_dir(dirs: &mut Vec<PathBuf>, dir: &Path) {
     if !dirs.contains(&dir) {
         dirs.push(dir);
     }
+}
+
+/// The repository that owns `path`: the nearest ancestor holding `.git` or a
+/// `Cargo.toml`. This is how the compiler resolves `crate::` imports too.
+fn repo_root(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .find(|directory| {
+            directory.join(".git").exists() || directory.join("Cargo.toml").is_file()
+        })
+        .map(Path::to_path_buf)
 }

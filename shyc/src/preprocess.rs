@@ -340,6 +340,82 @@ impl Preprocessor<'_> {
                 }
             }
 
+            // `use module::Name;` is both an import declaration for semantic
+            // checking and an include of the module file before parsing.
+            if matches!(&token.kind, TokenKind::Ident(name) if name == "use") {
+                let end = use_statement_end(tokens, i);
+                if conditional_active(&conditions)
+                    && let Some(import) = parse_use_include(tokens, i, end)
+                {
+                    let source_path = if import.quoted {
+                        let current_path = canonical_key(&self.sources.file(file).path);
+                        current_path
+                            .parent()
+                            .unwrap_or(Path::new("."))
+                            .join(&import.source_path)
+                    } else if import.crate_root {
+                        let input = canonical_key(&self.sources.file(self.root).path);
+                        let root = input.ancestors().skip(1).find(|directory| {
+                            directory.join(".git").exists()
+                                || directory.join("Cargo.toml").is_file()
+                        });
+                        if let Some(root) = root {
+                            module_header(root.join(&import.source_path))
+                        } else if let Some(path) = self
+                            .options
+                            .include_dirs
+                            .iter()
+                            .map(|root| module_header(root.join(&import.source_path)))
+                            .find(|path| path.is_file())
+                        {
+                            canonical_key(&path)
+                        } else {
+                            input
+                                .parent()
+                                .unwrap_or(Path::new("."))
+                                .join(&import.source_path)
+                        }
+                    } else {
+                        // Module paths are include-root-relative, not relative
+                        // to an arbitrary file beside the importing source.
+                        let path = self
+                            .options
+                            .include_dirs
+                            .iter()
+                            .map(|root| module_header(root.join(&import.source_path)))
+                            .find(|path| path.is_file());
+                        path.map(|path| canonical_key(&path)).ok_or_else(|| {
+                            Diagnostic::new(
+                                token.span,
+                                format!("use module not found: '{}'", import.source_path),
+                            )
+                        })?
+                    };
+                    let source_path = module_header(source_path);
+                    let include_token = Token {
+                        kind: TokenKind::StringLiteral {
+                            prefix: String::new(),
+                            raw: source_path.to_string_lossy().into_owned(),
+                        },
+                        span: token.span,
+                        at_line_start: false,
+                        leading_space: false,
+                    };
+                    // Save the slot before recursion: included headers can
+                    // contain their own imports, but only root includes belong
+                    // in the generated C header.
+                    let include_index = self.includes.len();
+                    self.handle_include(file, &[include_token], token.span)?;
+                    if file == self.root {
+                        self.includes[include_index].path = import.header_path;
+                        self.includes[include_index].quoted = import.quoted || import.crate_root;
+                    }
+                    self.output.extend(tokens[i..end].iter().cloned());
+                    i = end;
+                    continue;
+                }
+            }
+
             if is_hash(token) && token.at_line_start {
                 let active = conditional_active(&conditions);
                 if is_attribute_start(tokens, i) {
@@ -358,7 +434,10 @@ impl Preprocessor<'_> {
                 }
 
                 // `#[ident]`：声明级属性（`#[result_niche]`），交给 parser 处理。
-                if tokens.get(i + 1).is_some_and(|token| macros::is_punct(token, "[")) {
+                if tokens
+                    .get(i + 1)
+                    .is_some_and(|token| macros::is_punct(token, "["))
+                {
                     let end = line_end(tokens, i);
                     let active = conditional_active(&conditions);
                     if active {
@@ -608,6 +687,107 @@ fn line_end(tokens: &[Token], start: usize) -> usize {
         }
     }
     tokens.len()
+}
+
+/// Prefer native declarations, but permit ordinary C API headers outside c/.
+fn module_header(path: PathBuf) -> PathBuf {
+    if path.is_file() || path.extension().is_some_and(|ext| ext == "h") {
+        path
+    } else {
+        let c_header = path.with_extension("h");
+        if c_header.is_file() { c_header } else { path }
+    }
+}
+
+struct UseInclude {
+    source_path: String,
+    header_path: String,
+    quoted: bool,
+    crate_root: bool,
+}
+
+/// Convert a file-scope `use` line to the module file it includes.
+///
+/// `core::option::Option` and `core::option::*` both load `core/option.shyh`;
+/// `c::stdio::*` loads the C view `c/stdio.h`. `crate` paths are rooted at an
+/// include directory, while `self` paths are quoted and relative to this file.
+fn use_statement_end(tokens: &[Token], start: usize) -> usize {
+    (start..tokens.len())
+        .find(|&index| {
+            matches!(tokens[index].kind, TokenKind::Eof)
+                || macros::is_punct(&tokens[index], ";")
+                || macros::is_punct(&tokens[index], "{")
+        })
+        .map_or(tokens.len(), |index| index + 1)
+}
+
+fn parse_use_include(tokens: &[Token], start: usize, end: usize) -> Option<UseInclude> {
+    let tokens: Vec<&Token> = tokens[start..end]
+        .iter()
+        .filter(|token| !matches!(token.kind, TokenKind::Newline))
+        .collect();
+    let end = tokens.len();
+    let mut index = 1;
+    let mut segments = Vec::new();
+    let TokenKind::Ident(first) = &tokens.get(index)?.kind else {
+        return None;
+    };
+    segments.push(first.clone());
+    index += 1;
+    let mut glob = false;
+    while index < end && macros::is_punct(&tokens[index], "::") {
+        index += 1;
+        if index < end && macros::is_punct(&tokens[index], "*") {
+            glob = true;
+            index += 1;
+            break;
+        }
+        let TokenKind::Ident(segment) = &tokens.get(index)?.kind else {
+            return None;
+        };
+        segments.push(segment.clone());
+        index += 1;
+    }
+    if !glob {
+        // A named import's last segment is the symbol; the rest is its module.
+        if segments.len() < 2 {
+            return None;
+        }
+        segments.pop();
+    }
+    if index >= end || !macros::is_punct(&tokens[index], ";") || index + 1 != end {
+        return None;
+    }
+
+    let quoted = segments.first().is_some_and(|segment| segment == "self");
+    let crate_root = segments.first().is_some_and(|segment| segment == "crate");
+    if segments
+        .first()
+        .is_some_and(|segment| segment == "self" || segment == "crate")
+    {
+        segments.remove(0);
+    }
+    if segments.is_empty() {
+        return None;
+    }
+    let is_c = segments.first().is_some_and(|segment| segment == "c");
+    let base = segments.join("/");
+    let source_path = if is_c {
+        format!("{base}.h")
+    } else {
+        format!("{base}.shyh")
+    };
+    let header_path = if is_c {
+        source_path.clone()
+    } else {
+        format!("{base}.h")
+    };
+    Some(UseInclude {
+        source_path,
+        header_path,
+        quoted,
+        crate_root,
+    })
 }
 
 /// Identity for include files: a canonical path when the file exists.

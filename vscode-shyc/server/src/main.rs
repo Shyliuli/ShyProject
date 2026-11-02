@@ -777,8 +777,8 @@ fn completion_context(text: &str, offset: usize) -> CompletionContext {
     let prefix = before[word_start..].to_string();
     let head = before[..word_start].trim_end();
 
-    if let Some(position) = head.rfind("::") {
-        let qualifier = strip_generic_arguments(head[..position].trim_end());
+    if let Some(qualifier) = head.strip_suffix("::") {
+        let qualifier = strip_generic_arguments(qualifier.trim_end());
         return CompletionContext {
             qualifier: Some(qualifier),
             receiver: None,

@@ -227,6 +227,36 @@ static fn local(void) -> int {   // 只在本文件
 A definition that follows an `extern` declaration adopts the declared symbol, so
 the declaration is the one place that decides the name.
 
+## Imports
+
+A file-scope `use` loads a module header and imports declarations into the
+translation unit's symbol table:
+
+```c
+use core::option::Option;
+use c::stdio::*;
+
+int main(void) {
+  Option<int> value = Option<int>::Some(1);
+  printf("%d\n", value.payload.Some);
+  return 0;
+}
+```
+
+A named import such as `use core::option::Option;` loads
+`core/option.shyh` and checks the named declaration. A glob imports the
+module's file-scope declarations. `c::` paths resolve to C-compatible `.h`
+headers; `core::`, `alloc::`, and `std::` paths resolve to `.shyh` declarations.
+`crate::` paths resolve from the nearest ancestor containing `.git` or
+`Cargo.toml`; outside a repository they use a matching include root (`-I`),
+then the main source directory. `self::` paths resolve relative to the
+importing source file. C header generation
+records the corresponding `.h` include for ShyC modules.
+
+Use expansion happens in preprocessing, before parsing and lowering, so LSP
+analysis sees the included declarations and diagnostics. `use` remains in the
+syntax tree for the symbol index, but contributes no runtime symbol or storage.
+
 ## Slices and library types
 
 A slice is a standard-library transparent structure containing a pointer and a

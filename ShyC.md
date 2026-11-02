@@ -481,15 +481,12 @@ that local value.
 
 ### Imports
 
-A file-scope `use` names the namespace a declaration comes from and imports its
-last segment:
+A file-scope `use` loads a module header and makes its declarations available
+without repeating the module path at each use:
 
 ```c
-#include <core/option.shyh>
-#include <stdio.shyh>
-
-use core::Option;
-use c::stdio::printf;
+use core::option::Option;
+use c::stdio::*;
 
 int main(void) {
   Option<int> value = Option<int>::Some(1);
@@ -498,14 +495,22 @@ int main(void) {
 }
 ```
 
-An import is a compile-time check rather than a second declaration. The last
-segment must already name a file-scope typedef, tag, trait, enumerator, generic
-template, object, or function in the translation unit, from this file or an
-included header, and it keeps its ordinary meaning. The earlier segments are
-written for the reader and are not resolved against the include path yet, so
-the import only rejects an unknown final name and a duplicate import of the same
-name. Imports add no symbol, storage, or ABI surface; `--emit=c-header` and
-`--emit=c` leave them out.
+A named path such as `use core::option::Option;` includes
+`core/option.shyh` and makes `Option` available without a `core::option::`
+prefix. A glob such as `use core::option::*;` includes the same module and
+makes its declarations available. `use c::stdio::*;` includes the C view,
+`c/stdio.h`. The compiler resolves `crate::include::api::*` from the nearest ancestor
+containing `.git` or `Cargo.toml`. Outside a repository it falls back to a
+matching `-I` root or the main source directory, while
+`self::include::api::*` is resolved relative to the importing file. ShyC module
+imports load `.shyh` declarations, and their C-header output records the
+matching `.h` include. Include expansion happens before parsing, lowering and
+symbol indexing, so the LSP sees the imported declarations too.
+
+A named import checks that its final name exists in the included file-scope
+symbol table; a glob imports the module's file-scope declarations. `use`
+contributes no runtime symbol or storage; the generated C header carries the
+resolved include.
 
 ## Floating Point
 

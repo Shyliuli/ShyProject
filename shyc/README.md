@@ -366,17 +366,27 @@ Option and on nonzero for Result. Generated C headers and wrappers use the
 same pointer/integer types, with no extra tag or union. Global initialisers
 keep the payload-enum restriction.
 
-A file-scope `use` writes the namespace a name comes from and imports its last
-segment: `use core::Option;` and `use c::stdio::printf;` make `Option` and
-`printf` available under exactly the names the includes already declared. An
-import is a compile-time check, not a new declaration: it emits no symbol, adds
-no module or runtime object, and changes no C ABI. The last segment must be a
-visible file-scope typedef, tag, trait, enumerator, generic template, object, or
-function, otherwise the import is rejected; importing one name twice is a
-duplicate. Since headers are included textually, the namespace segments are
-descriptive and are not resolved against the include path yet. `use` is a soft
-keyword, so C code that uses `use` as an ordinary identifier still parses, and
-`--emit=c-header` and `--emit=c` omit imports from the C view of the unit.
+A file-scope `use` is an include plus a symbol-table import. It expands the
+module header before parsing, so declarations are available without repeating
+the module path:
+
+```c
+use core::option::Option;
+use core::option::*;
+use c::stdio::*;
+use crate::include::api::*;
+use self::include::local::*;
+```
+
+A named path such as `use core::option::Option;` includes
+`core/option.shyh` and checks that `Option` is declared. A glob includes the
+module and imports its file-scope declarations. The `c::` view resolves to a
+plain `.h` (for example, `c/stdio.h`); other modules resolve to `.shyh`, while
+generated C headers record the corresponding `.h` include. `crate::` paths start at the nearest repository/manifest ancestor, falling
+back to matching `-I` roots or the main source directory; `self::` paths are
+relative to the importing file. Included declarations feed the same parser, lowerer, symbol
+index, and LSP analysis as textual includes. `use` itself emits no runtime
+symbol, and generated C output carries the resolved header include.
 
 Floating point on the Shy target needs the runtime object linked in; build it
 once with the existing toolchain:
