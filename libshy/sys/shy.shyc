@@ -1,3 +1,4 @@
+// #![disable_default_static]
 // The platform calls of <unistd.h> and <fcntl.h> for a bare Shy machine.
 // libshy.shyc builds the whole C library on these; ShyOS replaces this file
 // with system calls.

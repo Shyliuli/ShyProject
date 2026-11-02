@@ -203,6 +203,14 @@ impl Lexer<'_> {
                     self.leading_space = true;
                 }
                 Some(b'/') if self.peek_at(1) == Some(b'/') => {
+                    // `// #![...]` 写在注释里的 Shy 属性：C 兼容的源码保持纯
+                    // C 语法，注释对 C 工具无害，这里把 `#` 之前的注释前缀
+                    // 让出去，让属性按普通 token 继续走预处理器。
+                    if let Some(offset) = self.comment_attribute_offset() {
+                        self.pos += offset;
+                        self.leading_space = true;
+                        continue;
+                    }
                     self.pos += 2;
                     while self.peek().is_some_and(|byte| byte != b'\n') {
                         self.pos += 1;
@@ -232,6 +240,28 @@ impl Lexer<'_> {
                 _ => return Ok(()),
             }
         }
+    }
+
+    /// `Some(offset)` when the `//` at `pos` is a commented Shy attribute on a
+    /// line that has no token yet: `// #![no_main]` and friends.
+    ///
+    /// `offset` is where the `#` starts, so the caller can rewind to it and let
+    /// the ordinary tokenizer read the attribute.
+    fn comment_attribute_offset(&self) -> Option<usize> {
+        if !self.at_line_start {
+            return None;
+        }
+        let mut cursor = self.pos + 2;
+        while matches!(self.bytes.get(cursor), Some(b' ' | b'\t' | b'\r')) {
+            cursor += 1;
+        }
+        if self.bytes.get(cursor) != Some(&b'#') || self.bytes.get(cursor + 1) != Some(&b'!') {
+            return None;
+        }
+        if self.bytes.get(cursor + 2) != Some(&b'[') {
+            return None;
+        }
+        Some(cursor - self.pos)
     }
 
     /// Lexes one token that is not a newline. `pos` is on a non-trivia byte.

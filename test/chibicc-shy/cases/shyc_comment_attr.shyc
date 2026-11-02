@@ -1,0 +1,11 @@
+// #![disable_default_static]
+// C 写法的文件只能在注释里写文件级标注：C 工具看到的是普通注释。
+// 这个文件因此按 C 的链接默认来：不带 static 的函数对外可见。
+
+fn exported_from_c_style(void) -> int {
+    return 0;
+}
+
+int main(void) {
+    return exported_from_c_style();
+}

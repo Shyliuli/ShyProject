@@ -429,7 +429,19 @@ definition in the same unit adopts the prototype's symbol.
 `#![disable_default_static]` restores the C default for one file, so only
 `static` gives a file-local symbol and `pub` becomes an empty token. It is the
 linkage twin of `#![disable_rustic_mut]`, and it is what a C-compatible
-library wants:
+library wants.
+
+A file that must stay valid C can write the attribute inside a line comment —
+`// #![disable_default_static]` on its own line, optionally indented. C tools
+see an ordinary comment, and shyc still reads it:
+
+```c
+// #![disable_default_static]
+int fputs(const char *s, FILE *f) { /* C 写法的实现 */ }
+```
+
+The C-compatible layer of a library uses exactly this; the ShyC-style layers
+write `pub` on what they export instead:
 
 ```c
 #![disable_default_static]   // 这个文件按 C 的默认来

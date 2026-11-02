@@ -46,3 +46,4 @@ run_case shyc_asm_and_defer.shyc 0
 run_case shyc_small_sret_raii.shyc 0
 run_case shyc_default_static.shyc 0 test/chibicc-shy/cases/shyc_default_static_lib.shyc
 run_case shyc_pub.shyc 0 test/chibicc-shy/cases/shyc_pub_lib.shyc
+run_case shyc_comment_attr.shyc 0 test/chibicc-shy/cases/shyc_pub_lib.shyc

@@ -4,7 +4,7 @@
 #include <std/io.shyh>
 #include <std/fs.shyh>
 
-fn read_to_string(FILE *f) -> String {
+pub fn read_to_string(FILE *f) -> String {
     let mut s = String::new();
     let mut c = fgetc(f);
     while (c != EOF) {
@@ -14,7 +14,7 @@ fn read_to_string(FILE *f) -> String {
     return s;
 }
 
-fn read_file(const char *path) -> Option<String> {
+pub fn read_file(const char *path) -> Option<String> {
     let f = fopen(path, "r");
     if (!f) {
         return Option<String>::None;
@@ -24,7 +24,7 @@ fn read_file(const char *path) -> Option<String> {
     return Option<String>::Some(s);
 }
 
-fn write_file(const char *path, Str text) -> int {
+pub fn write_file(const char *path, Str text) -> int {
     let f = fopen(path, "w");
     if (!f) {
         return 0;

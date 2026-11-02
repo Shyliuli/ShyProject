@@ -159,7 +159,13 @@ definition in the same unit adopts the prototype's symbol.
 `static` gives a file-local symbol and `pub` becomes an empty token. It is the
 linkage twin of `#![disable_rustic_mut]`: nothing about the ABI, object layout,
 or calling convention changes, and a C-compatible library is expected to carry
-it.
+it. A file that must stay valid C writes it inside a comment —
+`// #![disable_default_static]` — which C tools ignore and shyc still reads.
+
+Layers are expected to pick one style and keep it: a C-compatible layer keeps C
+declarations plus the commented attribute, while a ShyC layer writes `pub` on
+what it exports and leaves everything else file-local. Generated C headers stay
+plain C: they carry neither `pub` nor `mut`.
 
 ```c
 // bare Shy: 默认私有

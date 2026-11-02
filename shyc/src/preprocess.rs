@@ -320,6 +320,26 @@ impl Preprocessor<'_> {
                 _ => {}
             }
 
+            // `// #![...]`：C 文件里没法写裸属性，注释形式对 C 工具完全无害，
+            // 而 shyc 照样认。行首、`//`、然后是 `#![`（词法器不产生空格 token）。
+            if token.at_line_start && macros::is_punct(token, "/") {
+                if let Some(hash) = comment_attribute_hash(tokens, i) {
+                    let end = line_end(tokens, hash);
+                    let active = conditional_active(&conditions);
+                    if active {
+                        if !root {
+                            return Err(Diagnostic::new(
+                                tokens[hash].span,
+                                "Shy #![...] attributes are only allowed in the main input file",
+                            ));
+                        }
+                        self.handle_attribute(&tokens[hash..end], tokens[hash].span)?;
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+
             if is_hash(token) && token.at_line_start {
                 let active = conditional_active(&conditions);
                 if is_attribute_start(tokens, i) {
@@ -537,6 +557,24 @@ fn conditional_active(conditions: &[Conditional]) -> bool {
 
 fn is_hash(token: &Token) -> bool {
     macros::is_punct(token, "#")
+}
+
+/// `//` 注释里写属性的起始位置：`/` `/` 之后任意个空格，然后 `#![`。
+///
+/// 返回 `#` 的下标。这样 C 兼容的源码可以保持纯 C 语法，文件级标注只存在于
+/// 注释里，C 编译器看到的就是一行普通注释。
+fn comment_attribute_hash(tokens: &[Token], index: usize) -> Option<usize> {
+    if !macros::is_punct(tokens.get(index + 1)?, "/") {
+        return None;
+    }
+    let cursor = index + 2;
+    if !is_hash(tokens.get(cursor)?) {
+        return None;
+    }
+    if !is_attribute_start(tokens, cursor) {
+        return None;
+    }
+    Some(cursor)
 }
 
 fn is_attribute_start(tokens: &[Token], index: usize) -> bool {
