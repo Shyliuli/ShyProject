@@ -318,6 +318,22 @@ impl Parser {
     }
 
     fn enum_spec(&mut self) -> Result<EnumSpec, Diagnostic> {
+        // `#[result_niche]` 写在声明处，说明这个模板想用零值 niche 布局。
+        let mut result_niche = false;
+        while self.at_punct("#") {
+            self.bump();
+            self.expect_punct("[")?;
+            let name = self.expect_ident()?;
+            self.expect_punct("]")?;
+            if name.text == "result_niche" {
+                result_niche = true;
+            } else {
+                return Err(Diagnostic::new(
+                    name.span,
+                    format!("unknown enum attribute '#[{}]'", name.text),
+                ));
+            }
+        }
         let start = self.bump().span;
         let underlying = if self.eat_punct("(") {
             let type_name = self.type_name()?;
@@ -411,6 +427,7 @@ impl Parser {
         let (generics, enumerators) = parsed?;
 
         Ok(EnumSpec {
+            result_niche,
             span: self.finish(start),
             underlying,
             tag,

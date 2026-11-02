@@ -357,6 +357,17 @@ impl Preprocessor<'_> {
                     continue;
                 }
 
+                // `#[ident]`：声明级属性（`#[result_niche]`），交给 parser 处理。
+                if tokens.get(i + 1).is_some_and(|token| macros::is_punct(token, "[")) {
+                    let end = line_end(tokens, i);
+                    let active = conditional_active(&conditions);
+                    if active {
+                        self.output.extend(tokens[i..end].iter().cloned());
+                    }
+                    i = end;
+                    continue;
+                }
+
                 let Some(name_token) = tokens.get(i + 1) else {
                     break;
                 };

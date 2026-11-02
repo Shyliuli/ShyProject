@@ -255,10 +255,16 @@ impl Lexer<'_> {
         while matches!(self.bytes.get(cursor), Some(b' ' | b'\t' | b'\r')) {
             cursor += 1;
         }
-        if self.bytes.get(cursor) != Some(&b'#') || self.bytes.get(cursor + 1) != Some(&b'!') {
+        if self.bytes.get(cursor) != Some(&b'#') {
             return None;
         }
-        if self.bytes.get(cursor + 2) != Some(&b'[') {
+        // 两种形状都认：文件级的 `#![...]`，以及声明级的 `#[...]`。
+        let bracket = if self.bytes.get(cursor + 1) == Some(&b'!') {
+            cursor + 2
+        } else {
+            cursor + 1
+        };
+        if self.bytes.get(bracket) != Some(&b'[') {
             return None;
         }
         Some(cursor - self.pos)

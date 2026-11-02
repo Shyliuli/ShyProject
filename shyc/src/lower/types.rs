@@ -736,7 +736,14 @@ impl Lowerer {
                 Diagnostic::new(template.spec.span, format!("invalid enum layout: {error}"))
             })?;
             self.enum_instances.insert(key.clone(), ty);
-            self.define_enum(ty, underlying, enumerators, template.spec.span, true)?;
+            self.define_enum(
+                ty,
+                underlying,
+                enumerators,
+                template.spec.span,
+                true,
+                template.spec.result_niche,
+            )?;
             Ok::<TypeId, Diagnostic>(ty)
         })();
         self.pop_type_scope();
@@ -885,7 +892,7 @@ impl Lowerer {
             }
             self.declare_tag(&tag.text, ty, spec.span)?;
         }
-        self.define_enum(ty, underlying, enumerators, spec.span, false)
+        self.define_enum(ty, underlying, enumerators, spec.span, false, spec.result_niche)
     }
 
     /// Defines an enum's variants and constants.
@@ -903,6 +910,7 @@ impl Lowerer {
         enumerators: &[ast::Enumerator],
         span: Span,
         instantiated: bool,
+        niche_allowed: bool,
     ) -> Result<TypeId, Diagnostic> {
         let (min, max, bits, unsigned) = self.enum_value_range(underlying);
         let payload_enum = self.types.is_payload_enum(ty);
@@ -1000,7 +1008,7 @@ impl Lowerer {
         }
         if payload_enum {
             self.types
-                .complete_payload_enum(ty, variants, instantiated)
+                .complete_payload_enum(ty, variants, instantiated && niche_allowed)
                 .map_err(|error| {
                     Diagnostic::new(span, format!("invalid payload enum layout: {error}"))
                 })?;

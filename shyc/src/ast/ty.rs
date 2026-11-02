@@ -229,6 +229,9 @@ pub struct EnumSpec {
     pub span: Span,
     pub underlying: Option<TypeName>,
     pub tag: Option<Name>,
+    /// `#[result_niche]`: this template may use the `Result<void, E>` zero-value
+    /// layout when an instance's shape allows it.
+    pub result_niche: bool,
     /// Generic parameters of an enum definition, empty if none.
     pub generics: Vec<GenericParam>,
     pub enumerators: Option<Vec<Enumerator>>,
