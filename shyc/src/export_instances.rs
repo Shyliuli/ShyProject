@@ -110,22 +110,9 @@ pub struct Table {
     pub entries: Vec<Entry>,
 }
 
-/// An instance-level marker saying which niche layout the instance uses.
-///
-/// The marker keeps the rule out of the compiler: `#[result_niche]` asks for the
-/// `Result<void, E>` zero-value form, `#[option_niche]` for the `Option<*T>`
-/// null-pointer form. The shape still has to fit, or the table is rejected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Niche {
-    Result,
-    Option,
-}
-
 /// One generic instantiation the C boundary exposes under `alias`.
 #[derive(Debug)]
 pub struct Entry {
-    /// An instance-level niche marker: `#[result_niche]` or `#[option_niche]`.
-    pub niche: Option<Niche>,
     /// The generic template name (`Vec`, `identity`, ...).
     pub name: Name,
     /// Concrete arguments, parsed like a use site writes them.
@@ -133,50 +120,6 @@ pub struct Entry {
     /// The C name the instance is exported under.
     pub alias: String,
     pub span: Span,
-}
-
-/// Parses an optional `#[result_niche]` or `#[option_niche]` marker.
-fn parse_niche_marker(
-    tokens: &[&Token],
-    index: &mut usize,
-) -> Result<Option<Niche>, Diagnostic> {
-    if !is_punct(tokens[*index], "#") {
-        return Ok(None);
-    }
-    let start = tokens[*index].span;
-    *index += 1;
-    if *index >= tokens.len() || !is_punct(tokens[*index], "[") {
-        return Err(Diagnostic::new(start, "expected '[' after '#'"));
-    }
-    *index += 1;
-    let name = token_ident(tokens[*index])
-        .ok_or_else(|| Diagnostic::new(tokens[*index].span, "expected a niche marker name"))?;
-    let niche = match name {
-        "result_niche" => Niche::Result,
-        // 布局还没实现：`Option<*T>` 目前仍是 tag + payload，C 侧不能凭空改。
-        // 与其静默忽略标记，不如直接报出来。
-        "option_niche" => {
-            return Err(Diagnostic::new(
-                tokens[*index].span,
-                "#[option_niche] is not implemented yet: Option<*T> still uses the tagged layout",
-            ))
-        }
-        other => {
-            return Err(Diagnostic::new(
-                tokens[*index].span,
-                format!("unknown instance marker '#[{other}]'"),
-            ))
-        }
-    };
-    *index += 1;
-    if *index >= tokens.len() || !is_punct(tokens[*index], "]") {
-        return Err(Diagnostic::new(
-            tokens[*index - 1].span,
-            "expected ']' after the niche marker",
-        ));
-    }
-    *index += 1;
-    Ok(Some(niche))
 }
 
 /// Parses an instance table from a lexed token stream.
@@ -200,10 +143,6 @@ pub fn parse_table(tokens: &[Token], names: &TypeNames) -> Result<Table, Diagnos
             continue;
         }
         let start = tokens[index].span;
-        let niche = match parse_niche_marker(&tokens, &mut index) {
-            Ok(niche) => niche,
-            Err(error) => return Err(error),
-        };
         if let Some(error) = reject_qualified_entry(&tokens, index) {
             return Err(Diagnostic::new(start, error));
         }
@@ -284,7 +223,6 @@ pub fn parse_table(tokens: &[Token], names: &TypeNames) -> Result<Table, Diagnos
             ));
         }
         entries.push(Entry {
-            niche,
             name,
             args,
             alias: alias.to_string(),

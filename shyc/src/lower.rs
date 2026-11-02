@@ -61,8 +61,6 @@ pub struct Lowered {
 /// One instance the explicit table asks the C boundary to expose.
 #[derive(Clone, Debug)]
 pub struct ExportRequest {
-    /// An instance-level niche marker, when the table asked for one.
-    pub niche: Option<crate::export_instances::Niche>,
     /// The generic template name.
     pub name: ast::Name,
     /// Concrete type and `const` arguments, resolved in file scope.
