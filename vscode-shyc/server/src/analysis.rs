@@ -25,6 +25,9 @@ use crate::text::{self, LineIndex};
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub include_dirs: Vec<PathBuf>,
+    /// Root of ShyProject/libshy. Configured separately for users editing an
+    /// application repository that is not nested inside ShyProject.
+    pub libshy_path: Option<PathBuf>,
     pub defines: Vec<(String, String)>,
     pub diagnostics: bool,
 }
@@ -33,6 +36,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             include_dirs: Vec::new(),
+            libshy_path: None,
             defines: Vec::new(),
             diagnostics: true,
         }
@@ -71,7 +75,18 @@ impl Analysis {
             Vec::new()
         });
 
-        let include_dirs = include_dirs(&path, root, &settings.include_dirs);
+        let mut include_dirs = include_dirs(&path, root, &settings.include_dirs);
+        if let Some(libshy) = settings.libshy_path.as_deref() {
+            // Accept the repository root as well as the library directory.
+            let libshy = if libshy.join("libshy").is_dir() {
+                libshy.join("libshy")
+            } else {
+                libshy.to_path_buf()
+            };
+            push_dir(&mut include_dirs, &libshy);
+            push_dir(&mut include_dirs, &libshy.join("c"));
+            push_dir(&mut include_dirs, &libshy.join("include"));
+        }
         let options = preprocess::Options {
             include_dirs,
             defines: settings.defines.clone(),

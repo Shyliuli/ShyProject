@@ -138,6 +138,11 @@
           "default": "",
           "description": "Path to the shyc-lsp binary. Empty means search target/ and the extension's server/ directory."
         },
+        "shyc.libshyPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to ShyProject's libshy directory (or the ShyProject root). Resolves `use core::...` and `use c::...` imports. Falls back to ~/.shycserver/config.toml."
+        },
         "shyc.includeDirs": {
           "type": "array",
           "items": {

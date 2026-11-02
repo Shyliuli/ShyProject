@@ -194,16 +194,7 @@ impl LanguageServer for Backend {
             .initialization_options
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default();
-        *self.settings.lock().unwrap() = Settings {
-            include_dirs: options
-                .include_dirs
-                .unwrap_or_default()
-                .into_iter()
-                .map(PathBuf::from)
-                .collect(),
-            defines: parse_defines(options.defines.unwrap_or_default()),
-            diagnostics: options.diagnostics_enabled.unwrap_or(true),
-        };
+        *self.settings.lock().unwrap() = options.into_settings(file_settings());
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -253,6 +244,13 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "ShyC language server ready")
             .await;
+        let libshy = self.settings.lock().unwrap().libshy_path.clone();
+        let message = match libshy {
+            Some(path) => format!("libshy: {}", path.display()),
+            None => "libshy: not configured (set shyc.libshyPath or ~/.shycserver/config.toml)"
+                .to_string(),
+        };
+        self.client.log_message(MessageType::INFO, message).await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -430,14 +428,135 @@ impl LanguageServer for Backend {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InitOptions {
+    libshy_path: Option<String>,
     include_dirs: Option<Vec<String>>,
     defines: Option<Vec<String>>,
     diagnostics_enabled: Option<bool>,
 }
 
+impl InitOptions {
+    /// The workspace options win, but an empty value falls back to the user
+    /// configuration file so the editor only has to configure a workspace once.
+    fn into_settings(self, base: Settings) -> Settings {
+        Settings {
+            libshy_path: self
+                .libshy_path
+                .map(PathBuf::from)
+                .filter(|path| !path.as_os_str().is_empty())
+                .or(base.libshy_path),
+            include_dirs: non_empty_paths(self.include_dirs).unwrap_or(base.include_dirs),
+            defines: non_empty_defines(self.defines).unwrap_or(base.defines),
+            diagnostics: self.diagnostics_enabled.unwrap_or(base.diagnostics),
+        }
+    }
+}
+
+fn non_empty_paths(values: Option<Vec<String>>) -> Option<Vec<PathBuf>> {
+    let values: Vec<PathBuf> = values
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| PathBuf::from(value.trim()))
+        .filter(|value| !value.as_os_str().is_empty())
+        .collect();
+    (!values.is_empty()).then_some(values)
+}
+
+fn non_empty_defines(values: Option<Vec<String>>) -> Option<Vec<(String, String)>> {
+    let values = parse_defines(values.unwrap_or_default());
+    (!values.is_empty()).then_some(values)
+}
+
+/// `~/.shycserver/config.toml`, shared by every workspace this editor opens.
+fn config_file() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".shycserver").join("config.toml"))
+}
+
+/// Reads the user configuration; a missing or unreadable file means defaults.
+///
+/// The file is a flat subset of TOML: `libshy_path = "/path"`, and
+/// `include_dirs`/`defines` arrays. `#` starts a comment outside a string.
+fn file_settings() -> Settings {
+    let Some(path) = config_file() else {
+        return Settings::default();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Settings::default();
+    };
+    let values = parse_config(&text);
+    Settings {
+        libshy_path: values
+            .get("libshy_path")
+            .and_then(|values| values.first())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        include_dirs: values
+            .get("include_dirs")
+            .map(|values| values.iter().map(PathBuf::from).collect())
+            .unwrap_or_default(),
+        defines: values
+            .get("defines")
+            .map(|values| parse_defines(values.clone()))
+            .unwrap_or_default(),
+        diagnostics: values
+            .get("diagnostics")
+            .and_then(|values| values.first())
+            .map(|value| value != "false")
+            .unwrap_or(true),
+    }
+}
+
+/// Parses the flat `key = value` / `key = ["a", "b"]` form used above.
+fn parse_config(text: &str) -> std::collections::HashMap<String, Vec<String>> {
+    let mut values = std::collections::HashMap::new();
+    for line in text.lines() {
+        let line = strip_comment(line).trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        let entries = if value.starts_with('[') {
+            value
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+                .map(unquote)
+                .filter(|entry| !entry.is_empty())
+                .collect()
+        } else {
+            let entry = unquote(value);
+            if entry.is_empty() {
+                Vec::new()
+            } else {
+                vec![entry]
+            }
+        };
+        values.insert(key.trim().to_string(), entries);
+    }
+    values
+}
+
+/// Cuts a `#` comment, ignoring `#` characters inside a quoted string.
+fn strip_comment(line: &str) -> &str {
+    let mut quoted = false;
+    for (index, character) in line.char_indices() {
+        match character {
+            '"' => quoted = !quoted,
+            '#' if !quoted => return &line[..index],
+            _ => {}
+        }
+    }
+    line
+}
+
+fn unquote(value: &str) -> String {
+    value.trim().trim_matches(|character| character == '"' || character == '\'').to_string()
+}
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsPayload {
+    libshy_path: Option<String>,
     include_dirs: Option<Vec<String>>,
     defines: Option<Vec<String>>,
     diagnostics_enabled: Option<bool>,
@@ -456,15 +575,16 @@ fn parse_settings(value: &serde_json::Value) -> Option<Settings> {
     } else {
         serde_json::from_value::<SettingsPayload>(value.clone()).ok()?
     };
+    let base = file_settings();
     Some(Settings {
-        include_dirs: payload
-            .include_dirs
-            .unwrap_or_default()
-            .into_iter()
+        libshy_path: payload
+            .libshy_path
             .map(PathBuf::from)
-            .collect(),
-        defines: parse_defines(payload.defines.unwrap_or_default()),
-        diagnostics: payload.diagnostics_enabled.unwrap_or(true),
+            .filter(|path| !path.as_os_str().is_empty())
+            .or(base.libshy_path),
+        include_dirs: non_empty_paths(payload.include_dirs).unwrap_or(base.include_dirs),
+        defines: non_empty_defines(payload.defines).unwrap_or(base.defines),
+        diagnostics: payload.diagnostics_enabled.unwrap_or(base.diagnostics),
     })
 }
 

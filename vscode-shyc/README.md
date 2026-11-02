@@ -55,6 +55,30 @@ specific paths with `shyc.includeDirs`:
 }
 ```
 
+## The standard library outside ShyProject
+
+`use core::option::Option;` and `use std/io` only resolve when the server can
+find libshy. Inside the ShyProject repository that works automatically; an
+application in another directory needs one setting:
+
+```json
+{
+  "shyc.libshyPath": "/path/to/ShyProject/libshy"
+}
+```
+
+The ShyProject root works too, and the setting can live in a user-wide file
+instead of every workspace:
+
+```toml
+# ~/.shycserver/config.toml
+libshy_path = "/path/to/ShyProject/libshy"
+```
+
+A workspace value wins over the file; an empty value falls back to it. The
+server reports the path it uses in the `ShyC Language Server` output channel,
+which is the first place to look when an import is reported as unknown.
+
 Add build defines the same way when a project uses them:
 
 ```json
