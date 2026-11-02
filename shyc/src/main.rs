@@ -119,7 +119,8 @@ fn run() -> Result<(), String> {
             } else {
                 let lowered =
                     lower_instances(&options, &unit, &preprocessed.attributes, &mut sources)?;
-                let section = export_instances::render_header_section(&lowered);
+                let unspelled = export::unspelled_function_names(&unit, file);
+                let section = export_instances::render_header_section(&lowered, &unspelled);
                 export::render_c_header_with(&unit, &header_options, &section)
             }
         }

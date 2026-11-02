@@ -757,8 +757,10 @@ impl TypeStore {
     pub fn is_integer(&self, ty: TypeId) -> bool {
         match self.kind(ty) {
             TypeKind::Bool | TypeKind::Integer { .. } | TypeKind::Enum(_) => true,
-            // A `Result<void, E>` niche is the error enum's integer.
-            TypeKind::PayloadEnum(id) => self.enums[id.index()].niche,
+            TypeKind::PayloadEnum(id) => {
+                let info = &self.enums[id.index()];
+                info.niche && self.is_integer(info.underlying)
+            }
             _ => false,
         }
     }
@@ -800,7 +802,7 @@ impl TypeStore {
     }
 
     pub fn is_scalar(&self, ty: TypeId) -> bool {
-        self.is_arithmetic(ty) || self.is_pointer(ty)
+        self.is_arithmetic(ty) || self.is_pointer(ty) || self.is_niche_enum(ty)
     }
 
     pub fn is_aggregate(&self, ty: TypeId) -> bool {

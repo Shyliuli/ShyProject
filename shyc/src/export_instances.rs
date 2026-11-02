@@ -416,14 +416,29 @@ fn is_c_keyword(word: &str) -> bool {
 /// after the declarations of the translation unit, so a plain typedef declared
 /// in the source is already visible. Concrete generic record and enum layouts
 /// are printed here; plain records are printed by `--emit=c-header` itself.
-pub fn render_header_section(lowered: &crate::lower::Lowered) -> String {
+///
+/// `unspelled` holds the file-scope function names the ordinary header had to
+/// drop because a signature mentions a generic instance. Those prototypes are
+/// printed here from the resolved types, so a C caller sees the compact scalar
+/// spelling a niche stores (`int *` for `Opt<int *>`).
+pub fn render_header_section(
+    lowered: &crate::lower::Lowered,
+    unspelled: &HashSet<String>,
+) -> String {
+    let functions: Vec<(String, TypeId)> = lowered
+        .c_functions
+        .iter()
+        .filter(|(name, _)| unspelled.contains(name))
+        .cloned()
+        .collect();
     let mut printer = CPrinter::new(lowered, false);
     printer
         .output
         .push_str("/* Explicit generic instances from the instance table. */\n\n");
-    printer.layouts();
+    printer.layouts(&functions);
     printer.alias_typedefs();
     printer.prototypes();
+    printer.unspelled_prototypes(&functions);
     printer.output
 }
 
@@ -443,7 +458,7 @@ pub fn render_wrapper(lowered: &crate::lower::Lowered) -> String {
          * public symbol of the concrete instantiation; that symbol name is an\n\
          * internal mangling and is not part of the C interface. */\n\n",
     );
-    printer.layouts();
+    printer.layouts(&[]);
     printer.concrete_prototypes();
     printer.wrappers();
     printer.output
@@ -472,11 +487,13 @@ impl<'a> CPrinter<'a> {
     }
 
     /// Prints forward declarations and definitions of every record and enum an
-    /// exported signature mentions.
-    fn layouts(&mut self) {
+    /// exported signature mentions, plus the parameter and result types of the
+    /// `functions` whose prototypes this section prints itself.
+    fn layouts(&mut self, functions: &[(String, TypeId)]) {
         let mut needed: Vec<TypeId> = Vec::new();
         let mut seen = HashSet::new();
         let mut work: Vec<TypeId> = Vec::new();
+        work.extend(functions.iter().map(|(_, ty)| *ty));
         for export in self.exports {
             match &export.kind {
                 ExportedKind::Record { ty, methods } => {
@@ -674,10 +691,11 @@ impl<'a> CPrinter<'a> {
                 let mut payloads = String::new();
                 for variant in &info.variants {
                     if let Some(payload) = variant.payload {
+                        // The name goes inside the declarator: a payload can be
+                        // a function pointer, where the `(*)` binds to it.
                         payloads.push_str(&format!(
-                            "        {} {};\n",
-                            self.declaration(payload, ""),
-                            variant.name
+                            "        {};\n",
+                            self.declaration(payload, &variant.name)
                         ));
                     }
                 }
@@ -740,6 +758,22 @@ impl<'a> CPrinter<'a> {
                     text.push_str(&format!("{};\n", self.declaration(*ty, &export.alias)));
                 }
             }
+        }
+        if !text.is_empty() {
+            self.output.push_str(&text);
+            self.output.push('\n');
+        }
+    }
+
+    /// Prototypes for the file-scope functions whose signature mentions a
+    /// generic instance. The ordinary header drops those declarations because
+    /// C cannot spell the type; from the resolved types the spelling is the
+    /// compact one a niche stores (`int *` for `Opt<int *>`, `int` for
+    /// `Result<void, E>`).
+    fn unspelled_prototypes(&mut self, functions: &[(String, TypeId)]) {
+        let mut text = String::new();
+        for (name, ty) in functions {
+            text.push_str(&format!("{};\n", self.declaration(*ty, name)));
         }
         if !text.is_empty() {
             self.output.push_str(&text);
@@ -863,12 +897,9 @@ impl<'a> CPrinter<'a> {
                 format!("{keyword} shyc_R{}", ty.index())
             }
             TypeKind::Enum(_) => format!("shyc_E{}", ty.index()),
-            // niche 的 payload enum 就是底层类型的值（`0` = `Ok`），C 这边跟着用
-            // 底层类型的名字，别名 typedef 才不会退化成结构体。
-            TypeKind::PayloadEnum(_) if self.types.enum_info(ty).is_some_and(|info| info.niche) => {
-                let underlying = self.types.enum_info(ty).unwrap().underlying;
-                self.declaration(underlying, "").trim().to_string()
-            }
+            // A niche payload enum never reaches `base`: `apply` spells it as
+            // its underlying type before this match, which is what keeps a
+            // pointer niche's declarator in one piece.
             TypeKind::PayloadEnum(_) => format!("struct shyc_E{}", ty.index()),
             _ => String::new(),
         }

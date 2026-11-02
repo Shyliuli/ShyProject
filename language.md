@@ -103,7 +103,10 @@ payload access remain available: `case Option<int *>::Some:` followed by
 raw pointer or error code: compare the pointer directly, or switch on
 `result.tag` to distinguish individual error codes.
 `?` treats NULL as Option failure and a nonzero error code as Result failure.
-Generated C interfaces use the same pointer or integer representation.
+Generated C interfaces use the same pointer or integer representation. A raw
+pointer may be passed to or received from its compatible compact Option type.
+Pointer/integer conversions require the same explicit casts as ordinary C
+pointers; a pointer Option is not an arithmetic integer.
 
 `?` propagates only when the error types are equal or a later `From<Source>`
 trait implementation explicitly converts the source error to the destination

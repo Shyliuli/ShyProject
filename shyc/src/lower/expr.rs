@@ -152,6 +152,25 @@ impl FnLower<'_> {
         if self.l.types.is_compatible(from, to) {
             return Ok(operand);
         }
+        if self.l.types.is_niche_enum(from) || self.l.types.is_niche_enum(to) {
+            let raw_from = if self.l.types.is_niche_enum(from) {
+                self.l
+                    .types
+                    .enum_underlying(from)
+                    .expect("niche representation")
+            } else {
+                from
+            };
+            let raw_to = if self.l.types.is_niche_enum(to) {
+                self.l
+                    .types
+                    .enum_underlying(to)
+                    .expect("niche representation")
+            } else {
+                to
+            };
+            return self.convert(operand, raw_from, raw_to, span, explicit);
+        }
         if self.l.types.is_void(from) || self.l.types.is_void(to) {
             return Err(Diagnostic::new(span, "cannot convert a void value"));
         }
@@ -271,7 +290,12 @@ impl FnLower<'_> {
                 value: operand,
                 to: ir_ty,
             });
-            return self.convert(ir::Operand::Value(integer), self.int_type(), to, span, true);
+            let integer_ty = self.l.types.builtin(if bits == 64 {
+                Builtin::UnsignedLongLong
+            } else {
+                Builtin::UnsignedInt
+            });
+            return self.convert(ir::Operand::Value(integer), integer_ty, to, span, true);
         }
         Err(Diagnostic::new(span, "cannot convert between these types"))
     }
@@ -315,6 +339,14 @@ impl FnLower<'_> {
         from: TypeId,
         span: Span,
     ) -> Result<ir::Operand, Diagnostic> {
+        if self.l.types.is_niche_enum(from) {
+            let underlying = self
+                .l
+                .types
+                .enum_underlying(from)
+                .expect("niche representation");
+            return self.boolean_operand(operand, underlying, span);
+        }
         if self.l.types.is_bool(from) {
             return Ok(operand);
         }

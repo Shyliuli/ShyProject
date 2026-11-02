@@ -73,6 +73,7 @@
 //! printed as an identifier the C compiler rejects, rather than as a value
 //! that silently differs from the source.
 
+use std::collections::HashSet;
 use std::path::{Component, Path};
 
 use crate::ast::{
@@ -519,6 +520,45 @@ fn prototype_text(function: &FunctionDecl) -> String {
         specs_text(&function.specs),
         declarator_text(&function.declarator)
     )
+}
+
+/// The file-scope function names the ordinary header cannot spell.
+///
+/// A signature that mentions a generic instance has no C type name, so
+/// [`prototype_text`] and [`declaration_text`] drop the declaration. The
+/// instance section prints those prototypes from the resolved types instead,
+/// where `Opt<int *>` is the compact `int *` its niche layout stores.
+pub fn unspelled_function_names(unit: &TranslationUnit, root: FileId) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for item in &unit.items {
+        if item_span(item).file != root {
+            continue;
+        }
+        match item {
+            Item::Function(function) => {
+                if function.specs.storage != Some(StorageClass::Static)
+                    && (specs_use_generics(&function.specs)
+                        || declarator_uses_generics(&function.declarator))
+                    && let Some(name) = &function.declarator.name
+                {
+                    names.insert(name.text.clone());
+                }
+            }
+            Item::Decl(declaration) => {
+                if declaration.specs.storage != Some(StorageClass::Static)
+                    && declaration_uses_generics(declaration)
+                {
+                    for declarator in &declaration.declarators {
+                        if let Some(name) = &declarator.declarator.name {
+                            names.insert(name.text.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 // ---------------------------------------------------------------------------

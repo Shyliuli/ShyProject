@@ -56,6 +56,10 @@ pub struct Lowered {
     /// C spelling facts for every record and enum type an exported signature
     /// can mention. The exporter never guesses a name from a type id.
     pub c_types: HashMap<TypeId, CTypeName>,
+    /// Externally visible file-scope functions by C name, in name order. The
+    /// ordinary header drops a declaration whose type mentions a generic
+    /// instance, and the instance section prints its prototype from here.
+    pub c_functions: Vec<(String, TypeId)>,
 }
 
 /// One instance the explicit table asks the C boundary to expose.
@@ -128,11 +132,13 @@ pub fn lower(unit: &ast::TranslationUnit, options: &Options) -> Result<Lowered, 
     let exports = lowerer.export_instances(&options.exports)?;
     lowerer.lower_functions()?;
     let c_types = lowerer.c_type_names(&exports);
+    let c_functions = lowerer.c_functions();
     Ok(Lowered {
         module: lowerer.module,
         types: lowerer.types,
         exports,
         c_types,
+        c_functions,
     })
 }
 

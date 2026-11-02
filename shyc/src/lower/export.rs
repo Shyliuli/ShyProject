@@ -26,7 +26,7 @@ use crate::export_instances::{CTypeName, ExportedInstance, ExportedKind, Exporte
 use crate::sema::types::{RecordKind, TypeId, TypeKind};
 use crate::source::{Diagnostic, Span};
 
-use super::{ExportRequest, Lowerer};
+use super::{ExportRequest, GlobalRef, Lowerer};
 
 impl Lowerer {
     /// Instantiates every requested instance and publishes its C symbols.
@@ -345,6 +345,27 @@ impl Lowerer {
             }
             _ => false,
         }
+    }
+
+    /// Every file-scope function whose symbol is its C name, sorted by name.
+    ///
+    /// A file-local function keeps an internal symbol, so it is not callable
+    /// from C and does not belong in the header. Sorting keeps the generated
+    /// header byte-identical between runs.
+    pub(super) fn c_functions(&self) -> Vec<(String, TypeId)> {
+        let mut functions: Vec<(String, TypeId)> = self
+            .globals
+            .iter()
+            .filter_map(|(name, global)| match global {
+                GlobalRef::Function(index) => {
+                    let function = &self.functions[*index];
+                    (function.symbol == *name).then(|| (name.clone(), function.ty))
+                }
+                GlobalRef::Object(_) => None,
+            })
+            .collect();
+        functions.sort_by(|left, right| left.0.cmp(&right.0));
+        functions
     }
 
     /// The C spelling of one concrete type, when it is a record or enum.
