@@ -27,7 +27,8 @@
 //! A `let` declaration is Shy-only as well, but it is not copied: the driver
 //! calls [`reject_let`] first and reports a diagnostic, because a silently
 //! copied `let x = 1;` would be read as a C declaration with a made-up type
-//! name. `--emit=c-header` never prints function bodies, so a `let` local
+//! name. `pub` is rejected for the same reason: silently dropping it would
+//! change the linkage the author asked for. `--emit=c-header` never prints function bodies, so a `let` local
 //! cannot appear in a header.
 //!
 //! # `--emit=c-header`
@@ -155,6 +156,14 @@ pub fn reject_let(tokens: &[Token]) -> Result<(), Diagnostic> {
         )
     };
     for (index, token) in tokens.iter().enumerate() {
+        // `pub` 和 `let` 一样是 Shy 的修饰词：C 里没有它，写出来就是编译错误，
+        // 悄悄删掉又会改变链接性，所以直接报出来。
+        if matches!(&token.kind, TokenKind::Ident(word) if word == "pub") {
+            return Err(Diagnostic::new(
+                token.span,
+                "`pub` is ShyC-only and cannot be exported as C; use `static` or the C default",
+            ));
+        }
         if !matches!(&token.kind, TokenKind::Ident(word) if word == "let") {
             continue;
         }
