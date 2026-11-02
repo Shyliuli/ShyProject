@@ -1,4 +1,4 @@
 #ifndef __SHY_PATH_CORE_OPTION_H
 #define __SHY_PATH_CORE_OPTION_H
-#include "../../c/option.h"
+#include "../../core/option.h"
 #endif

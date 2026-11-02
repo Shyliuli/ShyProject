@@ -16,8 +16,8 @@ CHIBICC := third_party/chibicc/chibicc
 LIBSHY_HEADERS := \
 	libshy/c/stdtype.h \
 	libshy/c/stdarg.h \
-	libshy/c/option.h \
-	libshy/c/result.h \
+	libshy/core/option.h \
+	libshy/core/result.h \
 	libshy/c/ctype.h \
 	libshy/c/fcntl.h \
 	libshy/c/stdio.h \
@@ -55,7 +55,8 @@ $(SHYC_RELEASE): $(SHYC_SOURCES)
 libshy/c/%.h: libshy/libc/%.shyh $(SHYC_RELEASE)
 	$(SHYC_RELEASE) --emit=c-header $(LIBSHY_INCLUDES) -o $@ $<
 
-libshy/c/%.h: libshy/core/%.shyh $(SHYC_RELEASE)
+# core/ 的 C 拼写留在本层：Option/Result 是 ShyC 的类型，不是 C 库头文件。
+libshy/core/%.h: libshy/core/%.shyh $(SHYC_RELEASE)
 	$(SHYC_RELEASE) --emit=c-header $(LIBSHY_INCLUDES) -o $@ $<
 
 

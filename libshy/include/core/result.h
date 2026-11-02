@@ -1,4 +1,4 @@
 #ifndef __SHY_PATH_CORE_RESULT_H
 #define __SHY_PATH_CORE_RESULT_H
-#include "../../c/result.h"
+#include "../../core/result.h"
 #endif

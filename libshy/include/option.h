@@ -1,5 +1,5 @@
 /* Compatibility wrapper: the C header lives in ../core/. */
 #ifndef __SHY_COMPAT_CORE_OPTION_H
 #define __SHY_COMPAT_CORE_OPTION_H
-#include "../c/option.h"
+#include "../core/option.h"
 #endif

@@ -5,8 +5,8 @@ bottom and three layers above it:
 
 | View | Contents |
 |---|---|
-| `c/` | the C include view: only `.h` — `stdio`, `stdlib`, `string`, `ctype`, `unistd`, `fcntl`, `stddef`, `stdint`, `stdtype`, `stdarg`, `option`, `result` |
-| `core/` | ShyC declarations (`str.shyh`, `option.shyh`, `result.shyh`) and `core.shyc` |
+| `c/` | the C include view: only `.h`, and only C-library headers — `stdio`, `stdlib`, `string`, `ctype`, `unistd`, `fcntl`, `stddef`, `stdint`, `stdtype`, `stdarg` |
+| `core/` | ShyC declarations and their C spelling (`str.shyh`, `option.{shyh,h}`, `result.{shyh,h}`), plus `core.shyc` |
 | `alloc/` | `vec.shyh`, `string.shyh`, `alloc.shyc` |
 | `std/` | `fs.shyh`, `io.shyh`, `std.shyc` |
 | `libc/` | the C library in ShyC spelling: `*.shyh` declarations and the `libc.c` implementation |
