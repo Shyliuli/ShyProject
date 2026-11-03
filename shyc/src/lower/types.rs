@@ -1207,7 +1207,11 @@ impl Lowerer {
         if is_float {
             return self.float_literal(literal);
         }
-        let long_bits = self.types.size_of(self.types.builtin(Builtin::Long)).unwrap_or(8) * 8;
+        let long_bits = self
+            .types
+            .size_of(self.types.builtin(Builtin::Long))
+            .unwrap_or(8)
+            * 8;
         let integer = crate::literal::integer(text, long_bits, literal.span)?;
         let ty = match (integer.rank, integer.unsigned) {
             (crate::literal::IntegerRank::Int, false) => Builtin::Int,

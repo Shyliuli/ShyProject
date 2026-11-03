@@ -155,7 +155,10 @@ impl Parser {
                 let Some(param_name) = &param_declarator.name else {
                     continue;
                 };
-                params.push((param_name.text.clone(), param_kind(&parameter.specs, param_declarator)));
+                params.push((
+                    param_name.text.clone(),
+                    param_kind(&parameter.specs, param_declarator),
+                ));
             }
         }
         let returns_tokens = returns_tokens_type(&specs);

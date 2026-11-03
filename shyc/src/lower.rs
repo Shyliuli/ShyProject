@@ -497,10 +497,8 @@ pub(super) struct Lowerer {
 
 impl Lowerer {
     fn new(options: &Options) -> Lowerer {
-        let types = TypeStore::with_data_model(
-            options.layout.pointer_bytes,
-            options.layout.long_bytes,
-        );
+        let types =
+            TypeStore::with_data_model(options.layout.pointer_bytes, options.layout.long_bytes);
         let mut module = ir::Module::new(&options.module_name);
         module.startup = match options.startup {
             StartupMode::Main => ir::Startup::Auto {

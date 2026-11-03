@@ -47,11 +47,7 @@ impl Parser {
         self.bump();
         let (tokens, close) = self.capture_tokens()?;
         let span = span.join(close);
-        let value = self.call_const(
-            index,
-            vec![super::comptime::Value::Tokens(tokens)],
-            span,
-        )?;
+        let value = self.call_const(index, vec![super::comptime::Value::Tokens(tokens)], span)?;
         let super::comptime::Value::Tokens(tokens) = value else {
             return Err(Diagnostic::new(
                 span,
@@ -332,38 +328,38 @@ impl Parser {
     /// One member declaration: specifiers, declarators, and the semicolon.
     fn member_decl(&mut self) -> Result<MemberDecl, Diagnostic> {
         let specs = self.decl_specs()?;
-            let mut declarators = Vec::new();
-            if !self.at_punct(";") {
-                loop {
-                    let colon_span = self.here();
-                    let declarator = if self.at_punct(":") {
-                        Declarator {
-                            span: colon_span,
-                            name: None,
-                            derived: Vec::new(),
-                        }
-                    } else {
-                        self.declarator(false)?
-                    };
-                    let bit_width = if self.eat_punct(":") {
-                        Some(self.conditional()?)
-                    } else {
-                        None
-                    };
-                    let span = match &bit_width {
-                        Some(width) => declarator.span.join(width.span()),
-                        None => declarator.span,
-                    };
-                    declarators.push(MemberDeclarator {
-                        span,
-                        declarator,
-                        bit_width,
-                    });
-                    if !self.eat_punct(",") {
-                        break;
+        let mut declarators = Vec::new();
+        if !self.at_punct(";") {
+            loop {
+                let colon_span = self.here();
+                let declarator = if self.at_punct(":") {
+                    Declarator {
+                        span: colon_span,
+                        name: None,
+                        derived: Vec::new(),
                     }
+                } else {
+                    self.declarator(false)?
+                };
+                let bit_width = if self.eat_punct(":") {
+                    Some(self.conditional()?)
+                } else {
+                    None
+                };
+                let span = match &bit_width {
+                    Some(width) => declarator.span.join(width.span()),
+                    None => declarator.span,
+                };
+                declarators.push(MemberDeclarator {
+                    span,
+                    declarator,
+                    bit_width,
+                });
+                if !self.eat_punct(",") {
+                    break;
                 }
             }
+        }
         let semicolon = self.expect_punct(";")?;
         Ok(MemberDecl {
             span: specs.span.join(semicolon),
@@ -384,7 +380,10 @@ impl Parser {
         let span = start.join(close);
         let value = self.call_const(index, vec![super::comptime::Value::Tokens(tokens)], span)?;
         let super::comptime::Value::Tokens(returned) = value else {
-            return Err(Diagnostic::new(span, "a member const fn must produce tokens"));
+            return Err(Diagnostic::new(
+                span,
+                "a member const fn must produce tokens",
+            ));
         };
         if returned.is_empty() {
             return Ok(Some(Vec::new()));

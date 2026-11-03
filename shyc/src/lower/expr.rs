@@ -144,14 +144,12 @@ impl FnLower<'_> {
     fn pointer_conversion_discards_qualifier(&self, from: TypeId, to: TypeId) -> bool {
         let (mut from, mut to) = (from, to);
         loop {
-            let (Some(from_pointee), Some(to_pointee)) =
-                (self.l.pointee(from), self.l.pointee(to))
+            let (Some(from_pointee), Some(to_pointee)) = (self.l.pointee(from), self.l.pointee(to))
             else {
                 return false;
             };
             if (from_pointee.qualifiers.is_const && !to_pointee.qualifiers.is_const)
-                || (from_pointee.qualifiers.is_volatile
-                    && !to_pointee.qualifiers.is_volatile)
+                || (from_pointee.qualifiers.is_volatile && !to_pointee.qualifiers.is_volatile)
             {
                 return true;
             }

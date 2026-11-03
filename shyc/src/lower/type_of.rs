@@ -557,9 +557,8 @@ impl Lowerer {
                 format!("method '{}' must be called", name.text),
             ));
         }
-        Err(last_error.unwrap_or_else(|| {
-            Diagnostic::new(span, "member access needs a struct or union")
-        }))
+        Err(last_error
+            .unwrap_or_else(|| Diagnostic::new(span, "member access needs a struct or union")))
     }
 
     pub(super) fn scoped_method(

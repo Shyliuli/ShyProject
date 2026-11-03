@@ -296,7 +296,6 @@ pub(crate) struct Parser {
     pub(crate) pending_declarator: Option<ast::Declarator>,
 }
 
-
 /// Records the type names a specifier list mentions, so a later generator can
 /// query them with `declared`.
 fn collect_spec_names(specs: &ast::DeclSpecs, world: &mut World) {
@@ -379,9 +378,6 @@ fn impl_declaration(block: &ast::ImplBlock) -> Option<ImplDecl> {
     })
 }
 
-
-
-
 /// Normalizes a trait name written as a query string.
 ///
 /// Spaces are removed and numeric arguments are canonicalized, so
@@ -399,7 +395,9 @@ fn normalize_trait_query(text: &str) -> String {
     let inner = &text[open + 1..close];
     let args = inner
         .split(',')
-        .map(|argument| integer_value(argument).map_or_else(|| argument.to_string(), |value| value.to_string()))
+        .map(|argument| {
+            integer_value(argument).map_or_else(|| argument.to_string(), |value| value.to_string())
+        })
         .collect::<Vec<_>>()
         .join(",");
     format!("{base}<{args}>")
@@ -433,9 +431,8 @@ fn generic_arg_text(argument: &ast::GenericArg) -> String {
 /// instantiation; a character argument uses its byte value.
 fn const_arg_text(expression: &ast::Expr) -> String {
     match expression {
-        ast::Expr::Number(literal) => {
-            integer_value(&literal.text).map_or_else(|| literal.text.clone(), |value| value.to_string())
-        }
+        ast::Expr::Number(literal) => integer_value(&literal.text)
+            .map_or_else(|| literal.text.clone(), |value| value.to_string()),
         ast::Expr::Char(literal) => literal
             .raw
             .as_bytes()
@@ -447,8 +444,9 @@ fn const_arg_text(expression: &ast::Expr) -> String {
             operand,
             ..
         } => match operand.as_ref() {
-            ast::Expr::Number(literal) => integer_value(&literal.text)
-                .map_or_else(String::new, |value| (-value).to_string()),
+            ast::Expr::Number(literal) => {
+                integer_value(&literal.text).map_or_else(String::new, |value| (-value).to_string())
+            }
             _ => String::new(),
         },
         _ => String::new(),
@@ -458,10 +456,16 @@ fn const_arg_text(expression: &ast::Expr) -> String {
 /// The integer a literal spells, ignoring any suffix.
 fn integer_value(text: &str) -> Option<i64> {
     let trimmed = text.trim_end_matches(|character: char| character.is_ascii_alphabetic());
-    if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         return i64::from_str_radix(hex, 16).ok();
     }
-    if let Some(binary) = trimmed.strip_prefix("0b").or_else(|| trimmed.strip_prefix("0B")) {
+    if let Some(binary) = trimmed
+        .strip_prefix("0b")
+        .or_else(|| trimmed.strip_prefix("0B"))
+    {
         return i64::from_str_radix(binary, 2).ok();
     }
     trimmed.parse::<i64>().ok()
@@ -736,7 +740,6 @@ fn item_span(item: &ast::Item) -> Span {
     }
 }
 
-
 /// The declarator of the function whose body starts at `start`.
 fn find_body_declarator(items: &[ast::Item], start: usize) -> Option<ast::Declarator> {
     for item in items {
@@ -836,15 +839,11 @@ impl World {
             {
                 continue;
             }
-            let satisfied = generic
-                .bounds
-                .iter()
-                .zip(&args)
-                .all(|(bounds, argument)| {
-                    bounds
-                        .iter()
-                        .all(|bound| self.implements_within(argument, bound, depth + 1))
-                });
+            let satisfied = generic.bounds.iter().zip(&args).all(|(bounds, argument)| {
+                bounds
+                    .iter()
+                    .all(|bound| self.implements_within(argument, bound, depth + 1))
+            });
             if satisfied {
                 return true;
             }
@@ -1051,28 +1050,24 @@ impl Parser {
                         }
                         let span = generators[position].span;
                         let name = self.const_fns[generator.index].name.clone();
-                        let (stage_items, more_generators, saw_call) =
-                            match self.parse_item_fragment(tokens.clone(), span, None) {
-                                Ok(result) => result,
-                                Err(error) => {
-                                    // A macro that produces statements belongs in
-                                    // a function body, not at file scope.
-                                    if self
-                                        .parse_statement_fragment(tokens.clone(), span)
-                                        .is_ok()
-                                    {
-                                        return Err(Diagnostic::new(
-                                            span,
-                                            format!(
-                                                "const fn '{name}' produced statements, which cannot stand at file scope; call it inside a function"
-                                            ),
-                                        ));
-                                    }
-                                    return Err(
-                                        self.fragment_error(error, generator.index)
-                                    );
+                        let (stage_items, more_generators, saw_call) = match self
+                            .parse_item_fragment(tokens.clone(), span, None)
+                        {
+                            Ok(result) => result,
+                            Err(error) => {
+                                // A macro that produces statements belongs in
+                                // a function body, not at file scope.
+                                if self.parse_statement_fragment(tokens.clone(), span).is_ok() {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        format!(
+                                            "const fn '{name}' produced statements, which cannot stand at file scope; call it inside a function"
+                                        ),
+                                    ));
                                 }
-                            };
+                                return Err(self.fragment_error(error, generator.index));
+                            }
+                        };
                         // A generated impl may not collide with one that already
                         // exists, no matter which generator produced it.
                         for item in &stage_items {
@@ -1089,9 +1084,10 @@ impl Parser {
                                         && existing.bounds.len() == declared.bounds.len()
                                 })
                             } else {
-                                world
-                                    .impls
-                                    .contains(&(declared.trait_name.clone(), declared.owner.clone()))
+                                world.impls.contains(&(
+                                    declared.trait_name.clone(),
+                                    declared.owner.clone(),
+                                ))
                             };
                             if already {
                                 return Err(Diagnostic::new(
@@ -1167,13 +1163,15 @@ impl Parser {
                 let reserved = generators.iter().enumerate().any(|(other, generator)| {
                     other != position
                         && !matches!(generator.state, GeneratorState::Done)
-                        && generator.grant.as_ref()
-                            == Some(&(owner.clone(), trait_name.clone()))
+                        && generator.grant.as_ref() == Some(&(owner.clone(), trait_name.clone()))
                 });
                 if reserved {
                     continue;
                 }
-                granted_impls.push(((owner.clone(), trait_name.clone()), generators[position].span));
+                granted_impls.push((
+                    (owner.clone(), trait_name.clone()),
+                    generators[position].span,
+                ));
                 generators[position].grant = Some((owner, trait_name));
                 generators[position].state = GeneratorState::Ready;
                 granted = true;
@@ -1196,11 +1194,8 @@ impl Parser {
                     continue;
                 }
                 rebuilt.extend(generated[cursor..fragment.start].iter().cloned());
-                let (items, _, _) = self.parse_item_fragment(
-                    fragment.tokens.clone(),
-                    fragment.span,
-                    Some(&world),
-                )?;
+                let (items, _, _) =
+                    self.parse_item_fragment(fragment.tokens.clone(), fragment.span, Some(&world))?;
                 // The fragment must keep its shape; otherwise the unit is
                 // parsed again as a whole.
                 if items.len() != fragment.count {
@@ -1247,7 +1242,6 @@ impl Parser {
             if let GeneratorState::Waiting = generator.state
                 && let Some(comptime::Suspend::Needs { owner, trait_name }) = &generator.suspend
             {
-
                 let name = self
                     .const_fns
                     .get(generator.index)
@@ -1269,7 +1263,6 @@ impl Parser {
         }
         Ok((generated, world))
     }
-
 
     /// Follows a granted impl from holder to holder, so a stuck waiter reports
     /// the whole chain instead of one link.
@@ -1442,9 +1435,9 @@ impl Parser {
         world: &World,
         declarator: &ast::Declarator,
     ) -> Option<ast::Block> {
-        let start = tokens.iter().position(|token| {
-            token.span.file == open.file && token.span.start == open.start
-        })?;
+        let start = tokens
+            .iter()
+            .position(|token| token.span.file == open.file && token.span.start == open.start)?;
         let mut depth = 0usize;
         let mut end = None;
         for (offset, token) in tokens[start..].iter().enumerate() {

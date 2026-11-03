@@ -360,8 +360,7 @@ impl TypeStore {
         let long = push_integer(&mut types, IntegerRank::Long, false, long_bytes);
         let unsigned_long = push_integer(&mut types, IntegerRank::Long, true, long_bytes);
         let long_long = push_integer(&mut types, IntegerRank::LongLong, false, long_bytes);
-        let unsigned_long_long =
-            push_integer(&mut types, IntegerRank::LongLong, true, long_bytes);
+        let unsigned_long_long = push_integer(&mut types, IntegerRank::LongLong, true, long_bytes);
         let float = push_type(&mut types, TypeKind::Float32, Some(4), Some(4));
         let double_ = push_type(&mut types, TypeKind::Float64, Some(8), Some(8));
 

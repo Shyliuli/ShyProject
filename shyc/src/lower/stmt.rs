@@ -502,7 +502,10 @@ impl FnLower<'_> {
         let low = self.case_constant(value, span)?;
         let low_number = self.l.eval_const_int(value)?;
         let (high, high_number) = match end {
-            Some(end) => (self.case_constant(end, end.span())?, self.l.eval_const_int(end)?),
+            Some(end) => (
+                self.case_constant(end, end.span())?,
+                self.l.eval_const_int(end)?,
+            ),
             None => (low, low_number),
         };
         if low_number > high_number {

@@ -155,22 +155,13 @@ impl Lowerer {
                 .and_then(|info| info.trait_methods.get(&deref_keys[0]))
                 .and_then(|set| set.methods.get("deref"))
                 .ok_or_else(|| {
-                    Diagnostic::new(
-                        span,
-                        "DerefMut requires a matching Deref method",
-                    )
+                    Diagnostic::new(span, "DerefMut requires a matching Deref method")
                 })?;
             let TypeKind::Function { result, .. } = self.types.kind(deref_method.ty) else {
-                return Err(Diagnostic::new(
-                    span,
-                    "Deref::deref must return a pointer",
-                ));
+                return Err(Diagnostic::new(span, "Deref::deref must return a pointer"));
             };
             let Some(deref_target) = self.pointee(*result) else {
-                return Err(Diagnostic::new(
-                    span,
-                    "Deref::deref must return a pointer",
-                ));
+                return Err(Diagnostic::new(span, "Deref::deref must return a pointer"));
             };
             if deref_target.ty != target.ty || !deref_target.qualifiers.is_const {
                 return Err(Diagnostic::new(

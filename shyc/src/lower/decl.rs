@@ -354,8 +354,7 @@ impl Lowerer {
                         self.generic_impl_method_symbol(&target.name, &name, target.ty)
                     }
                     (None, Some(trait_impl)) => {
-                        let symbol =
-                            self.trait_impl_method_symbol(trait_impl, &target.name, &name);
+                        let symbol = self.trait_impl_method_symbol(trait_impl, &target.name, &name);
                         // A method follows the same rule as a free function:
                         // `pub` exports it, everything else stays file-local, so
                         // a header can define a trait implementation without
@@ -944,8 +943,7 @@ impl Lowerer {
                     }
                     return self.write_global_init(global, ty, offset, &entry.value);
                 }
-                if self.has_initializable_storage(ty)
-                    && self.is_zero_aggregate_initializer(entries)
+                if self.has_initializable_storage(ty) && self.is_zero_aggregate_initializer(entries)
                 {
                     // The byte image starts zeroed, so `{0}` leaves it as is.
                     return Ok(());

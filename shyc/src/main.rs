@@ -97,8 +97,8 @@ fn run() -> Result<(), String> {
             }
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
-            let unit = parser::parse(&preprocessed.tokens)
-                .map_err(|error| sources.render(&error))?;
+            let unit =
+                parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
             c::source::render(&unit).map_err(|error| sources.render(&error))?
         }
         Stage::CHeader => {

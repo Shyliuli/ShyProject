@@ -328,8 +328,7 @@ impl Parser {
         if tokens_parameter {
             let (tokens, close) = self.capture_tokens()?;
             let span = start.join(close);
-            let value = self
-                .call_const(index, vec![Value::Tokens(tokens)], span)?;
+            let value = self.call_const(index, vec![Value::Tokens(tokens)], span)?;
             return self.constant_expression(value, span, index);
         }
         let (args, close) = self.call_arguments()?;
@@ -349,9 +348,8 @@ impl Parser {
         index: usize,
     ) -> Result<Expr, Diagnostic> {
         match value {
-            Value::Tokens(tokens) => {
-                parse_fragment(tokens, span, self).map_err(|error| self.fragment_error(error, index))
-            }
+            Value::Tokens(tokens) => parse_fragment(tokens, span, self)
+                .map_err(|error| self.fragment_error(error, index)),
             other => constant(other, span),
         }
     }
@@ -915,10 +913,8 @@ fn parse_format(text: &str, span: Span) -> Result<(String, Vec<FormatSpec>), Dia
                     Some(name) => (name, true),
                     None => (other, false),
                 };
-                let valid = !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_');
+                let valid =
+                    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_');
                 if !valid {
                     return Err(Diagnostic::new(
                         span,

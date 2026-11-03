@@ -58,7 +58,10 @@ impl Value {
     fn as_int(&self, span: Span) -> Result<i64, Diagnostic> {
         match self {
             Value::Int(value) => Ok(*value),
-            _ => Err(Diagnostic::new(span, "compile-time value is not an integer")),
+            _ => Err(Diagnostic::new(
+                span,
+                "compile-time value is not an integer",
+            )),
         }
     }
 
@@ -132,10 +135,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// An evaluator that answers `declared` and `implements` from `world`.
-    pub(crate) fn with_world(
-        functions: &'a [ConstFn],
-        world: &'a crate::parser::World,
-    ) -> Self {
+    pub(crate) fn with_world(functions: &'a [ConstFn], world: &'a crate::parser::World) -> Self {
         Evaluator {
             functions,
             world: Some(world),
@@ -466,10 +466,12 @@ impl<'a> Evaluator<'a> {
                 }
                 Ok(Value::Str(text))
             }
-            ast::Expr::Name(name) => self
-                .lookup(&name.text)
-                .cloned()
-                .ok_or_else(|| Diagnostic::new(name.span, format!("unknown compile-time value '{}'", name.text))),
+            ast::Expr::Name(name) => self.lookup(&name.text).cloned().ok_or_else(|| {
+                Diagnostic::new(
+                    name.span,
+                    format!("unknown compile-time value '{}'", name.text),
+                )
+            }),
             ast::Expr::Unary { op, operand, span } => {
                 let value = self.expr(operand)?;
                 let int = value.as_int(*span)?;
@@ -478,7 +480,10 @@ impl<'a> Evaluator<'a> {
                     UnaryOp::Plus => Ok(Value::Int(int)),
                     UnaryOp::LogicalNot => Ok(Value::Int(i64::from(int == 0))),
                     UnaryOp::BitNot => Ok(Value::Int(!int)),
-                    _ => Err(Diagnostic::new(*span, "this operator is not supported in a const fn")),
+                    _ => Err(Diagnostic::new(
+                        *span,
+                        "this operator is not supported in a const fn",
+                    )),
                 }
             }
             ast::Expr::Binary {
@@ -540,10 +545,7 @@ impl<'a> Evaluator<'a> {
                 // const fn needs to walk text the way a macro would.
                 if name.text == "tokens_from_text" {
                     let [value] = args.as_slice() else {
-                        return Err(Diagnostic::new(
-                            *span,
-                            "tokens_from_text takes one string",
-                        ));
+                        return Err(Diagnostic::new(*span, "tokens_from_text takes one string"));
                     };
                     let value = self.expr(value)?;
                     let text = value.as_str(*span)?.to_string();
@@ -554,7 +556,9 @@ impl<'a> Evaluator<'a> {
                     return Ok(Value::Tokens(
                         tokens
                             .into_iter()
-                            .filter(|token| !matches!(token.kind, TokenKind::Eof | TokenKind::Newline))
+                            .filter(|token| {
+                                !matches!(token.kind, TokenKind::Eof | TokenKind::Newline)
+                            })
                             .map(|mut token| {
                                 token.span = self.call_span;
                                 token
@@ -590,12 +594,12 @@ impl<'a> Evaluator<'a> {
                     if present {
                         return Ok(Value::Int(0));
                     }
-                    let granted = self
-                        .grant
-                        .as_ref()
-                        .is_some_and(|(granted_owner, granted_trait)| {
-                            granted_owner == &owner && granted_trait == &trait_name
-                        });
+                    let granted =
+                        self.grant
+                            .as_ref()
+                            .is_some_and(|(granted_owner, granted_trait)| {
+                                granted_owner == &owner && granted_trait == &trait_name
+                            });
                     if granted {
                         return Ok(Value::Int(1));
                     }
@@ -627,8 +631,8 @@ impl<'a> Evaluator<'a> {
                     let trait_name = trait_name.as_str(*span)?.to_string();
                     return Ok(Value::Int(i64::from(self.implements(&owner, &trait_name))));
                 }
-                if let Some(builtin) = token_builtin(name.text.as_str())
-                    .or_else(|| builtin(name.text.as_str()))
+                if let Some(builtin) =
+                    token_builtin(name.text.as_str()).or_else(|| builtin(name.text.as_str()))
                 {
                     let mut values = Vec::with_capacity(args.len());
                     for argument in args {
@@ -656,11 +660,17 @@ impl<'a> Evaluator<'a> {
                     Value::Str(text) => {
                         let bytes = text.as_bytes();
                         if index < 0 || index as usize >= bytes.len() {
-                            return Err(Diagnostic::new(*span, "compile-time index is out of range"));
+                            return Err(Diagnostic::new(
+                                *span,
+                                "compile-time index is out of range",
+                            ));
                         }
                         Ok(Value::Int(i64::from(bytes[index as usize])))
                     }
-                    _ => Err(Diagnostic::new(*span, "this value cannot be indexed at compile time")),
+                    _ => Err(Diagnostic::new(
+                        *span,
+                        "this value cannot be indexed at compile time",
+                    )),
                 }
             }
             ast::Expr::Assignment {
@@ -709,7 +719,6 @@ impl<'a> Evaluator<'a> {
         }
     }
 }
-
 
 /// Where execution starts inside a switch body.
 enum SwitchStart {
@@ -811,9 +820,7 @@ impl<'a> Evaluator<'a> {
                 stmt,
                 ..
             } => {
-                if !*running
-                    && let SwitchStart::Case(target) = start
-                {
+                if !*running && let SwitchStart::Case(target) = start {
                     let (low, high) = self.case_range(case, end.as_ref())?;
                     if (low..=high).contains(target) {
                         *running = true;
@@ -868,7 +875,6 @@ fn span_of_stmt(statement: &ast::Stmt) -> Span {
         },
     }
 }
-
 
 /// The arithmetic a compound assignment performs.
 fn assign_operator(op: &ast::AssignOp) -> BinaryOp {
@@ -925,9 +931,15 @@ fn binary(op: BinaryOp, left: &Value, right: &Value, span: Span) -> Result<Value
 /// Parses an integer literal the way the runtime compiler will see it.
 fn number(text: &str, span: Span) -> Result<i64, Diagnostic> {
     let trimmed = text.trim_end_matches(|ch: char| ch.is_ascii_alphabetic());
-    let parsed = if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    let parsed = if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         i64::from_str_radix(hex, 16)
-    } else if let Some(binary) = trimmed.strip_prefix("0b").or_else(|| trimmed.strip_prefix("0B")) {
+    } else if let Some(binary) = trimmed
+        .strip_prefix("0b")
+        .or_else(|| trimmed.strip_prefix("0B"))
+    {
         i64::from_str_radix(binary, 2)
     } else {
         trimmed.parse::<i64>()
@@ -963,7 +975,10 @@ fn builtin(name: &str) -> Option<fn(&[Value], Span) -> Result<Value, Diagnostic>
         }),
         "str_byte" => Some(|args, span| {
             let [text, index] = args else {
-                return Err(Diagnostic::new(span, "str_byte takes a string and an index"));
+                return Err(Diagnostic::new(
+                    span,
+                    "str_byte takes a string and an index",
+                ));
             };
             let bytes = text.as_str(span)?.as_bytes();
             let index = index.as_int(span)?;
@@ -1011,7 +1026,10 @@ pub(crate) fn token_builtin(name: &str) -> Option<fn(&[Value], Span) -> Result<V
         }),
         "tokens_text" => Some(|args, span| {
             let [tokens] = args else {
-                return Err(Diagnostic::new(span, "tokens_text takes one token sequence"));
+                return Err(Diagnostic::new(
+                    span,
+                    "tokens_text takes one token sequence",
+                ));
             };
             Ok(Value::Str(
                 tokens
@@ -1060,7 +1078,10 @@ pub(crate) fn token_builtin(name: &str) -> Option<fn(&[Value], Span) -> Result<V
         }),
         "tokens_concat" => Some(|args, span| {
             let [left, right] = args else {
-                return Err(Diagnostic::new(span, "tokens_concat takes two token sequences"));
+                return Err(Diagnostic::new(
+                    span,
+                    "tokens_concat takes two token sequences",
+                ));
             };
             let mut tokens = left.as_tokens(span)?.to_vec();
             tokens.extend_from_slice(right.as_tokens(span)?);
