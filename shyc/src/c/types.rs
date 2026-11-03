@@ -20,6 +20,17 @@ use std::collections::HashMap;
 
 use crate::c::names;
 
+/// One generic use the printer met: the template name and the concrete
+/// arguments it was written with.
+///
+/// Collecting them while printing is how the C backend learns which instances a
+/// unit needs without walking the AST a second time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Mention {
+    pub name: String,
+    pub args: Vec<String>,
+}
+
 /// How one output spells a type.
 ///
 /// Two things vary between the outputs and even between declarations: what
@@ -34,14 +45,25 @@ pub(crate) struct Spelling<'a> {
     /// C name of each generic instance, keyed by the name this backend mangles
     /// (Vec<int> is keyed as Vec_int). Empty without an instance table.
     pub aliases: Option<&'a HashMap<String, String>>,
+    /// Type parameters of the template being specialized, bound to the type
+    /// they stand for here (T to int).
+    pub bindings: Option<&'a HashMap<String, String>>,
+    /// Whether generic parameter lists are printed. An instance drops them,
+    /// because C has no template.
+    pub generics: bool,
+    /// Every generic use the printer sees is reported here.
+    pub mentions: Option<&'a std::cell::RefCell<Vec<Mention>>>,
 }
 
 impl<'a> Spelling<'a> {
-    /// The spelling outside a trait signature and without an instance table.
+    /// The spelling outside a trait signature, without an instance table.
     pub(crate) fn plain() -> Spelling<'a> {
         Spelling {
             self_name: "void",
             aliases: None,
+            bindings: None,
+            generics: true,
+            mentions: None,
         }
     }
 
@@ -356,7 +378,13 @@ fn qualifier_text(qualifier: Qualifier) -> &'static str {
 fn specifier_text(specifier: &TypeSpecifier, spelling: Spelling) -> String {
     match specifier {
         TypeSpecifier::Builtin(builtin) => builtin_text(*builtin).to_string(),
-        TypeSpecifier::TypedefName(name) => name.text.clone(),
+        TypeSpecifier::TypedefName(name) => match spelling.bindings {
+            Some(bindings) => bindings
+                .get(&name.text)
+                .cloned()
+                .unwrap_or_else(|| name.text.clone()),
+            None => name.text.clone(),
+        },
         TypeSpecifier::Generic(generic) => generic_spec_text(generic, spelling),
         TypeSpecifier::Record(record) => record_text(record, spelling),
         TypeSpecifier::Enum(enumeration) => enum_text(enumeration, spelling),
@@ -383,11 +411,17 @@ fn generic_spec_text(generic: &GenericSpec, spelling: Spelling) -> String {
             GenericArgKind::Const(value) => expr_text(value),
         })
         .collect::<Vec<_>>();
+    if let Some(mentions) = spelling.mentions {
+        mentions.borrow_mut().push(Mention {
+            name: generic.name.text.clone(),
+            args: args.clone(),
+        });
+    }
     spelling.instance(names::instance(&generic.name.text, &args))
 }
 
 fn generic_params_text(params: &[GenericParam], spelling: Spelling) -> String {
-    if params.is_empty() {
+    if params.is_empty() || !spelling.generics {
         return String::new();
     }
     let params = params
@@ -470,7 +504,7 @@ fn record_text(record: &RecordSpec, spelling: Spelling) -> String {
     let mut text = format!("{keyword}{tag}{generics} {{");
     for member in members {
         text.push('\n');
-        text.push_str(&indented(&member_text(member)));
+        text.push_str(&indented(&member_text(member, spelling)));
     }
     text.push_str("\n}");
     text
@@ -546,16 +580,41 @@ fn payload_enum_text(
     )
 }
 
+/// Print the definition of one record instance: Vec<int> as Vec_int.
+///
+/// The tag is the instance's C name, the members keep the template's order, and
+/// every type parameter prints as the type the instance bound it to.
+pub(crate) fn record_instance_text(record: &RecordSpec, name: &str, spelling: Spelling) -> String {
+    let mut members = Vec::new();
+    for member in record.members.as_deref().unwrap_or_default() {
+        members.push(member_text(member, spelling));
+    }
+    let members = members
+        .iter()
+        .map(|member| indented(member))
+        .collect::<Vec<_>>();
+    format!(
+        "typedef struct {name} {name};
+struct {name} {{
+{}
+}};",
+        members.join(
+            "
+"
+        )
+    )
+}
+
 /// Print one member declaration of a `struct` or `union`.
-fn member_text(member: &MemberDecl) -> String {
-    let base = specs_text(&member.specs);
+fn member_text(member: &MemberDecl, spelling: Spelling) -> String {
+    let base = specs_text_in(&member.specs, spelling);
     if member.declarators.is_empty() {
         // A C11 anonymous struct or union member.
         return format!("{base};");
     }
     let mut declarators = Vec::new();
     for member in &member.declarators {
-        let mut text = declarator_text(&member.declarator);
+        let mut text = declarator_text_in(&member.declarator, spelling);
         if let Some(width) = &member.bit_width {
             if !text.is_empty() {
                 text.push(' ');

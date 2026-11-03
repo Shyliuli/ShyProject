@@ -17,7 +17,7 @@
 //! record prints nothing: C has no template, and an instance of one is a
 //! separate symbol with its own name (`Vec_int`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::ast::{
     self, AsmStmt, AssignOp, BinaryOp, Block, DeclSpecs, Declaration, Declarator,
@@ -27,8 +27,8 @@ use crate::ast::{
 };
 use crate::c::names;
 use crate::c::types::{
-    Spelling, declarator_text_in, specs_text_in, trait_value_possible, trait_value_text,
-    type_name_text,
+    Mention, Spelling, declarator_text_in, record_instance_text, specs_text_in,
+    trait_value_possible, trait_value_text, type_name_text,
 };
 use crate::source::{Diagnostic, Span};
 
@@ -89,9 +89,34 @@ struct Backend<'a> {
     /// The C name the instance table gives each generic instance, keyed by the
     /// name this backend mangles.
     aliases: &'a HashMap<String, String>,
-    /// Names of free functions with generic parameters. C has no template, so
-    /// a call to one is a diagnostic instead of a call to a missing symbol.
-    templates: HashSet<String>,
+    /// Generic free functions, by name.
+    templates: HashMap<String, &'a FunctionDecl>,
+    /// Generic record definitions, by name.
+    generic_records: HashMap<String, &'a RecordSpec>,
+    /// The impl blocks of a generic record, by the record's name.
+    generic_impls: HashMap<String, Vec<&'a ImplBlock>>,
+    /// Generic uses seen while printing: the work list of specializations.
+    mentions: std::cell::RefCell<Vec<Mention>>,
+    /// Specializations already queued, so one instance prints once.
+    instances: std::cell::RefCell<Vec<Instance>>,
+}
+
+/// One specialization the C output needs: a template and concrete arguments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Instance {
+    /// The template's name, as written in the source.
+    name: String,
+    /// The concrete arguments, in source spelling (int, Vec<int>).
+    args: Vec<String>,
+}
+
+impl Instance {
+    /// The C name of this instance: the table's alias when it has one, else the
+    /// mangled name.
+    fn c_name(&self, aliases: &HashMap<String, String>) -> String {
+        let mangled = names::instance(&self.name, &self.args);
+        aliases.get(&mangled).cloned().unwrap_or_else(|| mangled)
+    }
 }
 
 impl<'a> Backend<'a> {
@@ -104,7 +129,11 @@ impl<'a> Backend<'a> {
             impls: HashMap::new(),
             traits: HashMap::new(),
             aliases,
-            templates: HashSet::new(),
+            templates: HashMap::new(),
+            generic_records: HashMap::new(),
+            generic_impls: HashMap::new(),
+            mentions: std::cell::RefCell::new(Vec::new()),
+            instances: std::cell::RefCell::new(Vec::new()),
         };
         for item in &unit.items {
             match item {
@@ -114,7 +143,7 @@ impl<'a> Backend<'a> {
                         let ty = backend.ty_of(&function.specs, &function.declarator);
                         backend.functions.insert(name.text.clone(), ty);
                         if is_template(&function.declarator) {
-                            backend.templates.insert(name.text.clone());
+                            backend.templates.insert(name.text.clone(), function);
                         }
                     }
                 }
@@ -135,10 +164,13 @@ impl<'a> Backend<'a> {
         Spelling {
             self_name,
             aliases: Some(self.aliases),
+            bindings: None,
+            generics: true,
+            mentions: Some(&self.mentions),
         }
     }
 
-    fn declaration(&mut self, declaration: &Declaration) {
+    fn declaration(&mut self, declaration: &'a Declaration) {
         for specifier in &declaration.specs.type_specs {
             match specifier {
                 TypeSpecifier::Record(record) => self.record(record),
@@ -159,10 +191,16 @@ impl<'a> Backend<'a> {
         }
     }
 
-    fn record(&mut self, record: &RecordSpec) {
+    fn record(&mut self, record: &'a RecordSpec) {
         let (Some(tag), Some(members)) = (&record.tag, &record.members) else {
             return;
         };
+        if !record.generics.is_empty() {
+            // A template: each use names an instance, which is printed once the
+            // work list reaches it.
+            self.generic_records.insert(tag.text.clone(), record);
+            return;
+        }
         let mut fields = Vec::new();
         for member in members {
             for declarator in &member.declarators {
@@ -190,6 +228,10 @@ impl<'a> Backend<'a> {
     }
 
     fn impl_block(&mut self, block: &'a ImplBlock) {
+        if let Some(receiver) = generic_receiver(block) {
+            self.generic_impls.entry(receiver).or_default().push(block);
+            return;
+        }
         let receiver = Ty::from_text(&type_name_text(&block.self_type)).base;
         for method in &block.methods {
             if let Some(name) = &method.declarator.name {
@@ -206,12 +248,12 @@ impl<'a> Backend<'a> {
     /// A function declarator answers with its return type: only a call asks for
     /// it, and the parameters are never part of a name.
     fn ty_of(&self, specs: &DeclSpecs, declarator: &Declarator) -> Ty {
-        self.ty_of_with(specs, declarator, "void")
+        self.ty_with(specs, declarator, self.spelling("void"))
     }
 
-    /// The declared type behind one specifier list, with self as self_name.
-    fn ty_of_with(&self, specs: &DeclSpecs, declarator: &Declarator, self_name: &str) -> Ty {
-        let spelling = self.spelling(self_name);
+    /// The declared type behind one specifier list, spelled as the caller needs
+    /// it: a specialization resolves its parameters, a method its receiver.
+    fn ty_with(&self, specs: &DeclSpecs, declarator: &Declarator, spelling: Spelling) -> Ty {
         match function_position(declarator) {
             Some(position) => Ty::from_text(&self.return_type_text_at(specs, declarator, position)),
             None => {
@@ -418,7 +460,19 @@ impl<'a> Backend<'a> {
     }
 
     fn render(&self, unit: &TranslationUnit) -> Result<String, Diagnostic> {
-        let mut output = String::from("/* Generated by shyc --emit=c. */\n\n");
+        // A specialization is printed by the same code as the unit, and a
+        // specialization can need another one, so the instance list is
+        // discovered on a discarded run and then printed for real.
+        let mut scratch = String::new();
+        self.emit(unit, &mut scratch)?;
+        let mut output = String::new();
+        self.emit(unit, &mut output)?;
+        Ok(output)
+    }
+
+    /// Print the unit, its declarations, and every specialization it needs.
+    fn emit(&self, unit: &TranslationUnit, output: &mut String) -> Result<(), Diagnostic> {
+        output.push_str("/* Generated by shyc --emit=c. */\n\n");
         // A record's tag is also its type name in ShyC, so every C record gets
         // the typedef a caller needs before anything mentions it; the definition
         // itself stays in place below. This comes first because a trait method
@@ -453,6 +507,14 @@ impl<'a> Backend<'a> {
             output.push_str(&traits);
             output.push('\n');
         }
+        // The generic instances the unit needs: a specialization is a record
+        // definition, a function, or one method per impl block.
+        self.drain();
+        let instances = self.instance_declarations()?;
+        if !instances.is_empty() {
+            output.push_str(&instances);
+            output.push('\n');
+        }
         // Methods and trait constructors are defined wherever their impl block
         // appears, but a body before it calls them, so they are declared first.
         let mut prototypes = String::new();
@@ -479,8 +541,9 @@ impl<'a> Backend<'a> {
                 output.push_str(text);
                 output.push_str("\n\n");
             }
+            self.drain();
         }
-        Ok(output)
+        self.instantiate(output)
     }
 
     /// Print one file-scope declaration as a definition, initializer included.
@@ -716,6 +779,305 @@ fn forward_record(specs: &DeclSpecs) -> Option<String> {
     Some(format!("typedef {keyword} {tag} {tag};", tag = tag.text))
 }
 
+/// The record name of a generic impl block, if the block implements one.
+fn generic_receiver(block: &ImplBlock) -> Option<String> {
+    match &block.self_type.specs.type_specs[..] {
+        [TypeSpecifier::Generic(generic)] => Some(generic.name.text.clone()),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Specializations
+// ---------------------------------------------------------------------------
+
+impl<'a> Backend<'a> {
+    /// Queue the generic uses the printers reported.
+    fn drain(&self) {
+        let mentions = std::mem::take(&mut *self.mentions.borrow_mut());
+        for mention in mentions {
+            self.enqueue(Instance {
+                name: mention.name,
+                args: mention.args,
+            });
+        }
+    }
+
+    /// Queue one specialization, once.
+    fn enqueue(&self, instance: Instance) {
+        if !self.is_template(&instance.name) {
+            return;
+        }
+        let mut instances = self.instances.borrow_mut();
+        if !instances.contains(&instance) {
+            instances.push(instance);
+        }
+    }
+
+    fn is_template(&self, name: &str) -> bool {
+        self.templates.contains_key(name) || self.generic_records.contains_key(name)
+    }
+
+    /// The type parameters of a template, in declaration order.
+    fn parameters(&self, name: &str) -> Vec<String> {
+        if let Some(record) = self.generic_records.get(name) {
+            return record
+                .generics
+                .iter()
+                .map(|param| param.name.text.clone())
+                .collect();
+        }
+        if let Some(function) = self.templates.get(name) {
+            return generic_parameters(&function.declarator);
+        }
+        Vec::new()
+    }
+
+    /// One instance's type parameters bound to its arguments.
+    fn bindings(&self, instance: &Instance) -> HashMap<String, String> {
+        self.parameters(&instance.name)
+            .into_iter()
+            .zip(instance.args.iter().cloned())
+            .collect()
+    }
+
+    /// How a specialization spells types: its bindings, no parameter lists.
+    fn instance_spelling<'s>(
+        &'s self,
+        self_name: &'s str,
+        bindings: &'s HashMap<String, String>,
+    ) -> Spelling<'s> {
+        Spelling {
+            self_name,
+            aliases: Some(self.aliases),
+            bindings: Some(bindings),
+            generics: false,
+            mentions: Some(&self.mentions),
+        }
+    }
+
+    /// The declarations a specialization contributes: record definitions, and
+    /// one prototype per function and method.
+    fn instance_declarations(&self) -> Result<String, Diagnostic> {
+        let mut output = String::new();
+        for instance in self.instances.borrow().clone() {
+            let bindings = self.bindings(&instance);
+            let name = instance.c_name(self.aliases);
+            if let Some(record) = self.generic_records.get(&instance.name) {
+                let spelling = self.instance_spelling("void", &bindings);
+                output.push_str(&record_instance_text(record, &name, spelling));
+                output.push('\n');
+                output.push_str(&self.method_prototypes_of(&instance, &name));
+            } else if let Some(function) = self.templates.get(&instance.name) {
+                let spelling = self.instance_spelling("void", &bindings);
+                let declarator = renamed(&function.declarator, &name);
+                output.push_str(&format!(
+                    "static {} {};\n",
+                    specs_text_in(&function.specs, spelling),
+                    declarator_text_in(&declarator, spelling)
+                ));
+            }
+        }
+        Ok(output)
+    }
+
+    /// The prototypes of the methods a generic impl block gives one instance.
+    fn method_prototypes_of(&self, instance: &Instance, name: &str) -> String {
+        let mut output = String::new();
+        for block in self.generic_impls.get(&instance.name).into_iter().flatten() {
+            let bindings = self.block_bindings(block, instance);
+            let spelling = self.instance_spelling(name, &bindings);
+            for method in self.methods(block) {
+                let Some(method_name) = &method.declarator.name else {
+                    continue;
+                };
+                let symbol = self.symbol(block, name, &method_name.text);
+                let declarator = renamed(method.declarator, &symbol);
+                output.push_str(&format!(
+                    "static {} {};\n",
+                    specs_text_in(method.specs, spelling),
+                    declarator_text_in(&declarator, spelling)
+                ));
+            }
+        }
+        output
+    }
+
+    /// The bodies of every specialization, and the ones they need in turn.
+    fn instantiate(&self, output: &mut String) -> Result<(), Diagnostic> {
+        let mut index = 0;
+        loop {
+            let instance = {
+                let instances = self.instances.borrow();
+                match instances.get(index) {
+                    Some(instance) => instance.clone(),
+                    None => break,
+                }
+            };
+            index += 1;
+            let name = instance.c_name(self.aliases);
+            if let Some(function) = self.templates.get(&instance.name) {
+                let bindings = self.bindings(&instance);
+                let spelling = self.instance_spelling(&name, &bindings);
+                let declarator = renamed(&function.declarator, &name);
+                let mut body = Body::instance(
+                    self,
+                    Some(return_type_in(
+                        &function.specs,
+                        &function.declarator,
+                        spelling,
+                    )),
+                    name.clone(),
+                    bindings.clone(),
+                );
+                body.parameters(&function.declarator);
+                output.push_str(&format!(
+                    "static {} {} {}\n\n",
+                    specs_text_in(&function.specs, spelling),
+                    declarator_text_in(&declarator, spelling),
+                    body.block(&function.body, 0)?
+                ));
+            }
+            if let Some(blocks) = self.generic_impls.get(&instance.name).cloned() {
+                for block in blocks {
+                    let bindings = self.block_bindings(block, &instance);
+                    let spelling = self.instance_spelling(&name, &bindings);
+                    for method in self.methods(block) {
+                        let Some(method_name) = &method.declarator.name else {
+                            continue;
+                        };
+                        let symbol = self.symbol(block, &name, &method_name.text);
+                        let declarator = renamed(method.declarator, &symbol);
+                        let mut body = Body::instance(
+                            self,
+                            Some(return_type_in(method.specs, method.declarator, spelling)),
+                            name.clone(),
+                            bindings.clone(),
+                        );
+                        body.parameters(method.declarator);
+                        output.push_str(&format!(
+                            "static {} {} {}\n\n",
+                            specs_text_in(method.specs, spelling),
+                            declarator_text_in(&declarator, spelling),
+                            body.block(method.body, 0)?
+                        ));
+                    }
+                }
+            }
+            self.drain();
+        }
+        Ok(())
+    }
+
+    /// The bindings of one generic impl block for one instance.
+    fn block_bindings(&self, block: &ImplBlock, instance: &Instance) -> HashMap<String, String> {
+        let parameters = if block.generics.is_empty() {
+            self.parameters(&instance.name)
+        } else {
+            block
+                .generics
+                .iter()
+                .map(|param| param.name.text.clone())
+                .collect()
+        };
+        parameters
+            .into_iter()
+            .zip(instance.args.iter().cloned())
+            .collect()
+    }
+}
+
+impl<'a> Backend<'a> {
+    /// Bind a template's type parameters from the argument types of one call.
+    ///
+    /// A parameter that is exactly a type parameter, under any number of
+    /// pointers, binds to the argument type with the same pointers. That is the
+    /// shape these templates take: a value, a pointer to it, or a buffer the
+    /// caller passes by pointer.
+    fn infer(&self, function: &FunctionDecl, actuals: &[Option<Ty>]) -> Option<Instance> {
+        let position = function_position(&function.declarator)?;
+        let DerivedDeclarator::Function(call) = function.declarator.derived.get(position)? else {
+            return None;
+        };
+        let parameters = generic_parameters(&function.declarator);
+        let mut bindings = HashMap::new();
+        for (index, parameter) in call.params.iter().enumerate() {
+            let Some(actual) = actuals.get(index).and_then(|actual| actual.as_ref()) else {
+                continue;
+            };
+            let mut declarator = parameter.declarator.clone().unwrap_or(Declarator {
+                span: parameter.span,
+                name: None,
+                derived: Vec::new(),
+            });
+            declarator.name = None;
+            let text = format!(
+                "{} {}",
+                specs_text_in(&parameter.specs, Spelling::plain()),
+                declarator_text_in(&declarator, Spelling::plain())
+            );
+            let (base, pointers) = names::split(&text);
+            if !parameters.contains(&base) || actual.pointers < pointers {
+                continue;
+            }
+            let mut bound = actual.clone();
+            for _ in 0..pointers {
+                bound = bound.pointee();
+            }
+            bindings.insert(base, ty_text(&bound));
+        }
+        let args = parameters
+            .iter()
+            .map(|parameter| bindings.get(parameter).cloned())
+            .collect::<Option<Vec<_>>>()?;
+        Some(Instance {
+            name: function.declarator.name.as_ref()?.text.clone(),
+            args,
+        })
+    }
+}
+
+/// One resolved type as C spells it.
+fn ty_text(ty: &Ty) -> String {
+    let mut text = ty.base.clone();
+    for _ in 0..ty.pointers {
+        text.push_str(" *");
+    }
+    text
+}
+
+/// The type parameters written on a function declarator, in order.
+fn generic_parameters(declarator: &Declarator) -> Vec<String> {
+    let Some(position) = function_position(declarator) else {
+        return Vec::new();
+    };
+    let Some(DerivedDeclarator::Function(function)) = declarator.derived.get(position) else {
+        return Vec::new();
+    };
+    function
+        .generics
+        .iter()
+        .map(|param| param.name.text.clone())
+        .collect()
+}
+
+/// A function's return type under one spelling.
+fn return_type_in(specs: &DeclSpecs, declarator: &Declarator, spelling: Spelling) -> String {
+    let position = function_position(declarator).unwrap_or(0);
+    let returned = Declarator {
+        span: declarator.span,
+        name: None,
+        derived: declarator.derived[position + 1..].to_vec(),
+    };
+    let base = specs_text_in(specs, spelling);
+    let suffix = declarator_text_in(&returned, spelling);
+    if suffix.is_empty() {
+        base
+    } else {
+        format!("{base} {suffix}")
+    }
+}
+
 /// One method to print: the block's own definition or an inherited default.
 struct Method<'a> {
     specs: &'a DeclSpecs,
@@ -776,6 +1138,12 @@ struct Body<'a, 'b> {
     /// What `self` means here: the receiver type inside an impl method, `void`
     /// everywhere else.
     self_name: String,
+    /// Type parameters of the specialization this body belongs to, bound to
+    /// their concrete spelling. Empty outside a specialization.
+    bindings: HashMap<String, String>,
+    /// Whether the body belongs to a specialization, which prints no parameter
+    /// lists because C has no template.
+    instance: bool,
     /// The names visible in the body, innermost scope last.
     scopes: Vec<HashMap<String, Ty>>,
 }
@@ -794,7 +1162,37 @@ impl<'a, 'b> Body<'a, 'b> {
             backend,
             return_ty,
             self_name,
+            bindings: HashMap::new(),
+            instance: false,
             scopes: vec![HashMap::new()],
+        }
+    }
+
+    /// A body printed as one specialization of a template.
+    fn instance(
+        backend: &'a Backend<'b>,
+        return_ty: Option<String>,
+        self_name: String,
+        bindings: HashMap<String, String>,
+    ) -> Body<'a, 'b> {
+        Body {
+            backend,
+            return_ty,
+            self_name,
+            bindings,
+            instance: true,
+            scopes: vec![HashMap::new()],
+        }
+    }
+
+    /// How this body spells types.
+    fn spelling(&self) -> Spelling<'_> {
+        Spelling {
+            self_name: &self.self_name,
+            aliases: Some(self.backend.aliases),
+            bindings: Some(&self.bindings),
+            generics: !self.instance,
+            mentions: Some(&self.backend.mentions),
         }
     }
 
@@ -817,12 +1215,9 @@ impl<'a, 'b> Body<'a, 'b> {
             let ty = match &parameter.declarator {
                 Some(declarator) => {
                     self.backend
-                        .ty_of_with(&parameter.specs, declarator, &self.self_name)
+                        .ty_with(&parameter.specs, declarator, self.spelling())
                 }
-                None => Ty::from_text(&specs_text_in(
-                    &parameter.specs,
-                    self.backend.spelling(&self.self_name),
-                )),
+                None => Ty::from_text(&specs_text_in(&parameter.specs, self.spelling())),
             };
             self.bind(&name.text, ty);
         }
@@ -1004,22 +1399,19 @@ impl<'a, 'b> Body<'a, 'b> {
     }
 
     fn declaration(&mut self, declaration: &Declaration) -> Result<String, Diagnostic> {
-        let specs = specs_text_in(&declaration.specs, self.backend.spelling(&self.self_name));
+        let specs = specs_text_in(&declaration.specs, self.spelling());
         let mut declarators = Vec::new();
         for declarator in &declaration.declarators {
-            let mut text = declarator_text_in(
-                &declarator.declarator,
-                self.backend.spelling(&self.self_name),
-            );
+            let mut text = declarator_text_in(&declarator.declarator, self.spelling());
             if let Some(initializer) = &declarator.init {
                 text.push_str(" = ");
                 text.push_str(&self.initializer(initializer)?);
             }
             if let Some(name) = &declarator.declarator.name {
-                let ty = self.backend.ty_of_with(
+                let ty = self.backend.ty_with(
                     &declaration.specs,
                     &declarator.declarator,
-                    &self.self_name,
+                    self.spelling(),
                 );
                 self.bind(&name.text, ty);
             }
@@ -1367,16 +1759,21 @@ impl<'a, 'b> Body<'a, 'b> {
             ));
         }
         if let Expr::Name(name) = callee
-            && self.backend.templates.contains(&name.text)
+            && let Some(function) = self.backend.templates.get(&name.text).copied()
         {
-            return Err(Diagnostic::new(
-                span,
-                format!(
-                    "'{}' is a generic function and C has no template; its instance has to be \
-                     named",
-                    name.text
-                ),
-            ));
+            let actuals = args.iter().map(|arg| self.ty(arg)).collect::<Vec<_>>();
+            let Some(instance) = self.backend.infer(function, &actuals) else {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "cannot infer the type arguments of '{}'; name the instance instead",
+                        name.text
+                    ),
+                ));
+            };
+            let symbol = instance.c_name(self.backend.aliases);
+            self.backend.enqueue(instance);
+            return Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")));
         }
         Ok(format!(
             "{}({})",
@@ -1478,6 +1875,14 @@ impl<'a, 'b> Body<'a, 'b> {
             Expr::Call { callee, .. } => self.callee_ty(callee),
             Expr::Cast { type_name, .. } => Some(type_name_of(type_name)),
             Expr::Index { array, .. } => self.ty(array).map(|ty| ty.pointee()),
+            // A literal has the type its spelling implies, which is what
+            // template inference needs from a call like twice(3).
+            Expr::Number(literal) => Some(Ty::from_text(&number_type(&literal.text))),
+            Expr::Char(_) => Some(Ty::from_text("char")),
+            Expr::String(_) => Some(Ty {
+                base: "char".to_string(),
+                pointers: 1,
+            }),
             _ => None,
         }
     }
@@ -1510,6 +1915,24 @@ impl<'a, 'b> Body<'a, 'b> {
             _ => None,
         }
     }
+}
+
+/// The C type a numeric literal's spelling implies.
+fn number_type(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut ty = String::new();
+    if lower.contains('.') || lower.contains('e') && !lower.starts_with("0x") {
+        ty.push_str("double");
+    } else {
+        ty.push_str("int");
+    }
+    if lower.ends_with('l') || lower.ends_with("ll") {
+        ty.push_str(" long");
+    }
+    if lower.contains('u') {
+        ty.insert_str(0, "unsigned ");
+    }
+    ty
 }
 
 fn type_name_of(name: &TypeName) -> Ty {
