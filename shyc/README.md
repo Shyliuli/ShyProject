@@ -72,10 +72,9 @@ clang client.c api_wrapper.o lib.o -o client
 ```
 
 `--emit=c` accepts the same table: a generic use then prints the alias the
-table gives it (`Vec<int>` prints as `vec_int` instead of `Vec_int`), so a
-translated unit and the generated header name one instance the same way. The
-table itself is not printed by that output: an instance is a symbol of its own,
-and the header or wrapper provides it.
+table gives it, so a translated unit and the generated header name one instance
+the same way. The table itself is not printed by that output: an instance is a
+symbol of its own, and the header or wrapper provides it.
 
 The instance table is compile-time input, not C source. `--instances` names the
 concrete generic records, enums, and functions that may cross the C boundary:
@@ -122,19 +121,21 @@ method needs a concrete instantiated symbol before it can be declared, which is
 what the instance table above provides. A `trait` is exported as a forward `typedef` plus
 the `struct` of function pointers that its value type uses.
 
-`--emit=c` prints the same unit as plain C. An inferred local becomes
-`__auto_type` (`const __auto_type` without `mut`), an `impl` block becomes one
-mangled function per method with its receiver as the first parameter, and a
-method call becomes a call to that function: `p.add(1)` is
-`Point_add(&p, 1)`. ShyC's dot dereferences a pointer, so the C output says
-`->` where the source wrote `.`. A `trait` value is the `struct` of function
-pointers that `Trait::from<T>()` fills, `value?` becomes a statement
-expression whose failure arm returns the enclosing function's failure variant,
-`asm!` becomes a GCC extended asm statement, and a generic use prints as the
-instance name (`Vec<int>` is `Vec_int`).
-What C cannot spell stays out rather than being guessed: a generic function or
-record prints nothing, because an instance is a symbol of its own, and a trait
-method that only has a default body stops the translation with a diagnostic.
+`--emit=c` lowers the unit first and then prints it: every name in the output is
+the compiler's, so a symbol a call prints is the symbol the definition emits.
+An inferred local becomes `__auto_type` (`const __auto_type` without `mut`), an
+`impl` block becomes one function per method with its receiver first, and a
+method call becomes a call to it, so `p.add(1)` prints as
+`____Point__add(&p, 1)` and a file-local function as `_L_module_name`. ShyC's
+dot dereferences a pointer, so the C output says `->` where the source wrote
+`.`. A trait value is the `struct` of function pointers that
+`Trait::from<T>()` fills, a generic instance prints under the type name the
+instance table or the type printer gave it, and `value?` expands to a statement
+expression whose failure arm returns the enclosing function's failure variant;
+`asm!` becomes a GCC extended asm statement. A generic function, method, or
+record is specialized on demand from the specializations the compiler already
+materialized, so C needs no template. The output is deterministic: one input
+prints one file.
 
 Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `--instances <file>`,
 `-O0`..`-O3`
