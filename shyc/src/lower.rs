@@ -148,6 +148,14 @@ fn instance_plans(
             layout: None,
         });
     }
+    // The caches are hash maps, so the order they hand back is not the order
+    // the C output should have; two runs of one input must print one file.
+    plans.sort_by(|left, right| {
+        (&left.name, &left.args, &left.receiver).cmp(&(&right.name, &right.args, &right.receiver))
+    });
+    plans.dedup_by(|left, right| {
+        left.name == right.name && left.args == right.args && left.receiver == right.receiver
+    });
     plans
 }
 
