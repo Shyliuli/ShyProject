@@ -487,6 +487,22 @@ pub fn render_wrapper(lowered: &crate::lower::Lowered) -> String {
     printer.output
 }
 
+/// The C spelling of one type, without a declared name.
+///
+/// A specialization's arguments reach the C backend as types, and they have to
+/// be spelled the way the header spells them, so the backend asks here instead
+/// of repeating the rules: int, char *, Point *, struct shyc_R7.
+pub fn type_text(types: &TypeStore, names: &HashMap<TypeId, CTypeName>, ty: TypeId) -> String {
+    let printer = CPrinter {
+        types,
+        names,
+        exports: &[],
+        repeat_plain_layouts: false,
+        output: String::new(),
+    };
+    printer.declaration(ty, "").trim_end().to_string()
+}
+
 /// One C declaration printer over the lowered type arena.
 struct CPrinter<'a> {
     types: &'a TypeStore,

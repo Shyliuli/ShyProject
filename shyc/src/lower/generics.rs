@@ -1269,6 +1269,19 @@ impl Lowerer {
         // finds its own instance.
         self.function_instances
             .insert(key.clone(), instance.clone());
+        // The C export prints this instance from the template's body, so it
+        // needs the receiver and the impl that produced it.
+        self.method_instances.push(super::MethodInstancePlan {
+            name: name.text.clone(),
+            record,
+            impl_name: impl_name.clone(),
+            trait_name: template
+                .trait_impl
+                .as_ref()
+                .map(|trait_impl| trait_impl.name.clone()),
+            args: key.args.clone(),
+            symbol: symbol.clone(),
+        });
         let mut env = template.env.clone();
         let method_env = self.generic_env(&template.params, &key.args);
         env.types.extend(method_env.types);

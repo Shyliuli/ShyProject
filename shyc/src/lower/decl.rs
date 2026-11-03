@@ -393,6 +393,9 @@ impl Lowerer {
             }
         };
         self.declare_function_symbol(&key, &symbol, resolved.ty, true, declaration.span)?;
+        // The C export prints this definition under the same symbol.
+        self.declaration_symbols
+            .insert(declaration.span, symbol.clone());
         // A method of a materialized generic impl keeps only its signature:
         // the body is queued when a lookup first needs it, so an instance
         // compiles the methods it uses. Everything else is lowered now.

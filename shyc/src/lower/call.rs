@@ -968,6 +968,11 @@ impl FnLower<'_> {
         arguments: Vec<ir::Operand>,
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
+        // The driver's C export prints a call under the symbol resolved here,
+        // so the two backends name one call the same way.
+        if let ir::CallTarget::Direct(symbol) = &target {
+            self.l.call_symbols.insert(span, symbol.clone());
+        }
         let signature = self.l.ir_signature(function_ty);
         let TypeKind::Function { result, .. } = self.l.types.kind(function_ty) else {
             return Err(Diagnostic::new(span, "called object is not a function"));

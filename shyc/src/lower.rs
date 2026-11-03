@@ -57,10 +57,110 @@ pub struct Lowered {
     /// C spelling facts for every record and enum type an exported signature
     /// can mention. The exporter never guesses a name from a type id.
     pub c_types: HashMap<TypeId, CTypeName>,
+    /// Every specialization the compiler materialized, in the shape the C
+    /// backend prints: the template, its concrete arguments spelled as C, and
+    /// the type name or symbol the compiler gave it.
+    pub instances: Vec<InstancePlan>,
+    /// The symbol every call expression resolved to, by span.
+    pub call_symbols: HashMap<Span, String>,
+    /// The symbol every function and method definition emits, by span.
+    pub declaration_symbols: HashMap<Span, String>,
     /// Externally visible file-scope functions by C name, in name order. The
     /// ordinary header drops a declaration whose type mentions a generic
     /// instance, and the instance section prints its prototype from here.
     pub c_functions: Vec<(String, TypeId)>,
+}
+
+/// A generic method the compiler materialized.
+///
+/// The receiver and the impl template are kept as the compiler resolved them,
+/// so the C export prints this instance from the template's body instead of
+/// guessing which method a name belongs to.
+#[derive(Clone, Debug)]
+pub struct MethodInstancePlan {
+    pub name: String,
+    pub record: TypeId,
+    pub impl_name: String,
+    pub trait_name: Option<String>,
+    pub args: Vec<GenericArgKey>,
+    pub symbol: String,
+}
+
+/// Every specialization the compiler materialized, ready for the C export.
+///
+/// A record instance is named by the type it became and a function or method
+/// instance by its symbol; both are the compiler's answer, so the C output and
+/// the generated header name one instance the same way.
+fn instance_plans(
+    lowerer: &Lowerer,
+    c_types: &HashMap<TypeId, crate::export_instances::CTypeName>,
+) -> Vec<InstancePlan> {
+    let text = |arg: &GenericArgKey| match arg {
+        GenericArgKey::Type(ty) => crate::export_instances::type_text(&lowerer.types, c_types, *ty),
+        GenericArgKey::Int(value) => value.to_string(),
+    };
+    let mut plans = Vec::new();
+    for (key, ty) in &lowerer.record_instances {
+        plans.push(InstancePlan {
+            name: key.name.clone(),
+            args: key.args.iter().map(text).collect(),
+            type_name: Some(crate::export_instances::type_text(
+                &lowerer.types,
+                c_types,
+                *ty,
+            )),
+            symbol: None,
+            receiver: None,
+            impl_name: None,
+            trait_name: None,
+        });
+    }
+    for (key, instance) in &lowerer.function_instances {
+        plans.push(InstancePlan {
+            name: key.name.clone(),
+            args: key.args.iter().map(text).collect(),
+            type_name: None,
+            symbol: Some(instance.symbol.clone()),
+            receiver: None,
+            impl_name: None,
+            trait_name: None,
+        });
+    }
+    for method in &lowerer.method_instances {
+        plans.push(InstancePlan {
+            name: method.name.clone(),
+            args: method.args.iter().map(text).collect(),
+            type_name: None,
+            symbol: Some(method.symbol.clone()),
+            receiver: Some(crate::export_instances::type_text(
+                &lowerer.types,
+                c_types,
+                method.record,
+            )),
+            impl_name: Some(method.impl_name.clone()),
+            trait_name: method.trait_name.clone(),
+        });
+    }
+    plans
+}
+
+/// One specialization the compiler materialized.
+#[derive(Clone, Debug)]
+pub struct InstancePlan {
+    /// The template's name as written: a record tag, a function, or a method.
+    pub name: String,
+    /// The concrete arguments, spelled as the C type printer spells them.
+    pub args: Vec<String>,
+    /// The C name of the instantiated record or enum.
+    pub type_name: Option<String>,
+    /// The symbol of the instantiated function or method.
+    pub symbol: Option<String>,
+    /// For a method instance: the C name of its receiver type.
+    pub receiver: Option<String>,
+    /// For a method instance: the impl block it came from, as written.
+    pub impl_name: Option<String>,
+    /// For a method instance of a trait impl: the trait's name.
+    pub trait_name: Option<String>,
 }
 
 /// One instance the explicit table asks the C boundary to expose.
@@ -134,7 +234,11 @@ pub fn lower(unit: &ast::TranslationUnit, options: &Options) -> Result<Lowered, 
     lowerer.lower_functions()?;
     let c_types = lowerer.c_type_names(&exports);
     let c_functions = lowerer.c_functions();
+    let instances = instance_plans(&lowerer, &c_types);
     Ok(Lowered {
+        instances,
+        call_symbols: std::mem::take(&mut lowerer.call_symbols),
+        declaration_symbols: std::mem::take(&mut lowerer.declaration_symbols),
         module: lowerer.module,
         types: lowerer.types,
         exports,
@@ -407,7 +511,7 @@ pub(super) struct FunctionInstance {
 /// One concrete generic argument. Types and `const` integers share one key
 /// type so records and functions can keep a single cache shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) enum GenericArgKey {
+pub enum GenericArgKey {
     Type(TypeId),
     /// A `const` argument, always implicit `int`.
     Int(i64),
@@ -465,6 +569,14 @@ pub(super) struct Lowerer {
     pub generic_impl_instances: HashMap<GenericImplInstanceKey, Span>,
     /// Nesting level of the generic instantiation currently being resolved.
     pub instantiation_depth: u32,
+    /// Every generic method the compiler materialized: which template it came
+    /// from and what it bound, so the C export can print the body.
+    pub method_instances: Vec<MethodInstancePlan>,
+    /// The symbol every call expression resolved to, by span. The C backend
+    /// prints a call under the name the compiler already chose for it.
+    pub call_symbols: HashMap<Span, String>,
+    /// The symbol every function and method definition emits, by span.
+    pub declaration_symbols: HashMap<Span, String>,
     /// Every trait declaration, by name. Registered before any `impl` is
     /// checked.
     pub traits: HashMap<String, TraitInfo>,
@@ -519,6 +631,9 @@ impl Lowerer {
             type_scopes: vec![TypeScope::default()],
             enum_consts: HashMap::new(),
             generic_records: HashMap::new(),
+            method_instances: Vec::new(),
+            call_symbols: HashMap::new(),
+            declaration_symbols: HashMap::new(),
             record_instances: HashMap::new(),
             generic_enums: HashMap::new(),
             enum_instances: HashMap::new(),
