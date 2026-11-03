@@ -445,6 +445,7 @@ name = "shycc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "shyc",
 ]
 
 [[package]]

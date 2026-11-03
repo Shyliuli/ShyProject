@@ -394,6 +394,14 @@ fn arguments() -> Result<Option<Options>, String> {
     preprocess
         .include_dirs
         .push(Path::new(env!("CARGO_MANIFEST_DIR")).join("include"));
+    // The project's C library is not part of the compiler: `~/.shycc.toml`
+    // names it, and a checkout provides it next to the crates. Its layers are
+    // what a `use std::io::*` resolves to.
+    if let Some(shylib) = shyc::config::shylib() {
+        preprocess
+            .include_dirs
+            .extend(shyc::config::shylib_includes(&shylib));
+    }
     while let Some(arg) = args.next() {
         let selected = match arg.as_str() {
             "--help" | "-h" => {

@@ -17,7 +17,7 @@
 //! record prints nothing: C has no template, and an instance of one is a
 //! separate symbol with its own name (`Vec_int`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     self, AsmStmt, AssignOp, BinaryOp, Block, DeclSpecs, Declaration, Declarator,
@@ -27,7 +27,8 @@ use crate::ast::{
 };
 use crate::c::names;
 use crate::c::types::{
-    Spelling, declarator_text_in, specs_text_in, trait_value_text, type_name_text,
+    Spelling, declarator_text_in, specs_text_in, trait_value_possible, trait_value_text,
+    type_name_text,
 };
 use crate::source::{Diagnostic, Span};
 
@@ -88,6 +89,9 @@ struct Backend<'a> {
     /// The C name the instance table gives each generic instance, keyed by the
     /// name this backend mangles.
     aliases: &'a HashMap<String, String>,
+    /// Names of free functions with generic parameters. C has no template, so
+    /// a call to one is a diagnostic instead of a call to a missing symbol.
+    templates: HashSet<String>,
 }
 
 impl<'a> Backend<'a> {
@@ -100,6 +104,7 @@ impl<'a> Backend<'a> {
             impls: HashMap::new(),
             traits: HashMap::new(),
             aliases,
+            templates: HashSet::new(),
         };
         for item in &unit.items {
             match item {
@@ -108,6 +113,9 @@ impl<'a> Backend<'a> {
                     if let Some(name) = &function.declarator.name {
                         let ty = backend.ty_of(&function.specs, &function.declarator);
                         backend.functions.insert(name.text.clone(), ty);
+                        if is_template(&function.declarator) {
+                            backend.templates.insert(name.text.clone());
+                        }
                     }
                 }
                 Item::Impl(block) => backend.impl_block(block),
@@ -186,8 +194,8 @@ impl<'a> Backend<'a> {
         for method in &block.methods {
             if let Some(name) = &method.declarator.name {
                 let ty = self.ty_of(&method.specs, &method.declarator);
-                self.functions
-                    .insert(names::method(&receiver, &name.text), ty);
+                let symbol = self.symbol(block, &receiver, &name.text);
+                self.functions.insert(symbol, ty);
             }
         }
         self.impls.entry(receiver).or_default().push(block);
@@ -198,7 +206,12 @@ impl<'a> Backend<'a> {
     /// A function declarator answers with its return type: only a call asks for
     /// it, and the parameters are never part of a name.
     fn ty_of(&self, specs: &DeclSpecs, declarator: &Declarator) -> Ty {
-        let spelling = self.spelling("void");
+        self.ty_of_with(specs, declarator, "void")
+    }
+
+    /// The declared type behind one specifier list, with self as self_name.
+    fn ty_of_with(&self, specs: &DeclSpecs, declarator: &Declarator, self_name: &str) -> Ty {
+        let spelling = self.spelling(self_name);
         match function_position(declarator) {
             Some(position) => Ty::from_text(&self.return_type_text_at(specs, declarator, position)),
             None => {
@@ -216,9 +229,9 @@ impl<'a> Backend<'a> {
     }
 
     /// The type a function returns, spelled for this output.
-    fn return_type_text(&self, function: &FunctionDecl) -> String {
-        let position = function_position(&function.declarator).unwrap_or(0);
-        self.return_type_text_at(&function.specs, &function.declarator, position)
+    fn return_type_text(&self, specs: &DeclSpecs, declarator: &Declarator) -> String {
+        let position = function_position(declarator).unwrap_or(0);
+        self.return_type_text_at(specs, declarator, position)
     }
 
     fn return_type_text_at(
@@ -251,15 +264,97 @@ impl<'a> Backend<'a> {
             .map(|(_, ty)| ty.clone())
     }
 
-    /// The C symbol of one method of one receiver, when an impl block has it.
+    /// The C symbol of one method of one receiver, when an impl block defines
+    /// it or inherits a default body for it.
+    ///
+    /// An inherent method wins over a trait method of the same name, which is
+    /// how a call with one receiver and no trait qualifier resolves.
     fn method(&self, receiver: &str, name: &str) -> Option<String> {
         let blocks = self.impls.get(receiver)?;
-        for block in blocks {
-            if find_method(block, name).is_some() {
+        let defines = |block: &ImplBlock| {
+            find_method(block, name).is_some()
+                || find_prototype(block, name).is_some()
+                || self.inherits(block, name)
+        };
+        for block in blocks.iter().filter(|block| block.trait_name.is_none()) {
+            if defines(block) {
                 return Some(names::method(receiver, name));
             }
         }
+        for block in blocks.iter().filter(|block| block.trait_name.is_some()) {
+            if defines(block) {
+                let trait_name = block.trait_name.as_ref()?;
+                return Some(names::trait_method(receiver, &trait_name.text, name));
+            }
+        }
         None
+    }
+
+    /// The C symbol of one method of one impl block.
+    fn symbol(&self, block: &ImplBlock, receiver: &str, name: &str) -> String {
+        match &block.trait_name {
+            Some(trait_name) => names::trait_method(receiver, &trait_name.text, name),
+            None => names::method(receiver, name),
+        }
+    }
+
+    /// Whether a block inherits a translatable default body for one method.
+    ///
+    /// A generic default is static-only, like a generic method, so it has no
+    /// symbol a C call could reach.
+    fn inherits(&self, block: &ImplBlock, name: &str) -> bool {
+        let Some(trait_name) = &block.trait_name else {
+            return false;
+        };
+        let Some(declaration) = self.traits.get(&trait_name.text) else {
+            return false;
+        };
+        declaration.methods.iter().any(|method| {
+            method
+                .declarator
+                .name
+                .as_ref()
+                .is_some_and(|method_name| method_name.text == name)
+                && method.body.is_some()
+                && !is_template(&method.declarator)
+        })
+    }
+
+    /// The methods to print for one block: the ones it defines, then the trait
+    /// defaults it inherits.
+    fn methods(&self, block: &'a ImplBlock) -> Vec<Method<'a>> {
+        let mut methods = block
+            .methods
+            .iter()
+            .map(|method| Method {
+                specs: &method.specs,
+                declarator: &method.declarator,
+                body: &method.body,
+            })
+            .collect::<Vec<_>>();
+        let Some(trait_name) = &block.trait_name else {
+            return methods;
+        };
+        let Some(declaration) = self.traits.get(&trait_name.text) else {
+            return methods;
+        };
+        for method in &declaration.methods {
+            let Some(body) = &method.body else {
+                continue;
+            };
+            let Some(name) = &method.declarator.name else {
+                continue;
+            };
+            if is_template(&method.declarator) || find_method(block, &name.text).is_some() {
+                continue;
+            }
+            methods.push(Method {
+                specs: &method.specs,
+                declarator: &method.declarator,
+                body,
+            });
+        }
+        methods
     }
 
     /// The return type of one method of one receiver.
@@ -267,6 +362,21 @@ impl<'a> Backend<'a> {
         let blocks = self.impls.get(receiver)?;
         for block in blocks {
             if let Some(method) = find_method(block, name) {
+                return Some(self.ty_of(&method.specs, &method.declarator));
+            }
+            if let Some(prototype) = find_prototype(block, name) {
+                return Some(self.ty_of(&prototype.specs, &prototype.declarator));
+            }
+            if let Some(trait_name) = &block.trait_name
+                && let Some(declaration) = self.traits.get(&trait_name.text)
+                && let Some(method) = declaration.methods.iter().find(|method| {
+                    method
+                        .declarator
+                        .name
+                        .as_ref()
+                        .is_some_and(|method_name| method_name.text == name)
+                })
+            {
                 return Some(self.ty_of(&method.specs, &method.declarator));
             }
         }
@@ -309,6 +419,23 @@ impl<'a> Backend<'a> {
 
     fn render(&self, unit: &TranslationUnit) -> Result<String, Diagnostic> {
         let mut output = String::from("/* Generated by shyc --emit=c. */\n\n");
+        // A record's tag is also its type name in ShyC, so every C record gets
+        // the typedef a caller needs before anything mentions it; the definition
+        // itself stays in place below. This comes first because a trait method
+        // signature may name a record.
+        let mut records = String::new();
+        for item in &unit.items {
+            if let Item::Decl(declaration) = item {
+                if let Some(text) = forward_record(&declaration.specs) {
+                    records.push_str(&text);
+                    records.push('\n');
+                }
+            }
+        }
+        if !records.is_empty() {
+            output.push_str(&records);
+            output.push('\n');
+        }
         // Trait value structures come first, so any declaration or body below
         // can name a trait type whatever its source order.
         let mut traits = String::new();
@@ -324,22 +451,6 @@ impl<'a> Backend<'a> {
         }
         if !traits.is_empty() {
             output.push_str(&traits);
-            output.push('\n');
-        }
-        // A record's tag is also its type name in ShyC, so every C record gets
-        // the typedef a caller needs before anything mentions it; the definition
-        // itself stays in place below.
-        let mut records = String::new();
-        for item in &unit.items {
-            if let Item::Decl(declaration) = item {
-                if let Some(text) = forward_record(&declaration.specs) {
-                    records.push_str(&text);
-                    records.push('\n');
-                }
-            }
-        }
-        if !records.is_empty() {
-            output.push_str(&records);
             output.push('\n');
         }
         // Methods and trait constructors are defined wherever their impl block
@@ -378,7 +489,9 @@ impl<'a> Backend<'a> {
             return Ok(String::new());
         }
         let spelling = self.spelling("void");
-        let specs = specs_text_in(&declaration.specs, spelling);
+        let typedef = declaration.specs.storage == Some(ast::StorageClass::Typedef);
+        let prefix = if typedef { "typedef " } else { "" };
+        let specs = format!("{prefix}{}", specs_text_in(&declaration.specs, spelling));
         if declaration.declarators.is_empty() {
             // An enum's tag names its type too, and C has no forward enum
             // declaration, so the typedef is written with the definition.
@@ -415,64 +528,104 @@ impl<'a> Backend<'a> {
             specs_text_in(&function.specs, spelling),
             declarator_text_in(&function.declarator, spelling)
         );
-        let mut body = Body::new(self, Some(self.return_type_text(function)));
+        let mut body = Body::new(
+            self,
+            Some(self.return_type_text(&function.specs, &function.declarator)),
+        );
         body.parameters(&function.declarator);
         Ok(format!("{signature} {}", body.block(&function.body, 0)?))
     }
 
     /// The declarations a call needs before the impl block's definitions.
-    fn impl_prototypes(&self, block: &ImplBlock) -> Result<String, Diagnostic> {
+    fn impl_prototypes(&self, block: &'a ImplBlock) -> Result<String, Diagnostic> {
         if !block.generics.is_empty() {
             return Ok(String::new());
         }
         let receiver = Ty::from_text(&type_name_text(&block.self_type)).base;
+        let spelling = self.spelling(&receiver);
         let mut output = String::new();
-        for method in &block.methods {
+        for method in self.methods(block) {
             let Some(name) = &method.declarator.name else {
                 continue;
             };
-            let symbol = names::method(&receiver, &name.text);
-            let declarator = renamed(&method.declarator, &symbol);
+            let symbol = self.symbol(block, &receiver, &name.text);
+            let declarator = renamed(method.declarator, &symbol);
             let linkage = if method.specs.is_pub { "" } else { "static " };
             output.push_str(&format!(
                 "{linkage}{} {};\n",
-                specs_text_in(&method.specs, self.spelling(&receiver)),
-                declarator_text_in(&declarator, self.spelling(&receiver))
+                specs_text_in(method.specs, spelling),
+                declarator_text_in(&declarator, spelling)
             ));
         }
-        if let Some(trait_name) = &block.trait_name {
+        for prototype in &block.prototypes {
+            let Some(name) = &prototype.declarator.name else {
+                continue;
+            };
+            let symbol = self.symbol(block, &receiver, &name.text);
+            let declarator = renamed(&prototype.declarator, &symbol);
+            let linkage = if prototype.specs.is_pub {
+                ""
+            } else {
+                "static "
+            };
+            output.push_str(&format!(
+                "{linkage}{} {};\n",
+                specs_text_in(&prototype.specs, spelling),
+                declarator_text_in(&declarator, spelling)
+            ));
+        }
+        if let Some(trait_name) = &block.trait_name
+            && self.trait_value(trait_name)
+        {
             let symbol = names::trait_value(&trait_name.text, &receiver);
             let name = &trait_name.text;
-            output.push_str(&format!("static {name} {symbol}(void);\n"));
+            output.push_str(&format!(
+                "static {name} {symbol}(void);
+"
+            ));
         }
         Ok(output)
     }
 
+    /// Whether a trait in this unit can be a runtime value.
+    fn trait_value(&self, trait_name: &Name) -> bool {
+        self.traits
+            .get(&trait_name.text)
+            .is_some_and(|declaration| trait_value_possible(declaration))
+    }
+
     /// Print the functions and the trait constructor of one impl block.
-    fn impl_text(&self, block: &ImplBlock) -> Result<String, Diagnostic> {
+    fn impl_text(&self, block: &'a ImplBlock) -> Result<String, Diagnostic> {
         if !block.generics.is_empty() {
             return Ok(String::new());
         }
         let receiver = Ty::from_text(&type_name_text(&block.self_type)).base;
+        let spelling = self.spelling(&receiver);
         let mut output = String::new();
-        for method in &block.methods {
+        for method in self.methods(block) {
             let Some(name) = &method.declarator.name else {
                 continue;
             };
-            let symbol = names::method(&receiver, &name.text);
-            let declarator = renamed(&method.declarator, &symbol);
+            let symbol = self.symbol(block, &receiver, &name.text);
+            let declarator = renamed(method.declarator, &symbol);
             let linkage = if method.specs.is_pub { "" } else { "static " };
             let signature = format!(
                 "{linkage}{} {}",
-                specs_text_in(&method.specs, self.spelling(&receiver)),
-                declarator_text_in(&declarator, self.spelling(&receiver))
+                specs_text_in(method.specs, spelling),
+                declarator_text_in(&declarator, spelling)
             );
-            let mut body = Body::named(self, Some(self.return_type_text(method)), receiver.clone());
-            body.parameters(&method.declarator);
-            output.push_str(&format!("{signature} {}", body.block(&method.body, 0)?));
+            let mut body = Body::named(
+                self,
+                Some(self.return_type_text(method.specs, method.declarator)),
+                receiver.clone(),
+            );
+            body.parameters(method.declarator);
+            output.push_str(&format!("{signature} {}", body.block(method.body, 0)?));
             output.push_str("\n\n");
         }
-        if let Some(trait_name) = &block.trait_name {
+        if let Some(trait_name) = &block.trait_name
+            && self.trait_value(trait_name)
+        {
             output.push_str(&self.trait_constructor(block, &receiver, &trait_name.text)?);
         }
         Ok(output)
@@ -499,7 +652,7 @@ impl<'a> Backend<'a> {
                 continue;
             };
             let implementation = match find_method(block, &name.text) {
-                Some(_) => names::method(receiver, &name.text),
+                Some(_) => names::trait_method(receiver, trait_name, &name.text),
                 None => {
                     return Err(Diagnostic::new(
                         method.span,
@@ -563,6 +716,13 @@ fn forward_record(specs: &DeclSpecs) -> Option<String> {
     Some(format!("typedef {keyword} {tag} {tag};", tag = tag.text))
 }
 
+/// One method to print: the block's own definition or an inherited default.
+struct Method<'a> {
+    specs: &'a DeclSpecs,
+    declarator: &'a Declarator,
+    body: &'a Block,
+}
+
 /// The position of the function operator in a declarator.
 fn function_position(declarator: &Declarator) -> Option<usize> {
     declarator
@@ -573,6 +733,17 @@ fn function_position(declarator: &Declarator) -> Option<usize> {
 
 fn has_function(declarator: &Declarator) -> bool {
     function_position(declarator).is_some()
+}
+
+/// The bodiless declaration of one method, if the block has one.
+fn find_prototype<'a>(block: &'a ImplBlock, name: &str) -> Option<&'a ast::MethodPrototype> {
+    block.prototypes.iter().find(|prototype| {
+        prototype
+            .declarator
+            .name
+            .as_ref()
+            .is_some_and(|prototype| prototype.text == name)
+    })
 }
 
 fn find_method<'a>(block: &'a ImplBlock, name: &str) -> Option<&'a FunctionDecl> {
@@ -644,10 +815,13 @@ impl<'a, 'b> Body<'a, 'b> {
                 continue;
             };
             let ty = match &parameter.declarator {
-                Some(declarator) => self.backend.ty_of(&parameter.specs, declarator),
+                Some(declarator) => {
+                    self.backend
+                        .ty_of_with(&parameter.specs, declarator, &self.self_name)
+                }
                 None => Ty::from_text(&specs_text_in(
                     &parameter.specs,
-                    self.backend.spelling("void"),
+                    self.backend.spelling(&self.self_name),
                 )),
             };
             self.bind(&name.text, ty);
@@ -842,9 +1016,11 @@ impl<'a, 'b> Body<'a, 'b> {
                 text.push_str(&self.initializer(initializer)?);
             }
             if let Some(name) = &declarator.declarator.name {
-                let ty = self
-                    .backend
-                    .ty_of(&declaration.specs, &declarator.declarator);
+                let ty = self.backend.ty_of_with(
+                    &declaration.specs,
+                    &declarator.declarator,
+                    &self.self_name,
+                );
                 self.bind(&name.text, ty);
             }
             declarators.push(text);
@@ -1095,6 +1271,18 @@ impl<'a, 'b> Body<'a, 'b> {
                         printed.extend(self.arguments(args)?);
                         return Ok(format!("{symbol}({})", printed.join(", ")));
                     }
+                    // A receiver with an impl block cannot have an ordinary
+                    // function-pointer member: the method is generic, or it is
+                    // a default body that could not be translated.
+                    if self.backend.impls.contains_key(&receiver.base) {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "'{}::{}' has no C form: it is generic or its trait default is",
+                                receiver.base, name.text
+                            ),
+                        ));
+                    }
                 }
             }
             // Trait::from<Type>() fills a trait value; Type::method(...) calls
@@ -1176,6 +1364,18 @@ impl<'a, 'b> Body<'a, 'b> {
             return Err(Diagnostic::new(
                 span,
                 "a generic call has no C form; name the instance instead",
+            ));
+        }
+        if let Expr::Name(name) = callee
+            && self.backend.templates.contains(&name.text)
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "'{}' is a generic function and C has no template; its instance has to be \
+                     named",
+                    name.text
+                ),
             ));
         }
         Ok(format!(

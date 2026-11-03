@@ -9,3 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.103"
+# The driver shares the compiler's configuration: one file tells both where the
+# project's C library lives.
+shyc = { path = "../shyc" }

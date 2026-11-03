@@ -145,6 +145,21 @@ Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `--instances <file>`,
 and the resource hints reach the linked image. The switch attribute is
 file-level: there is no local attribute form yet.
 
+### Configuration file
+
+An installed compiler cannot infer where this project's C library lives, so it
+reads `~/.shycc.toml`:
+
+```toml
+shylib = "/home/me/ShyProject/libshy"
+```
+
+The value is the `libshy` directory; the compiler searches `c/`, the directory
+itself, and `include/` inside it, which is what resolves `use std::io::*;`.
+Without a file, a build made from a checkout uses the `libshy` next to the
+crates, so development needs no configuration. A direct `shyc` run and `shycc`
+therefore find the library from any working directory.
+
 ## Linking
 
 The two backends have different C libraries, and each one gets its own default:

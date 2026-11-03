@@ -62,26 +62,23 @@ const UNSUPPORTED: &str = "__shyc_unsupported_expression";
 // Trait value records
 // ---------------------------------------------------------------------------
 
-/// Print the C structure a trait name denotes when it is used as a value.
+/// Whether a trait can be a runtime value, that is, a structure of function
+/// pointers.
+pub(crate) fn trait_value_possible(declaration: &TraitDecl) -> bool {
+    trait_value_problem(declaration).is_none()
+}
+
+/// Why a trait cannot be a runtime value, or None when it can.
 ///
-/// One function-pointer field per method, in declaration order. `self` is
-/// erased to `void`, so `self *value` becomes `void *value`: the implementation
-/// keeps its concrete `Circle *` symbol, and the two pointers have the same C
-/// ABI. A method that takes or returns `self` by value has no erased C spelling;
-/// such a trait cannot be a value type, so the header says so instead of
-/// printing a structure with the wrong layout.
-pub(crate) fn trait_value_text(declaration: &TraitDecl) -> String {
+/// A trait with generic parameters, no methods, a generic method, or a method
+/// that takes or returns self by value has no such structure: C cannot spell a
+/// template, and void cannot stand in for an object passed by value.
+fn trait_value_problem(declaration: &TraitDecl) -> Option<String> {
     if !declaration.generics.is_empty() {
-        return format!(
-            "/* trait '{}' cannot be a value type: it has generic parameters */",
-            declaration.name.text
-        );
+        return Some("it has generic parameters".to_string());
     }
     if declaration.methods.is_empty() {
-        return format!(
-            "/* trait '{}' cannot be a value type: it has no methods */",
-            declaration.name.text
-        );
+        return Some("it has no methods".to_string());
     }
     if let Some(method) = declaration
         .methods
@@ -93,26 +90,48 @@ pub(crate) fn trait_value_text(declaration: &TraitDecl) -> String {
             .name
             .as_ref()
             .map_or("<unnamed>", |name| name.text.as_str());
+        return Some(format!("generic method '{name}' is static-only"));
+    }
+    if declaration
+        .methods
+        .iter()
+        .any(|method| trait_method_field_text(method).is_none())
+    {
+        return Some("a method takes or returns self by value".to_string());
+    }
+    None
+}
+
+/// Print the C structure a trait name denotes when it is used as a value.
+///
+/// One function-pointer field per method, in declaration order. Self is erased
+/// to void, so a self pointer prints as a void pointer: the implementation keeps
+/// its concrete symbol, and the two pointers have the same C ABI. A trait that
+/// cannot be a value type prints a comment saying why instead of a structure
+/// with the wrong layout.
+pub(crate) fn trait_value_text(declaration: &TraitDecl) -> String {
+    if let Some(problem) = trait_value_problem(declaration) {
         return format!(
-            "/* trait '{}' cannot be a value type: generic method '{}' is static-only */",
-            declaration.name.text, name
+            "/* trait '{}' cannot be a value type: {} */",
+            declaration.name.text, problem
         );
     }
     let mut fields = Vec::new();
     for method in &declaration.methods {
-        let Some(field) = trait_method_field_text(method) else {
-            return format!(
-                "/* trait '{}' cannot be a value type: a method takes or returns \
-                 `self` by value */",
-                declaration.name.text
-            );
-        };
-        fields.push(format!("    {field}"));
+        // The predicate above rejected every method without a field.
+        if let Some(field) = trait_method_field_text(method) {
+            fields.push(format!("    {field}"));
+        }
     }
     format!(
-        "struct {} {{\n{}\n}};",
+        "struct {} {{
+{}
+}};",
         declaration.name.text,
-        fields.join("\n")
+        fields.join(
+            "
+"
+        )
     )
 }
 

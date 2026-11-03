@@ -20,9 +20,24 @@ pub(crate) fn instance(base: &str, args: &[String]) -> String {
     name
 }
 
-/// The C symbol of one method of a concrete receiver: `Point_move`.
+/// The C symbol of one inherent method: `Point_move`.
 pub(crate) fn method(receiver: &str, method: &str) -> String {
     format!("{}_{}", type_part(receiver), method)
+}
+
+/// The C symbol of one method of a trait implementation:
+/// `String_Buffer_reserve`.
+///
+/// The trait name is part of the symbol because one receiver can implement
+/// several traits with a method of the same name, and its own inherent method
+/// may share it too.
+pub(crate) fn trait_method(receiver: &str, trait_name: &str, method: &str) -> String {
+    format!(
+        "{}_{}_{}",
+        type_part(receiver),
+        type_part(trait_name),
+        method
+    )
 }
 
 /// The constructor that fills a trait value for one receiver:

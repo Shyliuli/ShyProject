@@ -47,6 +47,10 @@ struct Options {
     target: String,
     /// `--sysroot <dir>`: the C library root for a hosted cross link.
     sysroot: Option<PathBuf>,
+    /// `--emit=<what>`: print one of the compiler's text outputs instead of
+    /// compiling. C source, C header, and the C wrapper have no object form, so
+    /// this stops after the frontend.
+    emit: Option<String>,
     emit_debug_info: bool,
     compile_args: Vec<String>,
     /// `-Wl,` items, forwarded to clang; the Shy linker validates them itself.
@@ -110,6 +114,7 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         no_default_libs: false,
         target: "shy".to_string(),
         sysroot: None,
+        emit: None,
         emit_debug_info: false,
         compile_args: Vec::new(),
         link_args: Vec::new(),
@@ -155,6 +160,15 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
             }
             flag if flag.starts_with("--sysroot=") => {
                 opts.sysroot = Some(PathBuf::from(&flag["--sysroot=".len()..]));
+            }
+            flag if flag.starts_with("--emit=") => {
+                let what = &flag["--emit=".len()..];
+                if !matches!(what, "c" | "c-header" | "c-wrapper" | "shy" | "llvm") {
+                    bail!(
+                        "unknown --emit value: {what} (expected c, c-header, c-wrapper, shy, or llvm)"
+                    );
+                }
+                opts.emit = Some(what.to_string());
             }
             "-###" => opts.print_only = true,
             "-save-temps" | "--save-temps" => opts.save_temps = true,
@@ -283,9 +297,10 @@ fn clang_triple(target: Option<&str>) -> Result<String> {
     if let Some(target) = target {
         cmd.arg(format!("--target={target}"));
     }
-    let output = cmd.arg("-dumpmachine").output().with_context(|| {
-        format!("failed to run `{clang} -dumpmachine` to resolve the target")
-    })?;
+    let output = cmd
+        .arg("-dumpmachine")
+        .output()
+        .with_context(|| format!("failed to run `{clang} -dumpmachine` to resolve the target"))?;
     if !output.status.success() {
         bail!("`{clang} -dumpmachine` failed");
     }
@@ -383,6 +398,13 @@ fn run(mut opts: Options) -> Result<()> {
         if let Ok(triple) = clang_triple(Some(&opts.target)) {
             opts.target = triple;
         }
+    }
+    if let Some(emit) = opts.emit.clone() {
+        for input in &opts.inputs {
+            ensure_kind(input, InputKind::C)?;
+            run_emit(&repo, &opts, input, opts.output.as_deref(), &emit)?;
+        }
+        return Ok(());
     }
     if opts.target != "shy" {
         return run_llvm(&repo, &opts);
@@ -527,10 +549,16 @@ fn run_compiler(
 
 /// Add the libshy layers in lookup order: C headers first, then explicit
 /// `c/`/`core/` paths, then compatibility wrappers.
-fn add_libshy_includes(cmd: &mut Command, repo: &Path) {
-    for layer in ["libshy/c", "libshy", "libshy/include"] {
-        cmd.arg(format!("-I{}", repo.join(layer).display()));
+fn add_libshy_includes(cmd: &mut Command, _repo: &Path) {
+    for layer in shyc::config::shylib_includes(&shylib()) {
+        cmd.arg(format!("-I{}", layer.display()));
     }
+}
+
+/// The project's C library: `~/.shycc.toml` names it, and a checkout keeps it
+/// next to the crates.
+fn shylib() -> PathBuf {
+    shyc::config::shylib().unwrap_or_else(|| repo_root().join("libshy"))
 }
 
 /// Drive the independent compiler. It has no equivalent of chibicc's extra
@@ -551,6 +579,35 @@ fn run_shyc(
         cmd.arg("-S");
     }
     add_libshy_includes(&mut cmd, repo);
+    for arg in &opts.compile_args {
+        if forwarded_to_shyc(arg) {
+            cmd.arg(arg);
+        }
+    }
+    if let Some(output) = output {
+        cmd.arg("-o").arg(output);
+    }
+    cmd.arg(input);
+    run_command(opts, &mut cmd)
+}
+
+/// Print one of the compiler's text outputs instead of compiling.
+///
+/// The compiler owns the search path of its own standard library, so this adds
+/// no include directory of its own: an installed toolchain finds it through its
+/// configuration, exactly like a direct shyc run.
+fn run_emit(
+    repo: &Path,
+    opts: &Options,
+    input: &str,
+    output: Option<&Path>,
+    emit: &str,
+) -> Result<()> {
+    let mut cmd = shyc_command(repo, opts.print_only)?;
+    cmd.arg(format!("--emit={emit}"));
+    if emit == "llvm" || opts.target != "shy" {
+        cmd.arg(format!("--target={}", opts.target));
+    }
     for arg in &opts.compile_args {
         if forwarded_to_shyc(arg) {
             cmd.arg(arg);
@@ -890,11 +947,7 @@ fn build_float_lib(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result
 }
 
 /// libshy's layers above the C library, in dependency order.
-const LIBSHY_RUST_LAYERS: [&str; 3] = [
-    "libshy/core/core.shyc",
-    "libshy/alloc/alloc.shyc",
-    "libshy/std/std.shyc",
-];
+const LIBSHY_RUST_LAYERS: [&str; 3] = ["core/core.shyc", "alloc/alloc.shyc", "std/std.shyc"];
 
 /// One unit through `shyc --emit=llvm`. A library unit gets only the
 /// optimization level, never the user's `-I`/`-D`/`-U`.
@@ -919,7 +972,7 @@ fn emit_llvm(repo: &Path, opts: &Options, input: &Path, ll: &Path, user_unit: bo
 /// implementation of its platform calls, then core, alloc, and std. ShyOS
 /// links the same sources with its own system calls instead of `sys/shy`.
 fn build_libshy(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result<Vec<PathBuf>> {
-    let mut sources = vec!["libshy/libc/libc.c", "libshy/sys/shy.shyc"];
+    let mut sources = vec!["libc/libc.c", "sys/shy.shyc"];
     sources.extend(LIBSHY_RUST_LAYERS);
     let mut objects = Vec::new();
     for source in sources {
@@ -927,14 +980,23 @@ fn build_libshy(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result<Ve
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("libshy");
-        let src = repo.join(source);
+        let src = shylib().join(source);
         if !src.exists() {
-            bail!("missing libshy source: {}", src.display());
+            bail!(
+                "missing libshy source: {} (set shylib in ~/.shycc.toml)",
+                src.display()
+            );
         }
         let (asm, obj) = if opts.save_temps {
-            (PathBuf::from(format!("{name}.shy")), PathBuf::from(format!("{name}.sobj")))
+            (
+                PathBuf::from(format!("{name}.shy")),
+                PathBuf::from(format!("{name}.sobj")),
+            )
         } else {
-            (temps.temp_path(&format!(".{name}.shy")), temps.temp_path(&format!(".{name}.sobj")))
+            (
+                temps.temp_path(&format!(".{name}.shy")),
+                temps.temp_path(&format!(".{name}.sobj")),
+            )
         };
         let input = src.to_string_lossy().into_owned();
         run_compiler(repo, opts, &input, Some(&asm), false, true)?;
@@ -1097,7 +1159,8 @@ fn print_usage() {
     eprintln!(
         "usage: shycc [options] file...\n\
          stages: -E, -S, -c, or link to a.sfs by default\n\
-         outputs: -o <file>, --sym <file>, -save-temps, -###\n\
+         outputs: -o <file>, --sym <file>, -save-temps, -###,
+         \x20 --emit=c|c-header|c-wrapper|shy|llvm (print text instead of linking)\n\
          debug: --shy-emit-source-lines, --shy-emit-debug-info\n\
          inputs: .shyc/.c, .shy, .sobj\n\
          backend: --backend shyc|chibicc (default shyc)\n\
