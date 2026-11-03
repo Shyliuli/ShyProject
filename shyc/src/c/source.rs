@@ -1162,10 +1162,10 @@ impl<'a, 'b> Body<'a, 'b> {
     /// Print value?, the propagation operator.
     ///
     /// C has no expression form for an early return, so the result is a statement
-    /// expression that switches on the tag: a failure arm returns the enclosing
-    /// function's failure variant, and the success payload is the value. The
-    /// failure variant is spelled as a compound literal, which is why the
-    /// enclosing return type travels with the body.
+    /// expression that switches on the tag: the failure arm returns the enclosing
+    /// function's failure variant, and the success payload is the value of the
+    /// expression. The failure variant is spelled as a compound literal, which is
+    /// why the enclosing return type travels with the body.
     fn propagate(&mut self, value: &Expr, span: Span) -> Result<String, Diagnostic> {
         let Some(returned) = self.return_ty.clone() else {
             return Err(Diagnostic::new(
@@ -1183,14 +1183,15 @@ impl<'a, 'b> Body<'a, 'b> {
         let printed = self.expr(value)?;
         if ty.base.starts_with("Option") {
             return Ok(format!(
-                "({{ __auto_type __try = {printed}; if (__try.tag != 1) return ({returned}){{0}}; \
-                 __try.payload.Some; }})"
+                "({{ __auto_type __try = {printed}; switch (__try.tag) {{ case 1: break; \
+                 default: return ({returned}){{0}}; }} __try.payload.Some; }})"
             ));
         }
         if ty.base.starts_with("Result") {
             return Ok(format!(
-                "({{ __auto_type __try = {printed}; if (__try.tag != 0) return ({returned}){{ \
-                 .tag = 1, .payload.Err = __try.payload.Err }}; __try.payload.Ok; }})"
+                "({{ __auto_type __try = {printed}; switch (__try.tag) {{ case 0: break; \
+                 default: return ({returned}){{ .tag = 1, .payload.Err = __try.payload.Err }}; }} \
+                 __try.payload.Ok; }})"
             ));
         }
         Err(Diagnostic::new(
