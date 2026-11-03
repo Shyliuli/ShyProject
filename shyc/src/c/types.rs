@@ -14,9 +14,9 @@ use crate::ast::{
     Declarator, DerivedDeclarator, Designator, EnumSpec, Enumerator, Expr, FunctionDecl,
     FunctionDeclarator, GenericArg, GenericArgKind, GenericParam, GenericParamKind, GenericSpec,
     Initializer, InitializerKind, MemberDecl, MemberOp, ParamDecl, PostfixOp, Qualifier,
-    RecordKind, RecordSpec, StorageClass, TraitDecl, TraitMethod, TypeName, TypeSpecifier,
-    UnaryOp,
+    RecordKind, RecordSpec, StorageClass, TraitDecl, TraitMethod, TypeName, TypeSpecifier, UnaryOp,
 };
+use crate::c::names;
 
 /// Printed for a construct a C header cannot express; the host compiler then
 /// reports the generated header instead of accepting a changed meaning.
@@ -265,6 +265,17 @@ pub(crate) fn declarator_uses_generics(declarator: &Declarator) -> bool {
 /// definition, not the declaration. An empty specifier list means C's implicit
 /// `int`.
 pub(crate) fn specs_text(specs: &DeclSpecs) -> String {
+    specs_text_in(specs, "void")
+}
+
+/// Print the type part of declaration specifiers, with self spelled as
+/// self_name.
+///
+/// A trait signature erases self to void, because a trait value stores function
+/// pointers that take the implementing type through void *. An impl method keeps
+/// the concrete type, so the two callers need different spellings of the same
+/// keyword.
+pub(crate) fn specs_text_in(specs: &DeclSpecs, self_name: &str) -> String {
     let mut words = Vec::new();
     for qualifier in &specs.qualifiers {
         words.push(qualifier_text(*qualifier).to_string());
@@ -273,7 +284,7 @@ pub(crate) fn specs_text(specs: &DeclSpecs) -> String {
         words.push("int".to_string());
     }
     for specifier in &specs.type_specs {
-        words.push(specifier_text(specifier));
+        words.push(specifier_text(specifier, self_name));
     }
     words.join(" ")
 }
@@ -287,24 +298,37 @@ fn qualifier_text(qualifier: Qualifier) -> &'static str {
     }
 }
 
-fn specifier_text(specifier: &TypeSpecifier) -> String {
+fn specifier_text(specifier: &TypeSpecifier, self_name: &str) -> String {
     match specifier {
         TypeSpecifier::Builtin(builtin) => builtin_text(*builtin).to_string(),
         TypeSpecifier::TypedefName(name) => name.text.clone(),
         TypeSpecifier::Generic(generic) => generic_spec_text(generic),
         TypeSpecifier::Record(record) => record_text(record),
         TypeSpecifier::Enum(enumeration) => enum_text(enumeration),
-        TypeSpecifier::Atomic(type_name) => format!("_Atomic({})", type_name_text(type_name)),
+        TypeSpecifier::Atomic(type_name) => {
+            format!("_Atomic({})", type_name_text_in(type_name, self_name))
+        }
         // `self` appears only in a trait method signature here. The trait
         // value structure erases the implementing type, so `self *value`
         // prints as `void *value`. A by-value `self` is caught before this
         // printer is used, because `void value` is not a C object.
-        TypeSpecifier::SelfType => "void".to_string(),
+        TypeSpecifier::SelfType => self_name.to_string(),
     }
 }
 
+/// A generic use prints as the instance name C can spell: Vec<int> is
+/// Vec_int. The instance itself is a separate declaration, so this is a name,
+/// not a definition.
 fn generic_spec_text(generic: &GenericSpec) -> String {
-    format!("{}{}", generic.name.text, generic_args_text(&generic.args))
+    let args = generic
+        .args
+        .iter()
+        .map(|arg| match &arg.kind {
+            GenericArgKind::Type(type_name) => type_name_text(type_name),
+            GenericArgKind::Const(value) => expr_text(value),
+        })
+        .collect::<Vec<_>>();
+    names::instance(&generic.name.text, &args)
 }
 
 fn generic_params_text(params: &[GenericParam]) -> String {
@@ -493,6 +517,11 @@ fn indented(text: &str) -> String {
 /// already has, an array or function suffix appends to it. A suffix applied to
 /// a pointer needs parentheses, which is what separates `*a[3]` from `(*a)[3]`.
 pub(crate) fn declarator_text(declarator: &Declarator) -> String {
+    declarator_text_in(declarator, "void")
+}
+
+/// Print one declarator, spelling self as self_name in its parameters.
+pub(crate) fn declarator_text_in(declarator: &Declarator, self_name: &str) -> String {
     let mut text = match &declarator.name {
         Some(name) => name.text.clone(),
         None => String::new(),
@@ -511,7 +540,11 @@ pub(crate) fn declarator_text(declarator: &Declarator) -> String {
                 text = format!("{}{}", grouped(&text), array_text(array));
             }
             DerivedDeclarator::Function(function) => {
-                text = format!("{}{}", grouped(&text), function_text(function));
+                text = format!(
+                    "{}{}",
+                    grouped(&text),
+                    function_text_in(function, self_name)
+                );
             }
         }
     }
@@ -535,10 +568,10 @@ fn array_text(array: &ArrayDeclarator) -> String {
     }
 }
 
-fn function_text(function: &FunctionDeclarator) -> String {
+fn function_text_in(function: &FunctionDeclarator, self_name: &str) -> String {
     let mut params = Vec::new();
     for param in &function.params {
-        params.push(parameter_text(param));
+        params.push(parameter_text_in(param, self_name));
     }
     if function.variadic {
         params.push("...".to_string());
@@ -550,18 +583,22 @@ fn function_text(function: &FunctionDeclarator) -> String {
     )
 }
 
-fn parameter_text(param: &ParamDecl) -> String {
-    declare_text(&param.specs, param.declarator.as_ref())
+fn parameter_text_in(param: &ParamDecl, self_name: &str) -> String {
+    declare_text_in(&param.specs, param.declarator.as_ref(), self_name)
 }
 
-fn type_name_text(type_name: &TypeName) -> String {
-    declare_text(&type_name.specs, type_name.declarator.as_ref())
+pub(crate) fn type_name_text(type_name: &TypeName) -> String {
+    type_name_text_in(type_name, "void")
+}
+
+fn type_name_text_in(type_name: &TypeName, self_name: &str) -> String {
+    declare_text_in(&type_name.specs, type_name.declarator.as_ref(), self_name)
 }
 
 /// A specifier list followed by an optional declarator.
-fn declare_text(specs: &DeclSpecs, declarator: Option<&Declarator>) -> String {
-    let base = specs_text(specs);
-    match declarator.map(declarator_text) {
+fn declare_text_in(specs: &DeclSpecs, declarator: Option<&Declarator>, self_name: &str) -> String {
+    let base = specs_text_in(specs, self_name);
+    match declarator.map(|declarator| declarator_text_in(declarator, self_name)) {
         Some(text) if !text.is_empty() => format!("{base} {text}"),
         _ => base,
     }

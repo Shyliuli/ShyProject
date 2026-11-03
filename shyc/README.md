@@ -114,10 +114,21 @@ source header and leaves its dependencies to the carried includes. `static`
 declarations and `impl` blocks are not exported by that ordinary header; a
 method needs a concrete instantiated symbol before it can be declared, which is
 what the instance table above provides. A `trait` is exported as a forward `typedef` plus
-the `struct` of function pointers that its value type uses. `--emit=c` prints the
-preprocessed unit as plain C and drops the `#![...]` attribute lines. A `let`
-declaration has no C spelling, so a unit that uses one is rejected with a
-diagnostic instead of being printed as invalid C.
+the `struct` of function pointers that its value type uses.
+
+`--emit=c` prints the same unit as plain C. An inferred local becomes
+`__auto_type` (`const __auto_type` without `mut`), an `impl` block becomes one
+mangled function per method with its receiver as the first parameter, and a
+method call becomes a call to that function: `p.add(1)` is
+`Point_add(&p, 1)`. ShyC's dot dereferences a pointer, so the C output says
+`->` where the source wrote `.`. A `trait` value is the `struct` of function
+pointers that `Trait::from<T>()` fills, `value?` becomes a statement
+expression whose failure arm returns the enclosing function's failure variant,
+`asm!` becomes a GCC extended asm statement, and a generic use prints as the
+instance name (`Vec<int>` is `Vec_int`).
+What C cannot spell stays out rather than being guessed: a generic function or
+record prints nothing, because an instance is a symbol of its own, and a trait
+method that only has a default body stops the translation with a diagnostic.
 
 Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `--instances <file>`,
 `-O0`..`-O3`

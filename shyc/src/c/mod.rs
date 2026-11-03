@@ -8,5 +8,6 @@
 //! mangled function.
 
 pub mod header;
+pub mod names;
 pub mod source;
 pub mod types;

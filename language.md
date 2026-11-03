@@ -670,16 +670,25 @@ The compiler already renders both directions for the plain-C subset:
 `shyc --emit=c-header` prints an include-guarded header of the translation unit's
 typedefs, record and enum definitions, non-`static` prototypes, and `extern`
 object declarations, and `shyc --emit=c` translates the unit back to C source.
-The source form is the preprocessed unit written out again with the sugar
-resolved: an inferred local becomes `__auto_type` (`const __auto_type` when it
-is not `mut`), compile-time calls are already expanded, traits leave nothing
-behind, and `#![...]` attribute lines are dropped. A trait `impl` block and
-inline assembly have no C form yet and are reported by name. A generated header carries the main
-file's `#include` lines and `#define` macros, takes its include guard from the
-output path, and omits declarations that came from an included file, so it
-describes exactly one header. `static` declarations and `impl` blocks are not
-exported by that ordinary header: a method needs a concrete instantiated symbol
-before it can appear in a C header.
+The source form is the preprocessed unit with its sugar resolved: an inferred
+local becomes `__auto_type` (`const __auto_type` when it is not `mut`),
+compile-time calls are already expanded, and `#![...]` attribute lines are
+dropped. An `impl` block becomes one function per method, named
+`Type_method` and taking its receiver first, so `p.add(1)` prints as
+`Point_add(&p, 1)`; a method call through a trait value stays a call to the
+function pointer it stores. A trait value is the `struct` of function pointers
+that `Trait::from<T>()` fills. `value?` becomes a statement expression whose
+failure arm returns the enclosing function's failure variant, `asm!` becomes a
+GCC extended asm statement, and a generic use prints as the instance name
+(`Vec<int>` is `Vec_int`). What C cannot spell is reported rather than
+guessed: a generic function or record prints nothing because an instance is a
+symbol of its own, and a trait method that only has a default body stops the
+translation instead of pointing at a symbol that does not exist. A generated
+header carries the main file's `#include` lines and `#define` macros, takes its
+include guard from the output path, and omits declarations that came from an
+included file, so it describes exactly one header. `static` declarations and
+`impl` blocks are not exported by that ordinary header: a method needs a
+concrete instantiated symbol before it can appear in a C header.
 
 ### Explicit generic instance table
 
