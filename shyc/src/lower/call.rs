@@ -498,7 +498,7 @@ impl FnLower<'_> {
                 ir::CallTarget::Direct(method.symbol),
                 method.ty,
                 operands,
-                *call_span,
+                span,
             );
         }
         if let ast::Expr::GenericScopedName {
@@ -519,7 +519,7 @@ impl FnLower<'_> {
                 ir::CallTarget::Direct(method.symbol),
                 method.ty,
                 operands,
-                *call_span,
+                span,
             );
         }
 

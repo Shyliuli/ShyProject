@@ -18,8 +18,6 @@ use crate::ast::{
 };
 use std::collections::HashMap;
 
-use crate::c::names;
-
 /// One generic use the printer met: the template name and the concrete
 /// arguments it was written with.
 ///
@@ -42,9 +40,10 @@ pub(crate) struct Mention {
 pub(crate) struct Spelling<'a> {
     /// What self denotes here.
     pub self_name: &'a str,
-    /// C name of each generic instance, keyed by the name this backend mangles
-    /// (Vec<int> is keyed as Vec_int). Empty without an instance table.
-    pub aliases: Option<&'a HashMap<String, String>>,
+    /// C type name of each generic instance, keyed by its source spelling
+    /// (Vec<int>). The compiler names the instances, so the C output and the
+    /// header agree; empty when nothing was specialized.
+    pub instances: Option<&'a HashMap<String, String>>,
     /// Type parameters of the template being specialized, bound to the type
     /// they stand for here (T to int).
     pub bindings: Option<&'a HashMap<String, String>>,
@@ -60,18 +59,23 @@ impl<'a> Spelling<'a> {
     pub(crate) fn plain() -> Spelling<'a> {
         Spelling {
             self_name: "void",
-            aliases: None,
+            instances: None,
             bindings: None,
             generics: true,
             mentions: None,
         }
     }
 
-    /// The C name of one generic instance.
-    pub(crate) fn instance(&self, mangled: String) -> String {
-        match self.aliases.and_then(|aliases| aliases.get(&mangled)) {
-            Some(alias) => alias.clone(),
-            None => mangled,
+    /// The C name of one generic instance, from the compiler's plan.
+    ///
+    /// An instance the plan does not name keeps the template's name, which is
+    /// what makes the C compiler report the missing definition instead of
+    /// quietly inventing one.
+    pub(crate) fn instance(&self, name: &str, args: &[String]) -> String {
+        let key = format!("{name}<{}>", args.join(", "));
+        match self.instances.and_then(|instances| instances.get(&key)) {
+            Some(instance) => instance.clone(),
+            None => name.to_string(),
         }
     }
 }
@@ -417,7 +421,7 @@ fn generic_spec_text(generic: &GenericSpec, spelling: Spelling) -> String {
             args: args.clone(),
         });
     }
-    spelling.instance(names::instance(&generic.name.text, &args))
+    spelling.instance(&generic.name.text, &args)
 }
 
 fn generic_params_text(params: &[GenericParam], spelling: Spelling) -> String {

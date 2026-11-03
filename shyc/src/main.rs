@@ -3,7 +3,6 @@
 //! One invocation reads one source file, preprocesses it, parses it, lowers it
 //! to the typed IR, optionally optimizes it, and emits the selected backend's
 //! text. Assembly and linking belong to the existing `shycc` driver.
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -92,8 +91,10 @@ fn run() -> Result<(), String> {
                 .map_err(|error| sources.render(&error))?;
             let unit =
                 parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
-            let aliases = instance_aliases(&options, &unit, &mut sources)?;
-            c::source::render(&unit, &aliases).map_err(|error| sources.render(&error))?
+            // The C output names what the compiler resolved: symbols, instance
+            // types, and specializations, so it lowers the unit first.
+            let lowered = lower_instances(&options, &unit, &preprocessed.attributes, &mut sources)?;
+            c::source::render(&unit, &lowered).map_err(|error| sources.render(&error))?
         }
         Stage::CHeader => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
@@ -229,28 +230,6 @@ fn instance_requests(
             alias: entry.alias,
         })
         .collect())
-}
-
-/// The C name each instance-table entry gives to one generic instance.
-///
-/// The C source backend has no instance table of its own: it names an instance
-/// the way the table does and prints nothing else about it. An instance the
-/// table does not name keeps the mangled name.
-fn instance_aliases(
-    options: &Options,
-    unit: &shyc::ast::TranslationUnit,
-    sources: &mut SourceMap,
-) -> Result<HashMap<String, String>, String> {
-    let Some(path) = &options.instances else {
-        return Ok(HashMap::new());
-    };
-    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let file = sources.add(path.clone(), text);
-    let tokens = lexer::lex(sources, file).map_err(|error| sources.render(&error))?;
-    let names = parser::type_names(unit);
-    let table =
-        export_instances::parse_table(&tokens, &names).map_err(|error| sources.render(&error))?;
-    Ok(export_instances::aliases(&table))
 }
 
 /// Lowers the unit only to produce the instance export plan for a C header or

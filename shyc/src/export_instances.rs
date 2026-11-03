@@ -503,6 +503,23 @@ pub fn type_text(types: &TypeStore, names: &HashMap<TypeId, CTypeName>, ty: Type
     printer.declaration(ty, "").trim_end().to_string()
 }
 
+/// The complete C definition of one record or enum type.
+///
+/// The C source backend prints no layout of its own: a generic instance is
+/// defined here, by the same printer that writes the header, so the two
+/// outputs cannot disagree about a field.
+pub fn layout_text(types: &TypeStore, names: &HashMap<TypeId, CTypeName>, ty: TypeId) -> String {
+    let mut printer = CPrinter {
+        types,
+        names,
+        exports: &[],
+        repeat_plain_layouts: true,
+        output: String::new(),
+    };
+    printer.layout_definition(ty);
+    printer.output.trim_end().to_string()
+}
+
 /// One C declaration printer over the lowered type arena.
 struct CPrinter<'a> {
     types: &'a TypeStore,

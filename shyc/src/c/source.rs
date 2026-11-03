@@ -30,14 +30,12 @@ use crate::c::types::{
     Mention, Spelling, declarator_text_in, record_instance_text, specs_text_in,
     trait_value_possible, trait_value_text, type_name_text,
 };
+use crate::lower::{InstancePlan, Lowered};
 use crate::source::{Diagnostic, Span};
 
 /// Render the whole unit as one C translation unit.
-pub fn render(
-    unit: &TranslationUnit,
-    aliases: &HashMap<String, String>,
-) -> Result<String, Diagnostic> {
-    Backend::new(unit, aliases).render(unit)
+pub fn render(unit: &TranslationUnit, lowered: &Lowered) -> Result<String, Diagnostic> {
+    Backend::new(unit, lowered).render(unit)
 }
 
 /// One C type, as this backend needs it: a base name and a pointer depth.
@@ -86,9 +84,12 @@ struct Backend<'a> {
     impls: HashMap<String, Vec<&'a ImplBlock>>,
     /// Every trait declaration, by name.
     traits: HashMap<String, &'a TraitDecl>,
-    /// The C name the instance table gives each generic instance, keyed by the
-    /// name this backend mangles.
-    aliases: &'a HashMap<String, String>,
+    /// What the compiler made of this unit: every specialization, the symbol it
+    /// gave each function and call, and the C name of each type.
+    lowered: &'a Lowered,
+    /// The C type name of every generic instance the compiler materialized,
+    /// keyed by the source spelling the printer sees (Vec<int>).
+    type_names: HashMap<String, String>,
     /// Generic free functions, by name.
     templates: HashMap<String, &'a FunctionDecl>,
     /// Generic record definitions, by name.
@@ -111,16 +112,30 @@ struct Instance {
 }
 
 impl Instance {
-    /// The C name of this instance: the table's alias when it has one, else the
-    /// mangled name.
-    fn c_name(&self, aliases: &HashMap<String, String>) -> String {
-        let mangled = names::instance(&self.name, &self.args);
-        aliases.get(&mangled).cloned().unwrap_or_else(|| mangled)
+    /// The C name of this instance, from the compiler's plan.
+    fn c_name(&self, backend: &Backend<'_>) -> String {
+        if let Some(plan) = backend.plan(&self.name, &self.args) {
+            if let Some(symbol) = &plan.symbol {
+                return names::symbol(symbol);
+            }
+            if let Some(name) = &plan.type_name {
+                return name.clone();
+            }
+        }
+        // A plan the compiler never made: keep the template name so the C
+        // compiler reports the missing definition.
+        self.name.clone()
     }
 }
 
 impl<'a> Backend<'a> {
-    fn new(unit: &'a TranslationUnit, aliases: &'a HashMap<String, String>) -> Backend<'a> {
+    fn new(unit: &'a TranslationUnit, lowered: &'a Lowered) -> Backend<'a> {
+        let mut type_names = HashMap::new();
+        for plan in &lowered.instances {
+            if let Some(name) = &plan.type_name {
+                type_names.insert(instance_key(&plan.name, &plan.args), name.clone());
+            }
+        }
         let mut backend = Backend {
             objects: HashMap::new(),
             functions: HashMap::new(),
@@ -128,7 +143,8 @@ impl<'a> Backend<'a> {
             enums: HashMap::new(),
             impls: HashMap::new(),
             traits: HashMap::new(),
-            aliases,
+            lowered,
+            type_names,
             templates: HashMap::new(),
             generic_records: HashMap::new(),
             generic_impls: HashMap::new(),
@@ -156,6 +172,16 @@ impl<'a> Backend<'a> {
                 Item::Use(_) => {}
             }
         }
+        // The compiler already decided which specializations exist, so the work
+        // list is its plan rather than a search of the source.
+        for plan in &lowered.instances {
+            if plan.layout.is_some() || (plan.receiver.is_none() && plan.symbol.is_some()) {
+                backend.instances.borrow_mut().push(Instance {
+                    name: plan.name.clone(),
+                    args: plan.args.clone(),
+                });
+            }
+        }
         backend
     }
 
@@ -163,7 +189,7 @@ impl<'a> Backend<'a> {
     fn spelling<'s>(&'s self, self_name: &'s str) -> Spelling<'s> {
         Spelling {
             self_name,
-            aliases: Some(self.aliases),
+            instances: Some(&self.type_names),
             bindings: None,
             generics: true,
             mentions: Some(&self.mentions),
@@ -236,7 +262,7 @@ impl<'a> Backend<'a> {
         for method in &block.methods {
             if let Some(name) = &method.declarator.name {
                 let ty = self.ty_of(&method.specs, &method.declarator);
-                let symbol = self.symbol(block, &receiver, &name.text);
+                let symbol = self.symbol(&receiver, &name.text, method.span);
                 self.functions.insert(symbol, ty);
             }
         }
@@ -332,12 +358,38 @@ impl<'a> Backend<'a> {
         None
     }
 
-    /// The C symbol of one method of one impl block.
-    fn symbol(&self, block: &ImplBlock, receiver: &str, name: &str) -> String {
-        match &block.trait_name {
-            Some(trait_name) => names::trait_method(receiver, &trait_name.text, name),
-            None => names::method(receiver, name),
+    /// The C symbol of one method: the compiler's answer, whether the method is
+    /// a specialization or an ordinary definition.
+    fn symbol(&self, receiver: &str, name: &str, span: Span) -> String {
+        if let Some(symbol) = self
+            .method_plan(receiver, name)
+            .and_then(|plan| plan.symbol.clone())
+        {
+            return names::symbol(&symbol);
         }
+        if let Some(symbol) = self.lowered.declaration_symbols.get(&span) {
+            return names::symbol(symbol);
+        }
+        // Neither: a method the compiler never lowered, which only happens for a
+        // construct it rejected, so any name will do to report it in C.
+        names::method(receiver, name)
+    }
+
+    /// The C name of one function definition: the compiler's symbol for it.
+    fn definition(&self, span: Span, fallback: &str) -> String {
+        match self.lowered.declaration_symbols.get(&span) {
+            Some(symbol) => names::symbol(symbol),
+            None => fallback.to_string(),
+        }
+    }
+
+    /// The compiler's plan for one method of one concrete receiver.
+    fn method_plan(&self, receiver: &str, name: &str) -> Option<&'a InstancePlan> {
+        self.lowered.instances.iter().find(|plan| {
+            plan.name == name
+                && (plan.impl_name.as_deref() == Some(receiver)
+                    || plan.receiver.as_deref() == Some(receiver))
+        })
     }
 
     /// Whether a block inherits a translatable default body for one method.
@@ -369,6 +421,7 @@ impl<'a> Backend<'a> {
             .methods
             .iter()
             .map(|method| Method {
+                span: method.span,
                 specs: &method.specs,
                 declarator: &method.declarator,
                 body: &method.body,
@@ -391,6 +444,7 @@ impl<'a> Backend<'a> {
                 continue;
             }
             methods.push(Method {
+                span: method.span,
                 specs: &method.specs,
                 declarator: &method.declarator,
                 body,
@@ -586,10 +640,19 @@ impl<'a> Backend<'a> {
             return Ok(String::new());
         }
         let spelling = self.spelling("void");
+        // The definition carries the symbol the compiler gave it, which is what
+        // a call site prints.
+        let declarator = match &function.declarator.name {
+            Some(name) => renamed(
+                &function.declarator,
+                &self.definition(function.span, &name.text),
+            ),
+            None => function.declarator.clone(),
+        };
         let signature = format!(
             "{} {}",
             specs_text_in(&function.specs, spelling),
-            declarator_text_in(&function.declarator, spelling)
+            declarator_text_in(&declarator, spelling)
         );
         let mut body = Body::new(
             self,
@@ -611,7 +674,7 @@ impl<'a> Backend<'a> {
             let Some(name) = &method.declarator.name else {
                 continue;
             };
-            let symbol = self.symbol(block, &receiver, &name.text);
+            let symbol = self.symbol(&receiver, &name.text, method.span);
             let declarator = renamed(method.declarator, &symbol);
             let linkage = if method.specs.is_pub { "" } else { "static " };
             output.push_str(&format!(
@@ -624,7 +687,7 @@ impl<'a> Backend<'a> {
             let Some(name) = &prototype.declarator.name else {
                 continue;
             };
-            let symbol = self.symbol(block, &receiver, &name.text);
+            let symbol = self.symbol(&receiver, &name.text, prototype.span);
             let declarator = renamed(&prototype.declarator, &symbol);
             let linkage = if prototype.specs.is_pub {
                 ""
@@ -669,7 +732,7 @@ impl<'a> Backend<'a> {
             let Some(name) = &method.declarator.name else {
                 continue;
             };
-            let symbol = self.symbol(block, &receiver, &name.text);
+            let symbol = self.symbol(&receiver, &name.text, method.span);
             let declarator = renamed(method.declarator, &symbol);
             let linkage = if method.specs.is_pub { "" } else { "static " };
             let signature = format!(
@@ -714,14 +777,22 @@ impl<'a> Backend<'a> {
             let Some(name) = &method.declarator.name else {
                 continue;
             };
-            let implementation = match find_method(block, &name.text) {
-                Some(_) => names::trait_method(receiver, trait_name, &name.text),
+            // The implementation is either written in the block or inherited
+            // from the trait's default body; both are methods of this receiver,
+            // and the compiler named both.
+            let implementation = match self.methods(block).into_iter().find(|method| {
+                method
+                    .declarator
+                    .name
+                    .as_ref()
+                    .is_some_and(|method| method.text == name.text)
+            }) {
+                Some(implementation) => self.symbol(receiver, &name.text, implementation.span),
                 None => {
                     return Err(Diagnostic::new(
                         method.span,
                         format!(
-                            "'impl {trait_name} for {receiver}' does not define '{}'; a default \
-                             method body has no C form yet",
+                            "'impl {trait_name} for {receiver}' does not define '{}'",
                             name.text
                         ),
                     ));
@@ -779,6 +850,11 @@ fn forward_record(specs: &DeclSpecs) -> Option<String> {
     Some(format!("typedef {keyword} {tag} {tag};", tag = tag.text))
 }
 
+/// The key a generic use is looked up under: the source spelling.
+fn instance_key(name: &str, args: &[String]) -> String {
+    format!("{name}<{}>", args.join(", "))
+}
+
 /// The record name of a generic impl block, if the block implements one.
 fn generic_receiver(block: &ImplBlock) -> Option<String> {
     match &block.self_type.specs.type_specs[..] {
@@ -818,6 +894,14 @@ impl<'a> Backend<'a> {
         self.templates.contains_key(name) || self.generic_records.contains_key(name)
     }
 
+    /// The compiler's plan for one specialization.
+    fn plan(&self, name: &str, args: &[String]) -> Option<&'a InstancePlan> {
+        self.lowered
+            .instances
+            .iter()
+            .find(|plan| plan.name == name && plan.args == args)
+    }
+
     /// The type parameters of a template, in declaration order.
     fn parameters(&self, name: &str) -> Vec<String> {
         if let Some(record) = self.generic_records.get(name) {
@@ -849,7 +933,7 @@ impl<'a> Backend<'a> {
     ) -> Spelling<'s> {
         Spelling {
             self_name,
-            aliases: Some(self.aliases),
+            instances: Some(&self.type_names),
             bindings: Some(bindings),
             generics: false,
             mentions: Some(&self.mentions),
@@ -862,10 +946,18 @@ impl<'a> Backend<'a> {
         let mut output = String::new();
         for instance in self.instances.borrow().clone() {
             let bindings = self.bindings(&instance);
-            let name = instance.c_name(self.aliases);
+            let name = instance.c_name(self);
             if let Some(record) = self.generic_records.get(&instance.name) {
                 let spelling = self.instance_spelling("void", &bindings);
-                output.push_str(&record_instance_text(record, &name, spelling));
+                // The layout belongs to the compiler: it printed the header's
+                // types, so it prints this instance too.
+                match self
+                    .plan(&instance.name, &instance.args)
+                    .and_then(|plan| plan.layout.clone())
+                {
+                    Some(layout) => output.push_str(&layout),
+                    None => output.push_str(&record_instance_text(record, &name, spelling)),
+                }
                 output.push('\n');
                 output.push_str(&self.method_prototypes_of(&instance, &name));
             } else if let Some(function) = self.templates.get(&instance.name) {
@@ -891,7 +983,7 @@ impl<'a> Backend<'a> {
                 let Some(method_name) = &method.declarator.name else {
                     continue;
                 };
-                let symbol = self.symbol(block, name, &method_name.text);
+                let symbol = self.symbol(name, &method_name.text, method.span);
                 let declarator = renamed(method.declarator, &symbol);
                 output.push_str(&format!(
                     "static {} {};\n",
@@ -915,7 +1007,7 @@ impl<'a> Backend<'a> {
                 }
             };
             index += 1;
-            let name = instance.c_name(self.aliases);
+            let name = instance.c_name(self);
             if let Some(function) = self.templates.get(&instance.name) {
                 let bindings = self.bindings(&instance);
                 let spelling = self.instance_spelling(&name, &bindings);
@@ -946,7 +1038,7 @@ impl<'a> Backend<'a> {
                         let Some(method_name) = &method.declarator.name else {
                             continue;
                         };
-                        let symbol = self.symbol(block, &name, &method_name.text);
+                        let symbol = self.symbol(&name, &method_name.text, method.span);
                         let declarator = renamed(method.declarator, &symbol);
                         let mut body = Body::instance(
                             self,
@@ -1080,6 +1172,7 @@ fn return_type_in(specs: &DeclSpecs, declarator: &Declarator, spelling: Spelling
 
 /// One method to print: the block's own definition or an inherited default.
 struct Method<'a> {
+    span: Span,
     specs: &'a DeclSpecs,
     declarator: &'a Declarator,
     body: &'a Block,
@@ -1189,7 +1282,7 @@ impl<'a, 'b> Body<'a, 'b> {
     fn spelling(&self) -> Spelling<'_> {
         Spelling {
             self_name: &self.self_name,
-            aliases: Some(self.backend.aliases),
+            instances: Some(&self.backend.type_names),
             bindings: Some(&self.bindings),
             generics: !self.instance,
             mentions: Some(&self.backend.mentions),
@@ -1643,6 +1736,25 @@ impl<'a, 'b> Body<'a, 'b> {
         type_args: &[GenericArg],
         span: Span,
     ) -> Result<String, Diagnostic> {
+        // The compiler resolved this call, so the C output prints the symbol it
+        // chose. A method call passes its receiver first, which the source
+        // arguments do not contain.
+        if let Some(symbol) = self.backend.lowered.call_symbols.get(&span).cloned() {
+            let mut printed = Vec::new();
+            if let Expr::Member { object, op, .. } = callee {
+                let receiver = match self.ty(object) {
+                    Some(receiver) => self.receiver(object, &receiver, *op)?,
+                    None => self.expr(object)?,
+                };
+                printed.push(receiver);
+            }
+            printed.extend(self.arguments(args)?);
+            return Ok(format!(
+                "{}({})",
+                names::symbol(&symbol),
+                printed.join(", ")
+            ));
+        }
         match callee {
             Expr::Member {
                 object, name, op, ..
@@ -1771,7 +1883,7 @@ impl<'a, 'b> Body<'a, 'b> {
                     ),
                 ));
             };
-            let symbol = instance.c_name(self.backend.aliases);
+            let symbol = instance.c_name(self.backend);
             self.backend.enqueue(instance);
             return Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")));
         }

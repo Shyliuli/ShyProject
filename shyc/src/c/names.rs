@@ -10,6 +10,25 @@
 //! `Display_from_Point`. A generic instance joins its base name and its
 //! arguments, so `Vec<int>` is `Vec_int`.
 
+/// Make a compiler symbol a C identifier.
+///
+/// A file-local symbol is .L.module.name and a method is ____Point__move; the
+/// dot cannot appear in C, so every character that is not an identifier
+/// character becomes _. Nothing else is renamed: the C output calls a symbol
+/// what the compiler called it.
+pub(crate) fn symbol(symbol: &str) -> String {
+    symbol
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// The C type and function name of one generic instance: `Vec_int`.
 pub(crate) fn instance(base: &str, args: &[String]) -> String {
     let mut name = type_part(base);

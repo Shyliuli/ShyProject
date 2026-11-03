@@ -396,6 +396,21 @@ impl Lowerer {
         // The C export prints this definition under the same symbol.
         self.declaration_symbols
             .insert(declaration.span, symbol.clone());
+        if let Some(target) = &target {
+            // An inherited default body is collected once per implementing type
+            // from one shared span, so the receiver is what tells the two apart.
+            self.method_instances.push(super::MethodInstancePlan {
+                name: name.clone(),
+                record: target.ty,
+                impl_name: target.name.clone(),
+                trait_name: target
+                    .trait_impl
+                    .as_ref()
+                    .map(|trait_impl| trait_impl.name.clone()),
+                args: Vec::new(),
+                symbol: symbol.clone(),
+            });
+        }
         // A method of a materialized generic impl keeps only its signature:
         // the body is queued when a lookup first needs it, so an instance
         // compiles the methods it uses. Everything else is lowered now.
@@ -539,6 +554,17 @@ impl Lowerer {
             false,
         );
         self.declare_function_symbol(&symbol, &symbol, resolved.ty, false, prototype.span)?;
+        // The C export declares this method under the same symbol a call prints.
+        self.declaration_symbols
+            .insert(prototype.span, symbol.clone());
+        self.method_instances.push(super::MethodInstancePlan {
+            name: name.clone(),
+            record: ty,
+            impl_name: type_name.to_string(),
+            trait_name: None,
+            args: Vec::new(),
+            symbol: symbol.clone(),
+        });
         let info = self
             .impls
             .entry(ty)

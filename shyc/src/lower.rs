@@ -109,6 +109,11 @@ fn instance_plans(
                 c_types,
                 *ty,
             )),
+            layout: Some(crate::export_instances::layout_text(
+                &lowerer.types,
+                c_types,
+                *ty,
+            )),
             symbol: None,
             receiver: None,
             impl_name: None,
@@ -124,6 +129,7 @@ fn instance_plans(
             receiver: None,
             impl_name: None,
             trait_name: None,
+            layout: None,
         });
     }
     for method in &lowerer.method_instances {
@@ -139,6 +145,7 @@ fn instance_plans(
             )),
             impl_name: Some(method.impl_name.clone()),
             trait_name: method.trait_name.clone(),
+            layout: None,
         });
     }
     plans
@@ -161,6 +168,9 @@ pub struct InstancePlan {
     pub impl_name: Option<String>,
     /// For a method instance of a trait impl: the trait's name.
     pub trait_name: Option<String>,
+    /// The complete C definition of a record or enum instance, printed by the
+    /// same printer that writes the header.
+    pub layout: Option<String>,
 }
 
 /// One instance the explicit table asks the C boundary to expose.
