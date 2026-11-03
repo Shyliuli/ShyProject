@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use shyc::ir::Layout;
-use shyc::lexer::{self, Token};
+use shyc::lexer::{self, Token, TokenKind};
 use shyc::lower::{self, StartupMode};
 use shyc::preprocess::{self, Attributes};
 use shyc::source::SourceMap;
-use shyc::{c, export, export_instances, llvm, parser, passes, shy};
+use shyc::{c, export_instances, llvm, parser, passes, shy};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -109,20 +109,20 @@ fn run() -> Result<(), String> {
             // The output path names the include guard. Without `-o` the header
             // goes to stdout, so the input path names it instead.
             let guard_path = options.output.as_deref().unwrap_or(options.input.as_path());
-            let header_options = export::HeaderOptions {
-                guard: export::header_guard(guard_path),
+            let header_options = c::header::HeaderOptions {
+                guard: c::header::header_guard(guard_path),
                 root: file,
                 includes: preprocessed.includes,
                 defines: preprocessed.defines,
             };
             if options.instances.is_none() {
-                export::render_c_header(&unit, &header_options)
+                c::header::render_c_header(&unit, &header_options)
             } else {
                 let lowered =
                     lower_instances(&options, &unit, &preprocessed.attributes, &mut sources)?;
-                let unspelled = export::unspelled_function_names(&unit, file);
+                let unspelled = c::header::unspelled_function_names(&unit, file);
                 let section = export_instances::render_header_section(&lowered, &unspelled);
-                export::render_c_header_with(&unit, &header_options, &section)
+                c::header::render_c_header_with(&unit, &header_options, &section)
             }
         }
         Stage::CWrapper => {
@@ -671,6 +671,68 @@ fn render_preprocessed(tokens: &[Token], attributes: &Attributes) -> String {
     if attributes.disable_default_static {
         output.push_str("// #![disable_default_static]\n");
     }
-    output.push_str(&export::render_c_source(tokens));
+    output.push_str(&render_tokens(tokens));
     output
+}
+
+/// Write the preprocessed token stream back out as one C-compatible line each.
+///
+/// Every token keeps the text the lexer gave it and a space separates them all,
+/// so adjacent macro expansions cannot fuse into one token when the output is
+/// lexed again. ShyC import declarations are dropped: they are a compile-time
+/// check with no C spelling.
+fn render_tokens(tokens: &[Token]) -> String {
+    let mut output = String::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        index += 1;
+        if let Some(end) = use_declaration_end(tokens, index - 1) {
+            if token.at_line_start && !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            index = end + 1;
+            continue;
+        }
+        let spelling = match &token.kind {
+            TokenKind::Ident(text) | TokenKind::Number(text) | TokenKind::Punct(text) => {
+                text.clone()
+            }
+            TokenKind::StringLiteral { prefix, raw } => format!("{prefix}\"{raw}\""),
+            TokenKind::CharLiteral { prefix, raw } => format!("{prefix}'{raw}'"),
+            TokenKind::Newline | TokenKind::Eof => continue,
+        };
+        if token.at_line_start && !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(&spelling);
+        // A separator prevents adjacent expanded tokens from fusing on re-lexing.
+        output.push(' ');
+    }
+    output.push('\n');
+    output
+}
+
+/// The index of the `;` ending the import that starts at `start`, if the tokens
+/// there have the `use name :: ...` shape.
+fn use_declaration_end(tokens: &[Token], start: usize) -> Option<usize> {
+    if !matches!(&tokens[start].kind, TokenKind::Ident(word) if word == "use") {
+        return None;
+    }
+    let name = next_significant(tokens, start + 1)?;
+    if !matches!(tokens[name].kind, TokenKind::Ident(_)) {
+        return None;
+    }
+    let separator = next_significant(tokens, name + 1)?;
+    if !matches!(&tokens[separator].kind, TokenKind::Punct(punct) if punct == "::") {
+        return None;
+    }
+    // The parser already validated the path, so the first `;` closes it.
+    (separator..tokens.len())
+        .find(|&index| matches!(&tokens[index].kind, TokenKind::Punct(punct) if punct == ";"))
+}
+
+/// The first index at or after `from` whose token is not a newline marker.
+fn next_significant(tokens: &[Token], from: usize) -> Option<usize> {
+    (from..tokens.len()).find(|&index| !matches!(tokens[index].kind, TokenKind::Newline))
 }

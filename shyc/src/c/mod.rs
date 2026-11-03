@@ -7,5 +7,6 @@
 //! a constructor for that structure, and a method call becomes a call to the
 //! mangled function.
 
+pub mod header;
 pub mod source;
 pub mod types;
