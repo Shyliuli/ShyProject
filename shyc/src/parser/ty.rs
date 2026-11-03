@@ -24,7 +24,53 @@ impl Parser {
     ///
     /// The list may be empty: old-style C allows an omitted `int`, and the
     /// parser preserves that instead of inventing a specifier.
+    /// Expands a `const fn` call that stands in a type position.
+    ///
+    /// The call must be `name(...)` for a const fn whose result is a token
+    /// sequence; the tokens are parsed back as one complete type name, so an
+    /// expansion can never swallow the declarator that follows it.
+    fn expand_type_call(&mut self) -> Result<Option<TypeName>, Diagnostic> {
+        let (index, span) = {
+            let index = match &self.peek().kind {
+                TokenKind::Ident(name) if self.at_punct_ahead(1, "(") => {
+                    self.const_fns.iter().position(|f| &f.name == name)
+                }
+                _ => None,
+            };
+            match index {
+                Some(index) => (index, self.here()),
+                None => return Ok(None),
+            }
+        };
+        let name = self.const_fns[index].name.clone();
+        self.record_const_call(index, span);
+        self.bump();
+        let (tokens, close) = self.capture_tokens()?;
+        let span = span.join(close);
+        let value = self.call_const(
+            index,
+            vec![super::comptime::Value::Tokens(tokens)],
+            span,
+        )?;
+        let super::comptime::Value::Tokens(tokens) = value else {
+            return Err(Diagnostic::new(
+                span,
+                format!("const fn '{name}' does not produce a type"),
+            ));
+        };
+        parse_type_fragment(tokens, span, self)
+            .map(Some)
+            .map_err(|error| self.fragment_error(error, index))
+    }
+
     pub(crate) fn decl_specs(&mut self) -> Result<DeclSpecs, Diagnostic> {
+        // A const fn may stand where the type of a declaration is written.
+        if self.const_fn_call_ahead().is_some() {
+            if let Some(type_name) = self.expand_type_call()? {
+                self.pending_declarator = type_name.declarator;
+                return Ok(type_name.specs);
+            }
+        }
         let start = self.here();
         let before = self.last_span();
         let mut specs = DeclSpecs {
@@ -273,8 +319,19 @@ impl Parser {
             if self.eat_punct(";") {
                 continue;
             }
+            // A const fn may expand to zero or more members.
+            if let Some(expanded) = self.expand_member_list()? {
+                members.extend(expanded);
+                continue;
+            }
+            members.push(self.member_decl()?);
+        }
+        Ok(members)
+    }
 
-            let specs = self.decl_specs()?;
+    /// One member declaration: specifiers, declarators, and the semicolon.
+    fn member_decl(&mut self) -> Result<MemberDecl, Diagnostic> {
+        let specs = self.decl_specs()?;
             let mut declarators = Vec::new();
             if !self.at_punct(";") {
                 loop {
@@ -307,12 +364,68 @@ impl Parser {
                     }
                 }
             }
-            let semicolon = self.expect_punct(";")?;
-            members.push(MemberDecl {
-                span: specs.span.join(semicolon),
-                specs,
-                declarators,
+        let semicolon = self.expect_punct(";")?;
+        Ok(MemberDecl {
+            span: specs.span.join(semicolon),
+            specs,
+            declarators,
+        })
+    }
+
+    /// Expands a `const fn` call that stands where members are written.
+    fn expand_member_list(&mut self) -> Result<Option<Vec<MemberDecl>>, Diagnostic> {
+        let Some(index) = self.const_fn_call_ahead() else {
+            return Ok(None);
+        };
+        let start = self.here();
+        self.record_const_call(index, start);
+        self.bump();
+        let (tokens, close) = self.capture_tokens()?;
+        let span = start.join(close);
+        let value = self.call_const(index, vec![super::comptime::Value::Tokens(tokens)], span)?;
+        let super::comptime::Value::Tokens(returned) = value else {
+            return Err(Diagnostic::new(span, "a member const fn must produce tokens"));
+        };
+        if returned.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        self.parse_member_fragment(returned, span)
+            .map(Some)
+            .map_err(|error| self.fragment_error(error, index))
+    }
+
+    /// Parses a token sequence as aggregate members.
+    fn parse_member_fragment(
+        &self,
+        mut tokens: Vec<crate::lexer::Token>,
+        span: crate::source::Span,
+    ) -> Result<Vec<MemberDecl>, Diagnostic> {
+        let needs_semicolon = !matches!(
+            tokens.last().map(|token| &token.kind),
+            Some(TokenKind::Punct(punct)) if punct == ";" || punct == "}"
+        );
+        if needs_semicolon {
+            tokens.push(crate::lexer::Token {
+                kind: TokenKind::Punct(";".to_string()),
+                span,
+                at_line_start: false,
+                leading_space: false,
             });
+        }
+        tokens.push(crate::lexer::Token {
+            kind: TokenKind::Eof,
+            span,
+            at_line_start: false,
+            leading_space: false,
+        });
+        let mut parser = Parser::new(tokens, false);
+        parser.scopes = self.scopes.clone();
+        let mut members = Vec::new();
+        while !parser.at_eof() {
+            if parser.eat_punct(";") {
+                continue;
+            }
+            members.push(parser.member_decl()?);
         }
         Ok(members)
     }
@@ -446,6 +559,19 @@ impl Parser {
     /// Parses a declarator. `abstract_ok` permits an omitted name, which is
     /// what type names, parameters, and `sizeof` need.
     pub(crate) fn declarator(&mut self, abstract_ok: bool) -> Result<Declarator, Diagnostic> {
+        // A type-position expansion may have carried a declarator with it,
+        // as in "echo(int *) p": the written declarator continues that one.
+        let prefix = self.pending_declarator.take();
+        let mut declarator = self.declarator_tree(abstract_ok)?;
+        if let Some(prefix) = prefix {
+            let mut derived = prefix.derived;
+            derived.extend(declarator.derived);
+            declarator.derived = derived;
+        }
+        Ok(declarator)
+    }
+
+    fn declarator_tree(&mut self, abstract_ok: bool) -> Result<Declarator, Diagnostic> {
         let start = self.here();
         let before_declarator = self.last_span();
 
@@ -499,7 +625,7 @@ impl Parser {
             && !(abstract_ok && (self.at_punct_ahead(1, ")") || self.starts_type_name(1)));
         if parenthesised {
             self.bump();
-            let mut inner = self.declarator(abstract_ok)?;
+            let mut inner = self.declarator_tree(abstract_ok)?;
             self.expect_punct(")")?;
             inner.derived.extend(self.declarator_suffixes()?);
             inner.span = self.finish(start);
@@ -766,6 +892,11 @@ impl Parser {
     /// Parses a type name: cast types, `sizeof`, `_Alignof`, compound
     /// literals, `_Atomic(...)`, and `impl` headers.
     pub(crate) fn type_name(&mut self) -> Result<TypeName, Diagnostic> {
+        // A const fn may stand where a type is written, as long as it returns
+        // tokens: the call is replaced by the type its tokens parse into.
+        if let Some(expanded) = self.expand_type_call()? {
+            return Ok(expanded);
+        }
         let start = self.here();
         let specs = self.decl_specs()?;
         // A type name needs a type specifier; storage classes and qualifiers
@@ -810,4 +941,33 @@ pub fn builtin_type(word: &str) -> Option<BuiltinType> {
         "unsigned" => BuiltinType::Unsigned,
         _ => return None,
     })
+}
+/// Parses a token sequence returned by a const fn as one complete type name.
+fn parse_type_fragment(
+    tokens: Vec<crate::lexer::Token>,
+    span: crate::source::Span,
+    parent: &Parser,
+) -> Result<TypeName, Diagnostic> {
+    if tokens.is_empty() {
+        return Err(Diagnostic::new(span, "a const fn returned no tokens"));
+    }
+    let mut stream = tokens;
+    stream.push(crate::lexer::Token {
+        kind: TokenKind::Eof,
+        span,
+        at_line_start: false,
+        leading_space: false,
+    });
+    let mut parser = Parser::new(stream, false);
+    parser.scopes[0].typedefs = parent.scopes[0].typedefs.clone();
+    parser.scopes[0].tags = parent.scopes[0].tags.clone();
+    parser.scopes[0].traits = parent.scopes[0].traits.clone();
+    let type_name = parser.type_name()?;
+    if !parser.at_eof() {
+        return Err(Diagnostic::new(
+            parser.here(),
+            "tokens returned by a const fn do not form one type",
+        ));
+    }
+    Ok(type_name)
 }

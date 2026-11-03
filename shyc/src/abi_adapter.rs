@@ -101,8 +101,8 @@ pub fn abi_type(types: &TypeStore, ty: TypeId) -> Result<AbiType, AbiError> {
     match types.kind(ty) {
         TypeKind::Void => Ok(AbiType::Void),
         TypeKind::Bool => Ok(AbiType::Bool),
-        TypeKind::Integer { rank, unsigned } => Ok(AbiType::Integer {
-            bits: (rank.size() * 8) as u16,
+        TypeKind::Integer { unsigned, .. } => Ok(AbiType::Integer {
+            bits: (types.size_of(ty).unwrap_or(4) * 8) as u16,
             signed: !unsigned,
         }),
         TypeKind::Float32 => Ok(AbiType::Float { bits: 32 }),

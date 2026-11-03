@@ -31,15 +31,18 @@ pub struct SlotId(pub u32);
 ///
 /// The IR is shared by several code generators: the Shy backend keeps the
 /// 32-bit address model of ShyISA, while an LLVM backend can target a 64-bit
-/// host. Only pointer width differs here; `int` is 4 bytes and `long` is 8
-/// bytes on every ShyC target, and aggregates already carry the size and
+/// host or 32-bit RISC-V. `int` is 4 bytes everywhere; pointer width and
+/// `long` width are the data model, and aggregates already carry the size and
 /// alignment their frontend computed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Layout {
     pub pointer_bytes: u32,
     pub pointer_align: u32,
+    /// Width of `long` in bytes. The Shy and LP64 targets use 8, RISC-V ILP32
+    /// uses 4.
+    pub long_bytes: u32,
     /// Byte order of every multi-byte object on this target. ShyISA is
-    /// big-endian; the 64-bit hosts we emit for are little-endian.
+    /// big-endian; the targets we emit for are little-endian.
     pub endian: Endian,
 }
 
@@ -50,10 +53,11 @@ pub enum Endian {
 }
 
 impl Layout {
-    /// ShyISA: 32-bit addresses.
+    /// ShyISA: 32-bit addresses and a 64-bit `long`.
     pub const SHY: Layout = Layout {
         pointer_bytes: 4,
         pointer_align: 4,
+        long_bytes: 8,
         endian: Endian::Big,
     };
 
@@ -61,6 +65,15 @@ impl Layout {
     pub const LP64: Layout = Layout {
         pointer_bytes: 8,
         pointer_align: 8,
+        long_bytes: 8,
+        endian: Endian::Little,
+    };
+
+    /// RISC-V ILP32: 32-bit pointers and a 32-bit `long`.
+    pub const ILP32: Layout = Layout {
+        pointer_bytes: 4,
+        pointer_align: 4,
+        long_bytes: 4,
         endian: Endian::Little,
     };
 }

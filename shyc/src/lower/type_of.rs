@@ -525,24 +525,41 @@ impl Lowerer {
                 "`->` needs a pointer to a struct or union",
             ));
         }
-        let record = self
-            .record_of(object_ty)
-            .ok_or_else(|| Diagnostic::new(span, "member access needs a struct or union"))?;
-        match self.field_of(record, &name.text, name.span) {
-            Ok((ty, _)) => Ok(ty),
-            Err(error) => {
-                if self.method_of(record, name)?.is_some()
-                    || self.has_generic_method(record, &name.text)?
-                {
-                    Err(Diagnostic::new(
-                        span,
-                        format!("method '{}' must be called", name.text),
-                    ))
-                } else {
-                    Err(error)
-                }
+        let direct_record = self.record_of(object_ty);
+        let mut last_error = None;
+        if let Some(record) = direct_record {
+            match self.field_of(record, &name.text, name.span) {
+                Ok((ty, _)) => return Ok(ty),
+                Err(error) => last_error = Some(error),
+            }
+            if self.method_of(record, name)?.is_some()
+                || self.has_generic_method(record, &name.text)?
+            {
+                return Err(Diagnostic::new(
+                    span,
+                    format!("method '{}' must be called", name.text),
+                ));
             }
         }
+        let paths = self.record_paths(object_ty, false, span)?;
+        let mut has_generic_method = false;
+        let first_deref_path = if direct_record.is_some() { 1 } else { 0 };
+        for path in paths.iter().skip(first_deref_path) {
+            match self.field_of(path.record, &name.text, name.span) {
+                Ok((ty, _)) => return Ok(ty),
+                Err(error) => last_error = Some(error),
+            }
+            has_generic_method |= self.has_generic_method(path.record, &name.text)?;
+        }
+        if self.method_with_autoderef(object_ty, name)?.is_some() || has_generic_method {
+            return Err(Diagnostic::new(
+                span,
+                format!("method '{}' must be called", name.text),
+            ));
+        }
+        Err(last_error.unwrap_or_else(|| {
+            Diagnostic::new(span, "member access needs a struct or union")
+        }))
     }
 
     pub(super) fn scoped_method(
@@ -678,7 +695,7 @@ impl Lowerer {
         let (record, name, skip_params) = match callee {
             ast::Expr::Member { object, name, .. } => {
                 let object_ty = self.type_of(object, local)?;
-                let Some(record) = self.record_of(object_ty) else {
+                let Some(record) = self.receiver_of(object_ty) else {
                     return Ok(None);
                 };
                 (record, name, 1)
@@ -689,7 +706,7 @@ impl Lowerer {
                 let Some(ty) = self.lookup_named_type(&qualifier.text) else {
                     return Ok(None);
                 };
-                let Some(record) = self.record_of(ty) else {
+                let Some(record) = self.receiver_of(ty) else {
                     return Ok(None);
                 };
                 (record, name, 0)
@@ -701,14 +718,14 @@ impl Lowerer {
                 ..
             } => {
                 let ty = self.generic_qualifier_type(qualifier, type_args)?;
-                let Some(record) = self.record_of(ty) else {
+                let Some(record) = self.receiver_of(ty) else {
                     return Ok(None);
                 };
                 (record, name, 0)
             }
             _ => return Ok(None),
         };
-        if self.method_of(record, name)?.is_some()
+        if self.method_with_autoderef(record, name)?.is_some()
             || !self.has_generic_method(record, &name.text)?
         {
             return Ok(None);
@@ -739,13 +756,13 @@ impl Lowerer {
             ast::Expr::Name(name) => self.instantiate_generic_function(name, type_args),
             ast::Expr::Member { object, name, .. } => {
                 let object_ty = self.type_of(object, local)?;
-                let Some(record) = self.record_of(object_ty) else {
+                let Some(record) = self.receiver_of(object_ty) else {
                     return Err(Diagnostic::new(
                         span,
-                        "method call needs a struct, union, or pointer receiver",
+                        "method call needs a struct, union, pointer, or scalar receiver",
                     ));
                 };
-                if self.method_of(record, name)?.is_some() {
+                if self.method_with_autoderef(record, name)?.is_some() {
                     return Err(Diagnostic::new(
                         span,
                         format!("method '{}' is not generic", name.text),
@@ -763,7 +780,7 @@ impl Lowerer {
                         format!("unknown type name '{}'", qualifier.text),
                     ));
                 };
-                if self.method_of(record, name)?.is_some() {
+                if self.method_with_autoderef(record, name)?.is_some() {
                     return Err(Diagnostic::new(
                         span,
                         format!("method '{}' is not generic", name.text),
@@ -800,10 +817,8 @@ impl Lowerer {
         } = callee
         {
             let object_ty = self.type_of(object, local)?;
-            if let Some(record) = self.record_of(object_ty)
-                && let Some(method) = self.method_of(record, name)?
-            {
-                return Ok(method.ty);
+            if let Some(resolved) = self.method_with_autoderef(object_ty, name)? {
+                return Ok(resolved.method.ty);
             }
             let _ = op;
         }

@@ -407,6 +407,42 @@ p.add(5);
 The dot operator also auto-dereferences struct and union pointers for both field
 access and method calls.
 
+A record can expose another object through `Deref<Target>` / `DerefMut<Target>`
+(`<core/deref.shyh>`). When the pointer walk above finds no member, the compiler
+follows one such implementation, up to eight links, so a wrapper behaves like
+the object it projects:
+
+```c
+#include <core/deref.shyh>
+#include <core/str.shyh>
+
+struct Entry {
+    Str name;
+    int id;
+};
+
+impl Deref<Str> for Entry {
+    fn deref(const self *s) -> const Str * {
+        return &s.name;
+    }
+}
+
+int main(void) {
+    Entry e = { Str::from_cstr("shy"), 7 };
+    if (!e.starts_with("sh")) return 1;
+    if (e.len != 3) return 2;
+    return 0;
+}
+```
+
+Reading a projected field or calling a method whose receiver is `const self *`
+needs `Deref`; writing a projected field or calling a method whose receiver is a
+mutable `self *` needs `DerefMut`, which must pair with a `Deref` of the same
+target. The traits return ordinary C pointers: they add no ownership, borrowing,
+or lifetime checking, and the returned pointer must designate a live target for
+the duration of the access. A record may implement each trait once; a second
+`Deref` implementation makes that projection ambiguous.
+
 ### Linkage
 
 ShyC declarations are **file-local by default**, the same shape as `let` being
@@ -466,10 +502,14 @@ impl Str {
 }
 ```
 
-`static` gives a method or a `fn` function internal linkage, so a header can
-define a private helper without a duplicate symbol in every unit that includes
-it: `static fn helper(void) -> int { ... }`. Methods of a generic or trait impl
-always have bodies; a generic impl is compiled where it is used.
+A header can define a helper or a whole trait implementation without a
+duplicate symbol in every unit that includes it: a `fn` is already file-local,
+so nothing has to be written for the private case, and `pub` is the only way to
+export one. `static` stays available as the explicit spelling of the same
+linkage, which is what a file under `#![disable_default_static]` needs.
+Methods of a generic or trait impl always have bodies; a generic impl is
+compiled where it is used. A trait declaration may give a method a default
+body, and an `impl` that omits the method inherits it.
 
 If a type implements `drop(self *s)`, local values of that type are treated as
 RAII values. ShyC inserts `drop` at scope exits, `return`, `break`, and

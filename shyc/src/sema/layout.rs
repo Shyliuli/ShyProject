@@ -452,8 +452,10 @@ impl TypeStore {
         if unsigned_rank >= signed_rank {
             return Ok(self.integer_type(unsigned_rank, true));
         }
-        if signed_rank.size() > unsigned_rank.size() {
-            Ok(self.integer_type(signed_rank, false))
+        let signed_ty = self.integer_type(signed_rank, false);
+        let unsigned_ty = self.integer_type(unsigned_rank, true);
+        if self.size_of(signed_ty)? > self.size_of(unsigned_ty)? {
+            Ok(signed_ty)
         } else {
             Ok(self.integer_type(signed_rank, true))
         }

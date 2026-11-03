@@ -1064,7 +1064,9 @@ impl Lowerer {
     /// underlying type, with its width in bits.
     fn enum_value_range(&self, underlying: TypeId) -> (i128, i128, u32, bool) {
         let (bits, unsigned) = match self.types.kind(underlying) {
-            TypeKind::Integer { rank, unsigned } => (rank.size() * 8, *unsigned),
+            TypeKind::Integer { unsigned, .. } => {
+                (self.types.size_of(underlying).unwrap_or(4) * 8, *unsigned)
+            }
             _ => unreachable!("enum underlying type was validated"),
         };
         if unsigned {
@@ -1169,6 +1171,24 @@ impl Lowerer {
         Some(ty)
     }
 
+    /// The type a method receiver denotes, looking through any pointer depth.
+    ///
+    /// A method may be implemented for a record, an enum, or an arithmetic
+    /// scalar, so `impl Debug for int` makes an integer the owner of its
+    /// methods just like a struct does.
+    pub(super) fn receiver_of(&self, mut ty: TypeId) -> Option<TypeId> {
+        while let TypeKind::Pointer { pointee } = self.types.kind(ty) {
+            ty = pointee.ty;
+        }
+        let owned = self.types.is_record(ty)
+            || matches!(
+                self.types.kind(ty),
+                TypeKind::Enum(_) | TypeKind::PayloadEnum(_)
+            )
+            || self.types.is_arithmetic(ty);
+        owned.then_some(ty)
+    }
+
     // -----------------------------------------------------------------------
     // Literals
     // -----------------------------------------------------------------------
@@ -1187,7 +1207,8 @@ impl Lowerer {
         if is_float {
             return self.float_literal(literal);
         }
-        let integer = crate::literal::integer(text, literal.span)?;
+        let long_bits = self.types.size_of(self.types.builtin(Builtin::Long)).unwrap_or(8) * 8;
+        let integer = crate::literal::integer(text, long_bits, literal.span)?;
         let ty = match (integer.rank, integer.unsigned) {
             (crate::literal::IntegerRank::Int, false) => Builtin::Int,
             (crate::literal::IntegerRank::Int, true) => Builtin::UnsignedInt,

@@ -139,6 +139,16 @@ cargo run -q -p shycc -- test/testc/main.sobj test/testc/put.sobj -o test/testc/
 
 - `-save-temps`：保留中间产物 `.shy` 和 `.sobj`
 - `-###`：只打印将要执行的命令
+- `--target <name>`：默认 `shy` 走 ShyISA。`rv64`/`riscv64`、`rv32`/`riscv32`、`x64`/`x86_64`、`arm64`/`aarch64`、`la64`/`loong64`/`loongarch64` 展开成 `<arch>-linux-gnu`，加 `-bare` 后缀（如 `rv64-bare`、`rv32-bare`）展开成 `<arch>-unknown-none`；`--target=host` 取本机 clang 的 triple；完整三元组原样交给 clang
+- `rv32-bare` 是 32 位 RISC-V（ILP32）目标；`rv32`/`riscv32`/`rv32-linux` 需要 riscv32 的 C 库，当前没有可用 sysroot 时会直接报错并提示改用 `rv32-bare`
+- 交叉 hosted 目标自动用 `/usr/<triple>` 作为 sysroot（也认去掉 vendor 的 `/usr/<arch>-<os>-<env>`，即 Arch/Debian 的 cross 包布局），可用 `--sysroot <dir>` 覆盖，链接走 `lld`。本机装好 `riscv64-linux-gnu-gcc` 后可以直接：
+
+  ```sh
+  shycc --target=rv64 main.shyc -o main
+  qemu-riscv64 -L /usr/riscv64-linux-gnu ./main
+  ```
+
+- 裸机用 `<arch>-unknown-none`，`shycc` 按 freestanding 处理（`-nostdlib -static`、入口 `_start`），程序需要 `#![no_main]` 和自己的入口
 - `--shy-emit-source-lines`：生成 `.shy` 时插入 `//source file:line text` 注释，记录 C 源码行与后续汇编的对应关系，供调试信息工具链使用
 - `--shy-emit-debug-info`：生成 `.shy.debug.json` sidecar，最终由 `shy-dwarf` 产出 `app.debug.elf`，支持 GDB 查看源码行、局部变量、参数、结构体/数组/指针
 - `-lfloat`：链接内部软浮点运行库

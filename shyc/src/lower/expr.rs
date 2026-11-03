@@ -141,6 +141,25 @@ impl FnLower<'_> {
         self.rvalue_val(value, span)
     }
 
+    fn pointer_conversion_discards_qualifier(&self, from: TypeId, to: TypeId) -> bool {
+        let (mut from, mut to) = (from, to);
+        loop {
+            let (Some(from_pointee), Some(to_pointee)) =
+                (self.l.pointee(from), self.l.pointee(to))
+            else {
+                return false;
+            };
+            if (from_pointee.qualifiers.is_const && !to_pointee.qualifiers.is_const)
+                || (from_pointee.qualifiers.is_volatile
+                    && !to_pointee.qualifiers.is_volatile)
+            {
+                return true;
+            }
+            from = from_pointee.ty;
+            to = to_pointee.ty;
+        }
+    }
+
     pub(super) fn convert(
         &mut self,
         operand: ir::Operand,
@@ -149,6 +168,15 @@ impl FnLower<'_> {
         span: Span,
         explicit: bool,
     ) -> Result<ir::Operand, Diagnostic> {
+        if self.l.types.is_pointer(to) && self.l.types.is_pointer(from) {
+            if !explicit && self.pointer_conversion_discards_qualifier(from, to) {
+                return Err(Diagnostic::new(
+                    span,
+                    "pointer conversion discards const or volatile qualifier",
+                ));
+            }
+            return Ok(operand);
+        }
         if self.l.types.is_compatible(from, to) {
             return Ok(operand);
         }
@@ -248,9 +276,6 @@ impl FnLower<'_> {
                 to: to_ir,
             });
             return Ok(ir::Operand::Value(value));
-        }
-        if self.l.types.is_pointer(to) && self.l.types.is_pointer(from) {
-            return Ok(operand);
         }
         if self.l.types.is_pointer(to) && self.l.types.is_integer(from) {
             let is_zero = matches!(
@@ -470,6 +495,15 @@ impl FnLower<'_> {
                         span,
                         format!(
                             "generic function '{name}' needs explicit generic arguments to be used as a value"
+                        ),
+                    ))
+                } else if let Some(macro_name) = format_macro_wrapper(&name) {
+                    // `println!("x")` becomes `println0("x")`, which lives in
+                    // the formatting header rather than in the language.
+                    Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "'{name}' comes from the '{macro_name}!' macro; add #include <std/fmt.shyh>"
                         ),
                     ))
                 } else {
@@ -910,6 +944,21 @@ impl FnLower<'_> {
         }
     }
 
+    pub(super) fn lower_expr_for_write(
+        &mut self,
+        expression: &ast::Expr,
+    ) -> Result<ExprVal, Diagnostic> {
+        match expression {
+            ast::Expr::Member {
+                object,
+                name,
+                op,
+                span,
+            } => self.lower_member_mode(object, name, *op, *span, true),
+            _ => self.lower_expr(expression),
+        }
+    }
+
     fn lower_incdec(
         &mut self,
         operand: &ast::Expr,
@@ -917,7 +966,7 @@ impl FnLower<'_> {
         postfix: bool,
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
-        let value = self.lower_expr(operand)?;
+        let value = self.lower_expr_for_write(operand)?;
         let (address, ty, qualifiers) = self.place_of(value, span)?;
         if qualifiers.is_const {
             return Err(Diagnostic::new(span, "cannot modify a const object"));
@@ -1332,7 +1381,8 @@ impl FnLower<'_> {
         &mut self,
         object_value: ExprVal,
         span: Span,
-    ) -> Result<(TypeId, ir::Address), Diagnostic> {
+    ) -> Result<(TypeId, ir::Address, Qualifiers), Diagnostic> {
+        let mut object_qualifiers = object_value.qualifiers;
         let mut ty = object_value.ty;
         let mut value = object_value;
         while !self.l.types.is_record(ty) {
@@ -1342,10 +1392,13 @@ impl FnLower<'_> {
                     "member access needs a struct or union",
                 ));
             };
+            // A pointer to a const record makes the field const too.
+            object_qualifiers.is_const |= pointee.qualifiers.is_const;
+            object_qualifiers.is_volatile |= pointee.qualifiers.is_volatile;
             let (operand, _) = self.rvalue_val(value, span)?;
             let address = super::address_operand(operand);
             if self.l.types.is_record(pointee.ty) {
-                return Ok((pointee.ty, address));
+                return Ok((pointee.ty, address, object_qualifiers));
             }
             // Still a pointer: load it and continue.
             let loaded = self.load_value(address, pointee.ty, Qualifiers::NONE);
@@ -1356,7 +1409,7 @@ impl FnLower<'_> {
                 kind: ExprKind::Value(loaded),
             };
         }
-        Ok((ty, self.object_address(value, span)?))
+        Ok((ty, self.object_address(value, span)?, object_qualifiers))
     }
 
     fn pointer_offset(
@@ -1793,6 +1846,7 @@ impl FnLower<'_> {
         name: &ast::Name,
         op: ast::MemberOp,
         span: Span,
+        mutable: bool,
     ) -> Result<MemberTarget, Diagnostic> {
         let object_ty = object_value.ty;
         let object_volatile = object_value.qualifiers.is_volatile;
@@ -1804,16 +1858,19 @@ impl FnLower<'_> {
         }
         // ShyC dereferences automatically: `p.field` on a pointer means
         // `(*p).field`, the same as `p->field`.
-        let (record, address) = self.record_and_address(object_value, span)?;
+        let (record, address, object_qualifiers) = self.record_and_address(object_value, span)?;
         let (field_ty, offset) = self.l.field_of(record, &name.text, name.span)?;
         let field_qualifiers = self.l.field_qualifiers(record, &name.text);
         let qualifiers = Qualifiers {
-            is_const: field_qualifiers.is_const,
+            is_const: field_qualifiers.is_const || object_qualifiers.is_const,
             is_volatile: field_qualifiers.is_volatile || object_volatile,
             is_restrict: false,
             is_atomic: false,
         };
         let address = address.offset_by(i64::from(offset));
+        if mutable {
+            self.check_writable(&address, span)?;
+        }
         Ok(MemberTarget {
             address,
             ty: field_ty,
@@ -1875,4 +1932,17 @@ pub(super) fn assign_binary(op: ast::AssignOp) -> Option<ast::BinaryOp> {
         ast::AssignOp::BitXor => Some(ast::BinaryOp::BitXor),
         ast::AssignOp::BitOr => Some(ast::BinaryOp::BitOr),
     }
+}
+
+/// The macro a generated wrapper name came from, as in `println3`.
+fn format_macro_wrapper(name: &str) -> Option<&'static str> {
+    for prefix in ["println", "format", "scanln"] {
+        let Some(rest) = name.strip_prefix(prefix) else {
+            continue;
+        };
+        if !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Some(prefix);
+        }
+    }
+    None
 }

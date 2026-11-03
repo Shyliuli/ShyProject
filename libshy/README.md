@@ -6,9 +6,9 @@ bottom and three layers above it:
 | View | Contents |
 |---|---|
 | `c/` | the C include view: only `.h`, and only C-library headers — `stdio`, `stdlib`, `string`, `ctype`, `unistd`, `fcntl`, `stddef`, `stdint`, `stdtype`, `stdarg` |
-| `core/` | ShyC declarations and their C spelling (`str.shyh`, `option.{shyh,h}`, `result.{shyh,h}`), plus `core.shyc` |
-| `alloc/` | `vec.shyh`, `string.shyh`, `alloc.shyc` |
-| `std/` | `fs.shyh`, `io.shyh`, `std.shyc` |
+| `core/` | ShyC declarations and their C spelling (`str.shyh`, `buffer.shyh`, `option.{shyh,h}`, `result.{shyh,h}`), plus `core.shyc` |
+| `alloc/` | `vec.shyh`, `string.shyh`, `debug.shyh`, `display.shyh`, `alloc.shyc` |
+| `std/` | `fs.shyh`, `io.shyh`, `fmt.shyh`, `std.shyc` |
 | `libc/` | the C library in ShyC spelling: `*.shyh` declarations and the `libc.c` implementation |
 | `sys/` | the bare-machine platform calls, `shy.shyc` |
 
@@ -42,6 +42,55 @@ is no file system, and the heap grows from `_end` up to the stack at
 
 Streams are unbuffered. `FILE` is opaque, so on a hosted target `stdin`,
 `stdout`, and `stderr` are the system library's.
+
+## Bytes, endpoints, and formatting
+
+`Buffer` (`core/buffer.shyh`) is a writable byte region: `data()`, `len()`,
+`reserve(n)` for more room after the current length, and `set_len(n)` to commit.
+`String` grows in `reserve`; `BufferView` wraps a fixed array. A generic
+`B: Buffer` therefore serves memory, and the same code works for any storage.
+
+`Reader` and `Writer` (`core/buffer.shyh`) are endpoints. A device implements
+`read`/`write`; the default methods `read_buffer`, `write_buffer`, `getc`,
+`getline`, `write_str`, `newline`, and `write_line` build the rest, so a UART
+driver only supplies the two raw operations. `getline` appends the line without
+its newline and returns the number of bytes it added, so reusing a buffer means
+resetting it first. A line longer than a fixed `BufferView` is delivered in
+pieces, the way `fgets` truncates:
+
+```c
+StrReader reader = StrReader::new(Str::from_cstr("first\nsecond\n"));
+String line = String::new();
+while (reader.getline(&line) > 0) {
+    print_line(&line);
+    line.set_len(0);
+}
+```
+
+`std/io.shyh` gives `FileReader`, `FileWriter`, `StrReader`, and the replaceable
+global endpoints behind the stream-less helpers `print`, `print_line`, `getc`,
+and `get_line`.
+
+`Debug` and `Display` (`alloc/debug.shyh`, `alloc/display.shyh`) render a value
+into a `String`; both are traits, so a struct opts in with `impl Debug for T`.
+Traits can be implemented for scalars and enums too, so `impl Display for int`
+is a normal declaration.
+
+`std/fmt.shyh` formats with `{}` (Display), `{:?}` (Debug), and literal
+`{{`/`}}`. `println!`, `format!`, and `scanln!` are the compile-time
+spellings: the compiler turns a call into the wrapper for its argument count.
+
+```c
+#include <std/fmt.shyh>
+
+int main(void) {
+    int n = 0;
+    char word[16];
+    scanln!("%d %15s", &n, word);
+    println!("n={} word={:?}", n, Str::from_cstr(word));
+    return 0;
+}
+```
 
 ## Using it
 
@@ -77,9 +126,14 @@ Both print `2 lines`. `read_file(path)` from `<std/fs.shyh>` returns
 `Option<String>`, which is `None` on bare Shy.
 
 `Str` is a borrowed pointer and length; print one with
-`printf("%.*s", s.len, s.ptr)`. `Vec<T>` is generic, so `alloc/vec.shyh`
-carries its whole definition; the other types declare their methods in the
-header and define them once in the layer's `.shyc`.
+`printf("%.*s", s.len, s.data)`. `String` owns a NUL-terminated byte buffer that
+a read-only `Deref<Str>` exposes, so `s.eq_cstr("x")` and `s.starts_with("x")`
+work directly on the owner; create one with `String::new()`. Neither type
+validates UTF-8: `push` appends one byte. A `Str` copied out of a `String` is a
+snapshot that a later `push`, `push_str`, or `push_cstr` may invalidate by
+reallocating the buffer. `Vec<T>` is generic, so `alloc/vec.shyh` carries its
+whole definition; the other types declare their methods in the header and
+define them once in the layer's `.shyc`.
 
 ## Calling the library from C
 

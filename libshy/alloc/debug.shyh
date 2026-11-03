@@ -1,0 +1,111 @@
+#ifndef SHY_ALLOC_DEBUG_SHYH
+#define SHY_ALLOC_DEBUG_SHYH
+
+#include <alloc/string.shyh>
+
+/* Rust-style Debug rendering into a String: integers are decimal, characters
+   are single quoted, strings are quoted and escaped.
+
+   The method is deliberately not generic: a trait value (`Debug::from<int>()`)
+   is a table of plain function pointers, which is what lets `format` render
+   arguments of different types through one erased signature. */
+trait Debug {
+    fn debug(const self *value, String *out) -> int;
+}
+
+/* Shared building blocks for Debug and Display. */
+fn fmt_putc(String *out, int byte) -> int {
+    if (out.reserve(1) == 0) {
+        return 0;
+    }
+    int len = out.len();
+    out.data()[len] = (char)byte;
+    out.set_len(len + 1);
+    return 1;
+}
+
+fn fmt_unsigned(String *out, unsigned int value) -> int {
+    if (value == 0) {
+        return fmt_putc(out, '0');
+    }
+    char digits[12];
+    int count = 0;
+    while (value > 0) {
+        digits[count] = (char)('0' + (int)(value % 10));
+        value = value / 10;
+        count = count + 1;
+    }
+    int written = 0;
+    for (int i = count - 1; i >= 0; i--) {
+        written = written + fmt_putc(out, digits[i]);
+    }
+    return written;
+}
+
+fn fmt_hex(String *out, int value) -> int {
+    const char *digits = "0123456789abcdef";
+    int written = fmt_putc(out, digits[(value >> 4) & 0xf]);
+    return written + fmt_putc(out, digits[value & 0xf]);
+}
+
+fn fmt_escape_byte(String *out, int byte) -> int {
+    if (byte == '"') {
+        return fmt_putc(out, '\\') + fmt_putc(out, '"');
+    }
+    if (byte == '\\') {
+        return fmt_putc(out, '\\') + fmt_putc(out, '\\');
+    }
+    if (byte == '\n') {
+        return fmt_putc(out, '\\') + fmt_putc(out, 'n');
+    }
+    if (byte == '\t') {
+        return fmt_putc(out, '\\') + fmt_putc(out, 't');
+    }
+    if (byte == '\r') {
+        return fmt_putc(out, '\\') + fmt_putc(out, 'r');
+    }
+    if (byte < 0x20 || byte >= 0x7f) {
+        return fmt_putc(out, '\\') + fmt_putc(out, 'x') + fmt_hex(out, byte);
+    }
+    return fmt_putc(out, byte);
+}
+
+impl Debug for int {
+    fn debug(const self *value, String *out) -> int {
+        int v = *value;
+        if (v < 0) {
+            int written = fmt_putc(out, '-');
+            return written + fmt_unsigned(out, (unsigned int)0 - (unsigned int)v);
+        }
+        return fmt_unsigned(out, (unsigned int)v);
+    }
+}
+
+impl Debug for char {
+    fn debug(const self *value, String *out) -> int {
+        int written = fmt_putc(out, '\'');
+        written = written + fmt_escape_byte(out, (int)(unsigned char)*value);
+        written = written + fmt_putc(out, '\'');
+        return written;
+    }
+}
+
+impl Debug for Str {
+    fn debug(const self *value, String *out) -> int {
+        int written = fmt_putc(out, '"');
+        for (int i = 0; i < value.len; i++) {
+            written = written + fmt_escape_byte(out, (int)(unsigned char)value.data[i]);
+        }
+        written = written + fmt_putc(out, '"');
+        return written;
+    }
+}
+
+impl Debug for String {
+    fn debug(const self *value, String *out) -> int {
+        let mut inner = Debug::from<Str>();
+        return inner.debug(&value.view, out);
+    }
+}
+
+#endif

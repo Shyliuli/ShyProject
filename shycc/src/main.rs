@@ -41,9 +41,12 @@ struct Options {
     emit_source_lines: bool,
     /// `-nostdlib` / `-nodefaultlibs`: do not add libshy or the float runtime.
     no_default_libs: bool,
-    /// Target triple. `shy` selects the Shy ISA pipeline; anything else is
-    /// lowered to LLVM IR and finished by clang.
+    /// Target triple. `shy` selects the Shy ISA pipeline, `host` is replaced
+    /// by the machine's own triple, and anything else is lowered to LLVM IR
+    /// and finished by clang.
     target: String,
+    /// `--sysroot <dir>`: the C library root for a hosted cross link.
+    sysroot: Option<PathBuf>,
     emit_debug_info: bool,
     compile_args: Vec<String>,
     /// `-Wl,` items, forwarded to clang; the Shy linker validates them itself.
@@ -106,6 +109,7 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         emit_source_lines: false,
         no_default_libs: false,
         target: "shy".to_string(),
+        sysroot: None,
         emit_debug_info: false,
         compile_args: Vec::new(),
         link_args: Vec::new(),
@@ -141,6 +145,16 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
             }
             flag if flag.starts_with("--target=") => {
                 opts.target = flag["--target=".len()..].to_string();
+            }
+            "--sysroot" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    bail!("option `--sysroot` requires an argument");
+                };
+                opts.sysroot = Some(PathBuf::from(value));
+            }
+            flag if flag.starts_with("--sysroot=") => {
+                opts.sysroot = Some(PathBuf::from(&flag["--sysroot=".len()..]));
             }
             "-###" => opts.print_only = true,
             "-save-temps" | "--save-temps" => opts.save_temps = true,
@@ -252,6 +266,80 @@ fn parse_backend(name: &str) -> Result<Backend> {
     }
 }
 
+fn clang_command() -> String {
+    env::var("SHYCC_CLANG").unwrap_or_else(|_| "clang".to_string())
+}
+
+/// The triple clang spells for `target`, or the host triple when `target` is
+/// `None`.
+///
+/// A module states its own triple and clang compares it with the command line,
+/// so IR for `riscv64-linux-gnu` has to carry `riscv64-unknown-linux-gnu`; the
+/// driver asks the same clang that will compile it, which also means
+/// `SHYCC_CLANG` is honored.
+fn clang_triple(target: Option<&str>) -> Result<String> {
+    let clang = clang_command();
+    let mut cmd = Command::new(&clang);
+    if let Some(target) = target {
+        cmd.arg(format!("--target={target}"));
+    }
+    let output = cmd.arg("-dumpmachine").output().with_context(|| {
+        format!("failed to run `{clang} -dumpmachine` to resolve the target")
+    })?;
+    if !output.status.success() {
+        bail!("`{clang} -dumpmachine` failed");
+    }
+    let triple = String::from_utf8(output.stdout)
+        .context("`-dumpmachine` printed invalid UTF-8")?
+        .trim()
+        .to_string();
+    if triple.is_empty() {
+        bail!("`{clang} -dumpmachine` printed no target triple");
+    }
+    Ok(triple)
+}
+
+/// Expand a short target name to the triple it means.
+///
+/// `rv64`, `rv64-linux` and `riscv64-linux` are the RISC-V Linux target, and
+/// `rv64-bare` is the freestanding one; `rv32`, `rv32-linux` and `riscv32-linux`
+/// mean the same for RISC-V ILP32, whose `rv32-bare` form is the supported
+/// freestanding target. A full triple such as `riscv64-unknown-linux-gnu`
+/// passes through unchanged, as do `shy` and `host`, which the driver resolves
+/// itself.
+fn normalize_target(name: &str) -> String {
+    let (base, freestanding) = match name.rsplit_once('-') {
+        Some((base, "bare")) => (base, true),
+        Some((base, "linux")) => (base, false),
+        _ => (name, false),
+    };
+    let Some(arch) = arch_triple(base) else {
+        return name.to_string();
+    };
+    if freestanding {
+        format!("{arch}-unknown-none")
+    } else {
+        format!("{arch}-linux-gnu")
+    }
+}
+
+/// The triple for a short architecture name, or `None` when `name` is already
+/// a triple.
+fn arch_triple(name: &str) -> Option<&'static str> {
+    match name {
+        "rv64" | "riscv64" => Some("riscv64"),
+        "rv32" | "riscv32" => Some("riscv32"),
+        "x64" | "x86_64" => Some("x86_64"),
+        "arm64" | "aarch64" => Some("aarch64"),
+        "la64" | "loong64" | "loongarch64" => Some("loongarch64"),
+        _ => None,
+    }
+}
+
+fn target_arch(triple: &str) -> &str {
+    triple.split('-').next().unwrap_or(triple)
+}
+
 fn is_compile_option(arg: &str) -> bool {
     arg.starts_with("-I")
         || arg.starts_with("-D")
@@ -284,8 +372,18 @@ fn forwarded_to_shyc(arg: &str) -> bool {
     arg.starts_with("-I") || arg.starts_with("-D") || arg.starts_with("-U") || arg.starts_with("-O")
 }
 
-fn run(opts: Options) -> Result<()> {
+fn run(mut opts: Options) -> Result<()> {
     let repo = repo_root();
+    opts.target = normalize_target(&opts.target);
+    if opts.target == "host" {
+        opts.target = clang_triple(None)?;
+    } else if opts.target != "shy" {
+        // Keep the spelling the user gave when clang is not available; the
+        // compile step reports that failure itself.
+        if let Ok(triple) = clang_triple(Some(&opts.target)) {
+            opts.target = triple;
+        }
+    }
     if opts.target != "shy" {
         return run_llvm(&repo, &opts);
     }
@@ -446,6 +544,7 @@ fn run_shyc(
     preprocess_only: bool,
 ) -> Result<()> {
     let mut cmd = shyc_command(repo, opts.print_only)?;
+    cmd.arg(format!("--target={}", opts.target));
     if preprocess_only {
         cmd.arg("-E");
     } else {
@@ -498,10 +597,49 @@ fn bare_target(triple: &str) -> bool {
     lower.contains("none") || lower.contains("unknown-elf") || lower.ends_with("-elf")
 }
 
+/// The C library root for a hosted link. `--sysroot` wins; otherwise a cross
+/// toolchain installed at `/usr/<triple>` (the Arch and Debian layout) is used
+/// when it exists.
+fn sysroot(opts: &Options) -> Option<PathBuf> {
+    if let Some(sysroot) = &opts.sysroot {
+        return Some(sysroot.clone());
+    }
+    if bare_target(&opts.target) || target_arch(&opts.target) == env::consts::ARCH {
+        return None;
+    }
+    let mut candidates = vec![Path::new("/usr").join(&opts.target)];
+    let parts: Vec<&str> = opts.target.split('-').collect();
+    if parts.len() >= 4 {
+        // Cross packages install at /usr/<arch>-<os>-<env>, without the vendor
+        // clang adds to the triple.
+        candidates.push(Path::new("/usr").join(format!("{}-{}", parts[0], parts[2..].join("-"))));
+    }
+    candidates.into_iter().find(|path| path.is_dir())
+}
+
 /// Lower to LLVM IR with `shyc`, then let clang do instruction selection and
 /// linking. This is the same shape as the Shy pipeline, which hands its
 /// assembly to `shyasm` and the objects to `shyld`.
 fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
+    // There is no riscv32 Linux sysroot to link against, so report that
+    // before clang or lld can emit their own loader errors.
+    if !bare_target(&opts.target) && target_arch(&opts.target) == "riscv32" {
+        bail!(
+            "no riscv32 Linux sysroot found; \
+             use `--target=rv32-bare` for a freestanding build"
+        );
+    }
+    // Preprocessing does not depend on the target: `shyc -E` owns it for every
+    // backend, and there is nothing for clang to do yet.
+    if opts.stage == Stage::Preprocess {
+        for input in &opts.inputs {
+            ensure_kind(input, InputKind::C)?;
+            let output = opts.output.clone();
+            run_compiler(repo, opts, input, output.as_deref(), true, false)?;
+        }
+        return Ok(());
+    }
+
     let mut temps = TempFiles::new(opts.save_temps || opts.print_only);
     let mut clang_inputs: Vec<PathBuf> = Vec::new();
 
@@ -533,28 +671,36 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
         }
     }
 
-    let clang = env::var("SHYCC_CLANG").unwrap_or_else(|_| "clang".to_string());
-    let mut cmd = Command::new(clang);
+    let mut cmd = Command::new(clang_command());
     cmd.arg(format!("--target={}", opts.target));
     if opts.target.starts_with("riscv64") {
         // The kernel links above 0x8000_0000, out of reach of the default
         // medlow addressing range.
         cmd.arg("-mcmodel=medany");
     }
-    if bare_target(&opts.target) {
-        cmd.args([
-            "-ffreestanding",
-            "-nostdlib",
-            "-nostartfiles",
-            "-nodefaultlibs",
-            "-static",
-            // The host `ld` cannot link a foreign architecture, so bare-metal
-            // links go through LLVM's linker.
-            "-fuse-ld=lld",
-        ]);
+    if let Some(sysroot) = sysroot(opts) {
+        cmd.arg(format!("--sysroot={}", sysroot.display()));
+    }
+    let bare = bare_target(&opts.target);
+    if bare {
+        cmd.args(["-ffreestanding", "-nostdlib", "-nodefaultlibs", "-static"]);
         if opts.stage == Stage::Link {
+            // `-nostartfiles` only means something while linking, and clang
+            // warns about it during `-S`/`-c`.
+            cmd.arg("-nostartfiles");
             cmd.arg("-Wl,-e,_start");
         }
+    } else {
+        // Match the code model to what the linker will build. clang only
+        // defaults to PIE codegen for a triple with a hosted OS; an arch-only
+        // target such as `x86_64` would otherwise carry absolute relocations
+        // and the host linker would report a DT_TEXTREL warning.
+        cmd.arg("-fPIE");
+    }
+    if opts.stage == Stage::Link && (bare || target_arch(&opts.target) != env::consts::ARCH) {
+        // The host `ld` can only emulate its own architecture, so cross and
+        // bare-metal links go through LLVM's linker.
+        cmd.arg("-fuse-ld=lld");
     }
     match opts.stage {
         Stage::Asm => {
@@ -593,7 +739,21 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
             cmd.args(&clang_inputs);
         }
     }
-    run_command(opts, &mut cmd)
+    let result = run_command(opts, &mut cmd);
+    if result.is_err()
+        && opts.stage == Stage::Link
+        && !bare
+        && target_arch(&opts.target) != env::consts::ARCH
+        && sysroot(opts).is_none()
+    {
+        eprintln!(
+            "shycc: no C library for `{}`. Pass `--sysroot <dir>`, or use \
+             `--target={}-bare` for a freestanding build.",
+            opts.target,
+            target_arch(&opts.target)
+        );
+    }
+    result
 }
 
 fn run_chibicc(
@@ -941,6 +1101,11 @@ fn print_usage() {
          debug: --shy-emit-source-lines, --shy-emit-debug-info\n\
          inputs: .shyc/.c, .shy, .sobj\n\
          backend: --backend shyc|chibicc (default shyc)\n\
+         target: --target <name> (default shy); rv64/riscv64, rv32/riscv32, x64/x86_64,\n\
+         \x20 arm64/aarch64 and la64/loong64/loongarch64 name Linux targets (rv32 needs\n\
+         \x20 a sysroot), a `-bare` suffix makes them freestanding, `host` is the local\n\
+         \x20 clang triple, and a full triple is handed to clang as written\n\
+         sysroot: --sysroot <dir> for a cross link (default /usr/<triple>)\n\
          optimization: -O0, -O1, -O2, or -O3 (forwarded to shyc; -O0 by default)\n\
          libraries: libshy and the soft-float runtime are linked by default;\n\
          \x20 -nostdlib/-nodefaultlibs disables that, -llibshy and -lfloat\n\

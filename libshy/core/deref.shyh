@@ -1,0 +1,16 @@
+#ifndef SHY_CORE_DEREF_SHYH
+#define SHY_CORE_DEREF_SHYH
+
+/* Auto member projection through ordinary C pointers. These traits do not
+   imply ownership, borrowing, lifetimes, or aliasing guarantees. The returned
+   pointer must designate a live target for the duration of the access; the
+   compiler cannot verify this. */
+trait Deref<Target> {
+    fn deref(const self *s) -> const Target *;
+}
+
+trait DerefMut<Target> {
+    fn deref_mut(self *s) -> Target *;
+}
+
+#endif

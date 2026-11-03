@@ -370,7 +370,7 @@ fn item_span(item: &Item) -> Span {
 /// ABI. A method that takes or returns `self` by value has no erased C spelling;
 /// such a trait cannot be a value type, so the header says so instead of
 /// printing a structure with the wrong layout.
-fn trait_value_text(declaration: &TraitDecl) -> String {
+pub(crate) fn trait_value_text(declaration: &TraitDecl) -> String {
     if !declaration.generics.is_empty() {
         return format!(
             "/* trait '{}' cannot be a value type: it has generic parameters */",
@@ -485,7 +485,7 @@ fn parameter_self_is_pointer(param: &ParamDecl) -> bool {
 /// declarator. Objects and prototypes become `extern`, which declares without
 /// defining: a header must never define an object, and `extern` on a prototype
 /// is the same linkage a definition gets.
-fn declaration_text(declaration: &Declaration) -> String {
+pub(crate) fn declaration_text(declaration: &Declaration) -> String {
     let specs = &declaration.specs;
     if specs.storage == Some(StorageClass::Static) || declaration_uses_generics(declaration) {
         return String::new();
@@ -508,7 +508,7 @@ fn declaration_text(declaration: &Declaration) -> String {
 }
 
 /// Print the prototype of one exported function definition.
-fn prototype_text(function: &FunctionDecl) -> String {
+pub(crate) fn prototype_text(function: &FunctionDecl) -> String {
     if function.specs.storage == Some(StorageClass::Static)
         || specs_use_generics(&function.specs)
         || declarator_uses_generics(&function.declarator)
@@ -640,7 +640,7 @@ fn declarator_uses_generics(declarator: &Declarator) -> bool {
 /// chooses `extern` or `typedef` itself, and function specifiers describe the
 /// definition, not the declaration. An empty specifier list means C's implicit
 /// `int`.
-fn specs_text(specs: &DeclSpecs) -> String {
+pub(crate) fn specs_text(specs: &DeclSpecs) -> String {
     let mut words = Vec::new();
     for qualifier in &specs.qualifiers {
         words.push(qualifier_text(*qualifier).to_string());
@@ -868,7 +868,7 @@ fn indented(text: &str) -> String {
 /// operators are applied in that order: a pointer prefixes the text it
 /// already has, an array or function suffix appends to it. A suffix applied to
 /// a pointer needs parentheses, which is what separates `*a[3]` from `(*a)[3]`.
-fn declarator_text(declarator: &Declarator) -> String {
+pub(crate) fn declarator_text(declarator: &Declarator) -> String {
     let mut text = match &declarator.name {
         Some(name) => name.text.clone(),
         None => String::new(),

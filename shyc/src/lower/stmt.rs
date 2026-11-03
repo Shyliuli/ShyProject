@@ -141,7 +141,12 @@ impl FnLower<'_> {
                 body,
                 span,
             } => self.lower_switch(condition, body, *span),
-            ast::Stmt::Case { value, stmt, span } => self.lower_case(value, stmt, *span),
+            ast::Stmt::Case {
+                value,
+                end,
+                stmt,
+                span,
+            } => self.lower_case(value, end.as_ref(), stmt, *span),
             ast::Stmt::Default { stmt, span } => self.lower_default(stmt, *span),
             ast::Stmt::Label { name, stmt, span } => self.lower_label(name, stmt, *span),
             ast::Stmt::Goto { label, span } => self.lower_goto(label, *span),
@@ -372,6 +377,8 @@ impl FnLower<'_> {
             terminator_block,
             default: None,
             cases: Vec::new(),
+            ranges: Vec::new(),
+            labels: Vec::new(),
             end: end_block,
             span,
         });
@@ -383,14 +390,44 @@ impl FnLower<'_> {
             self.jump_to(end_block);
         }
         let default = context.default.unwrap_or(context.end);
-        let terminator = ir::Terminator::Switch {
+        // A range label cannot live in a switch table, so each one is a pair of
+        // comparisons in front of the dispatch.
+        self.set_current(context.terminator_block);
+        for (low, high, block) in &context.ranges {
+            let in_high = self.f.alloc_block();
+            let next = self.f.alloc_block();
+            let above = self.emit_value(ir::InstKind::ICmp {
+                pred: ir::IntPredicate::Sge,
+                lhs: context.value,
+                rhs: ir::Operand::Constant(*low),
+                ty: context.ir_ty,
+            });
+            self.terminate(ir::Terminator::branch(
+                ir::Operand::Value(above),
+                in_high,
+                next,
+            ));
+            self.set_current(in_high);
+            let below = self.emit_value(ir::InstKind::ICmp {
+                pred: ir::IntPredicate::Sle,
+                lhs: context.value,
+                rhs: ir::Operand::Constant(*high),
+                ty: context.ir_ty,
+            });
+            self.terminate(ir::Terminator::branch(
+                ir::Operand::Value(below),
+                *block,
+                next,
+            ));
+            self.set_current(next);
+        }
+        self.terminate(ir::Terminator::Switch {
             value: context.value,
             ty: context.ir_ty,
             default,
             cases: context.cases,
             span: Some(context.span),
-        };
-        self.f.block_mut(context.terminator_block).terminator = terminator;
+        });
         self.set_current(end_block);
         Ok(())
     }
@@ -449,34 +486,71 @@ impl FnLower<'_> {
     fn lower_case(
         &mut self,
         value: &ast::Expr,
+        end: Option<&ast::Expr>,
         statement: &ast::Stmt,
         span: Span,
     ) -> Result<(), Diagnostic> {
         let Some(context) = self.switches.last() else {
             return Err(Diagnostic::new(span, "`case` outside a switch"));
         };
-        let value_ty = context.value_ty;
-        let niche = self.l.types.is_niche_enum(context.scrutinee);
-        let ir_ty = context.ir_ty;
-        let constant = if niche {
-            let tag = self.l.eval_const_int(value)?;
-            ir::Constant::int(ir_ty, tag)
-        } else {
-            let value = self.l.eval_const(value)?;
-            let value = self.l.const_cast(value, value_ty, span)?;
-            self.l.const_int_of_ir(&value, span)?
+        if end.is_some() && self.l.types.is_niche_enum(context.scrutinee) {
+            return Err(Diagnostic::new(
+                span,
+                "case ranges need an integer switch condition",
+            ));
+        }
+        let low = self.case_constant(value, span)?;
+        let low_number = self.l.eval_const_int(value)?;
+        let (high, high_number) = match end {
+            Some(end) => (self.case_constant(end, end.span())?, self.l.eval_const_int(end)?),
+            None => (low, low_number),
         };
+        if low_number > high_number {
+            return Err(Diagnostic::new(span, "case range is written backwards"));
+        }
+        let context = self.switches.last_mut().expect("switch context");
+        let overlapping = context
+            .labels
+            .iter()
+            .find(|(low, high)| low_number <= *high && *low <= high_number)
+            .copied();
+        if let Some((low, high)) = overlapping {
+            let existing_is_range = low != high;
+            let message = match (end.is_some(), existing_is_range) {
+                (false, false) => "duplicate case value",
+                (true, true) => "case range overlaps another case range",
+                (true, false) => "case range covers an existing case value",
+                (false, true) => "case value is already covered by a case range",
+            };
+            return Err(Diagnostic::new(span, message));
+        }
+        context.labels.push((low_number, high_number));
         let block = self.f.alloc_block();
         if !self.terminated {
             self.jump_to(block);
         }
         self.set_current(block);
         let context = self.switches.last_mut().expect("switch context");
-        if context.cases.iter().any(|case| case.value == constant) {
-            return Err(Diagnostic::new(span, "duplicate case value"));
+        if end.is_some() {
+            context.ranges.push((low, high, block));
+        } else {
+            context.cases.push(ir::SwitchCase::new(low, block));
         }
-        context.cases.push(ir::SwitchCase::new(constant, block));
         self.lower_stmt(statement)
+    }
+
+    /// The constant a case label names, converted to the switch value's type.
+    fn case_constant(&mut self, expr: &ast::Expr, span: Span) -> Result<ir::Constant, Diagnostic> {
+        let context = self.switches.last().expect("switch context");
+        if self.l.types.is_niche_enum(context.scrutinee) {
+            let tag = self.l.eval_const_int(expr)?;
+            Ok(ir::Constant::int(context.ir_ty, tag))
+        } else {
+            let value_ty = context.value_ty;
+            let value = self.l.eval_const(expr)?;
+            let value = self.l.const_cast(value, value_ty, span)?;
+            self.l.const_int_of_ir(&value, span)
+        }
     }
 
     fn lower_default(&mut self, statement: &ast::Stmt, span: Span) -> Result<(), Diagnostic> {

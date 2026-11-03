@@ -1,36 +1,77 @@
 // alloc: owned types built on malloc.
 
 #include <stdlib.h>
+#include <alloc/debug.shyh>
+#include <stdint.h>
 #include <alloc/string.shyh>
+
+fn string_reserve(String *s, int required) {
+    if (required <= s.cap) {
+        return;
+    }
+    int cap = s.cap ? s.cap : 16;
+    while (cap < required) {
+        cap = cap * 2;
+    }
+    s.view.data = realloc((char *)s.view.data, cap);
+    s.cap = cap;
+}
 
 impl String {
     pub fn new(void) -> String {
-        String s = {calloc(1, 16), 0, 16};
+        String s;
+        s.view.data = calloc(1, 16);
+        s.view.len = 0;
+        s.cap = 16;
         return s;
     }
 
-    pub fn push(self *s, int c) {
-        if (s.len + 1 >= s.cap) {
-            s.cap = s.cap ? s.cap * 2 : 16;
-            s.data = realloc(s.data, s.cap);
+    pub fn reserve(self *s, int additional) -> int {
+        if (additional < 0) {
+            return 0;
         }
-        s.data[s.len] = c;
-        s.len = s.len + 1;
-        s.data[s.len] = 0;
+        string_reserve(s, s.view.len + additional + 1);
+        return 1;
+    }
+
+    pub fn push(self *s, int byte) {
+        string_reserve(s, s.view.len + 2);
+        char *data = (char *)s.view.data;
+        data[s.view.len] = byte;
+        s.view.len = s.view.len + 1;
+        data[s.view.len] = 0;
     }
 
     pub fn push_str(self *s, Str text) {
-        for (int i = 0; i < text.len; i++) {
-            s.push(text.ptr[i]);
+        if (text.len <= 0) {
+            return;
         }
+        int old_len = s.view.len;
+        int source_offset = -1;
+        if (s.view.data && text.data) {
+            uintptr_t base = (uintptr_t)s.view.data;
+            uintptr_t source = (uintptr_t)text.data;
+            if (source >= base && source - base <= (uintptr_t)old_len) {
+                source_offset = (int)(source - base);
+            }
+        }
+        string_reserve(s, old_len + text.len + 1);
+        if (source_offset >= 0) {
+            text.data = (const char *)s.view.data + source_offset;
+        }
+        char *data = (char *)s.view.data;
+        for (int i = 0; i < text.len; i++) {
+            data[old_len + i] = text.data[i];
+        }
+        s.view.len = old_len + text.len;
+        data[s.view.len] = 0;
     }
 
     pub fn push_cstr(self *s, const char *text) {
         s.push_str(Str::from_cstr(text));
     }
 
-    pub fn as_str(self *s) -> Str {
-        Str view = {s.data, s.len};
-        return view;
+    pub fn as_str(const self *s) -> Str {
+        return s.view;
     }
 }

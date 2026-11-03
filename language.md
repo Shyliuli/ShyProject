@@ -73,7 +73,9 @@ Payload enums use a transparent `tag + max-payload` representation. The tag is
 chosen as narrowly as possible unless an underlying type is explicitly given.
 
 `switch` remains the control-flow construct. It supports the existing `default`
-and `_` forms. Closed payload enums can be checked for exhaustive coverage;
+and `_` forms, and case ranges written `case low ... high:`, which dispatch
+through a comparison chain instead of a switch table. Overlapping labels and a
+backwards range are diagnosed, not silently ordered. Closed payload enums can be checked for exhaustive coverage;
 ordinary C enums are open and missing `default` is a diagnostic. The implemented
 `#![disable_nonexhaustive_switch]` file attribute disables the ordinary-enum
 diagnostic; a local attribute form is not available yet. Integer conversion
@@ -124,6 +126,32 @@ trait Drawable {
 
 fn render<T: Drawable>(T *value);
 ```
+
+A method may carry a default body. An `impl` that does not define the method
+inherits that body with `self` bound to the implementing type, so one required
+method is enough for the rest of the interface:
+
+```c
+trait Sequence {
+    int next(self *s);
+    int count(self *s) {
+        int n = 0;
+        while (self.next() != 0) {
+            n = n + 1;
+        }
+        return n;
+    }
+}
+
+impl Sequence for Countdown {
+    int next(self *s) { /* ... */ }   // count comes from the trait
+}
+```
+
+Defining the method in the `impl` still overrides the default. An inherited
+method is an ordinary method of the implementation: `c.count()` dispatches
+like any other, and `Sequence::from<Countdown>()` fills its function-pointer
+field in the trait value.
 
 A trait value is equivalent to a transparent function-pointer structure. It does
 not use a hidden `dyn` object, allocation, or garbage collection. Construction
@@ -188,7 +216,9 @@ plain C: they carry neither `pub` nor `mut`.
 
 Visibility is written per declaration, not per block: an `impl` block marks each
 method it exports, and a file lists the fields it exports next to the fields it
-keeps to itself.
+keeps to itself. A trait implementation follows the same rule as an inherent
+one: its methods are file-local unless they say `pub`, so a header may carry a
+whole `impl Trait for T` block without exporting anything.
 
 ```c
 // bare Shy: 默认私有
@@ -257,6 +287,356 @@ Use expansion happens in preprocessing, before parsing and lowering, so LSP
 analysis sees the included declarations and diagnostics. `use` remains in the
 syntax tree for the symbol index, but contributes no runtime symbol or storage.
 
+## Compile-time functions
+
+`const fn` is an ordinary function that runs while compiling. A call whose
+arguments are compile-time values is replaced by the value it returns, so it can
+size a type, appear in a constant, or compute a literal:
+
+```c
+const fn factorial(int n) -> int {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+const fn round_up(int n, int to) -> int {
+    return ((n + to - 1) / to) * to;
+}
+
+int numbers[factorial(5)];        // 120 elements
+char buffer[round_up(37, 16)];    // 48 bytes
+```
+
+A string argument is the text the program would see at run time: escapes are
+already decoded, so `str_len("a\tb")` is 3 and `tokens_from_text("\"x\"")`
+lexes a quoted token.
+
+A `const fn` may take integers and strings, use `let`, `if`, `while`, `for`,
+`do`/`while`, `break`, `continue`, `return`, compound assignment, arithmetic,
+comparisons, indexing, `switch` (labels, case ranges like `'0' ... '9'`,
+fallthrough, `default` anywhere, `break`), and call other `const fn`s. `goto` and `sizeof` are rejected with a
+message that names the alternative.
+Three builtins inspect strings: `str_len(text)`, `str_byte(text, index)` and
+`str_eq(left, right)`, so counting or scanning a literal is normal ShyC code:
+
+```c
+const fn count_placeholders(const char *fmt) -> int {
+    let mut count = 0;
+    let mut i = 0;
+    while (i + 1 < str_len(fmt)) {
+        if (fmt[i] == '{' && fmt[i + 1] == '}') {
+            count = count + 1;
+            i = i + 2;
+        } else {
+            i = i + 1;
+        }
+    }
+    return count;
+}
+```
+
+### Token arguments
+
+A `const fn` may take the call's syntax instead of values. A single parameter of
+type `Tokens` receives everything inside the parentheses exactly as written,
+including commas; the return type `Tokens` produces syntax that is parsed back
+into the expression the call stands for:
+
+```c
+#include <core/comptime.shyh>
+
+const fn echo(Tokens input) -> Tokens {
+    return input;
+}
+
+const fn count_tokens(Tokens input) -> int {
+    return tokens_len(input);
+}
+
+int x = echo(2 + 3) * 2;      // (2 + 3) * 2
+int n = count_tokens(a, b, c); // 5
+```
+
+A `Tokens` result may also stand where a **type** is written, which is how a
+const fn names a computed type:
+
+```c
+const fn echo(Tokens input) -> Tokens {
+    return input;
+}
+
+long widened = (echo(long))value;   // a cast to long
+int size = sizeof(echo(int));       // 4
+```
+
+A token result also fills the other syntax slots. A **generator** call stands on
+its own and ends with `;`: in statement position it is a statement list, and at
+file scope it is an item list. The semicolon is what tells a generator apart
+from a declaration whose type the call supplies. Calling one in the wrong place
+is reported by name, not as a parse error:
+
+```text
+error: const fn 'show' produced statements, which cannot stand at file scope; call it inside a function
+error: const fn 'make_impl' produced declarations, which cannot stand inside a function; call it at file scope
+```
+
+```c
+const fn make_fn(Tokens input) -> Tokens {
+    return tokens_concat(
+        tokens_concat(tokens_from_text("int twice(int n) { return n * 2; } int run(void) { return twice("), input),
+        tokens_from_text("); }"));
+}
+
+make_fn(21);                   // generates both functions
+
+int main(void) {
+    return run() == 42 ? 0 : 1;
+}
+```
+
+A token result fills a **field list** too, so a struct may declare generated
+members next to written ones:
+
+```c
+const fn field(Tokens input) -> Tokens {
+    return tokens_concat(
+        tokens_concat(tokens_from_text("int "), input),
+        tokens_from_text(";"));
+}
+
+struct Point {
+    int x;
+    field(y)
+    field(z)
+};
+```
+
+### Generators and impl dependencies
+
+An item-level `const fn` is a **generator**. Generators are not run in source
+order: they are scheduled by what they need and what they can provide.
+
+- `require_impl(type, trait)` needs an impl. It returns 1 when the impl exists;
+  otherwise the generator waits in queue 1 until someone provides it. A generic
+  implementation covers its instantiations: `impl<T> Show for Box<T>` answers
+  `require_impl("Box<int>", "Show")`. The match also checks the argument count
+  and the bounds written on the impl's parameters, so `impl<T: Show> Show for
+  Box<T>` covers `Box<int>` only when `int: Show` holds. The same rule applies
+  to the type checker: an impl whose bounds do not hold for the concrete
+  arguments simply does not exist for that type, so `Box<Plain>.show()` is an
+  error rather than a silent call. Builtin spellings are canonicalized, so
+  `impl Show for unsigned int` answers `implements("int unsigned", "Show")`,
+  and `long int` is the same type as `long`. Trait arguments are part of the
+  key: `impl Convert<int> for Alpha` answers `implements("Alpha",
+  "Convert<int>")` but not `Convert<char>` or a bare `Convert`. Constant
+  arguments are canonicalized on both sides, so `At<0x10>` is `At<16>`.
+- `try_provide_impl(type, trait)` offers one. It returns 0 when the impl already
+  exists; otherwise the generator waits in queue 2, ready to provide it.
+
+Every generator that can run, runs. When nothing is left to run, one waiting
+provider is granted and runs again, which wakes everyone in queue 1 that needed
+that impl. When the waiters and the offers form a loop — each provider needs what another
+offers — the cycle is reported as the chain it is:
+
+```text
+error: dependency cycle between generators: 'A' needs 'T1' -> 'B' needs 'T2' -> 'A' needs 'T1' (cycle)
+```
+
+If queue 1 still has sleepers at the end, nothing provides what they
+need and the compiler says so:
+
+```text
+error: type 'Widget' needs trait 'Marker', but nothing provides it (in const fn 'consume_marker')
+```
+
+**Generated source may generate more.** A generator's own output is parsed by
+the same routine as the main file, so a generated item may call another
+generator; that call joins the same queue and is scheduled by its needs, not by
+where it appeared. A fragment may even declare a `const fn` of its own: the
+declaration is merged into the unit and later generators can call it.
+
+**Function bodies run last.** Once the generators settle, the world is final and
+a `const fn` called inside a function body reads it (only the function
+bodies that actually call one are parsed again, and a generated fragment that
+calls one is parsed again by itself once the world settles): `implements(type, trait)`
+answers for the generated declarations too. A body cannot block or inject a
+global impl — `require_impl` there is a plain query and `try_provide_impl`
+returns 0.
+
+Two generators that emit the same `impl Trait for Type` are a conflict, even if
+both asked `try_provide_impl` — the duplicate is reported at the merge instead of
+one silently winning:
+
+```text
+error: duplicate implementation of 'Marker' for 'Widget'
+```
+
+A provider that was granted an impl but never produced it is reported at its own
+call site:
+
+```text
+error: generator granted to provide 'Marker' for 'Widget' produced no such implementation
+```
+
+The check runs against the settled world, so a provider may emit the impl through
+a generator it calls and still count.
+
+When the granted provider is itself stuck, the message follows the chain of
+providers until it reaches the end:
+
+```text
+error: type 'Widget' needs trait 'Marker', but its provider 'provider_a' is still waiting for 'Widget' to implement 'Extra', its provider 'provider_b' is still waiting for 'Widget' to implement 'Third', nothing provides it (in const fn 'consumer')
+```
+
+A provider may itself wait for another impl, so providers form a chain: one
+provides what another needs, and the waiter is woken when it appears.
+
+When several generators offer the same impl, the one that runs first provides it
+and the rest find it already there and emit nothing. Generators run in source
+order within a round, so the winner does not depend on how the scheduler
+interleaved them. A grant stays reserved while that provider waits on something
+else, so no second provider is handed the same impl in the meantime.
+
+A provider never produces a second impl for the same type and trait, so a
+hand-written impl and a generated one cannot collide:
+
+```c
+const fn provide_marker(Tokens input) -> Tokens {
+    if (try_provide_impl("Widget", "Marker")) {
+        return tokens_from_text(
+            "impl Marker for Widget { fn marker(const self *v) -> int { return 7; } }");
+    }
+    return tokens_from_text("");
+}
+
+const fn consume_marker(Tokens input) -> Tokens {
+    if (require_impl("Widget", "Marker")) {
+        return tokens_from_text("int use_marker(void) { return 1; }");
+    }
+    return tokens_from_text("");
+}
+```
+
+The compile-time builtins over token sequences are `tokens_len`, `token_text`,
+`tokens_text`, `tokens_slice`, `tokens_concat`, `tokens_from_int`, and
+`tokens_from_text` (the last one lexes a string). `gensym(prefix)` returns a
+fresh name, so a macro that declares something can avoid colliding with names
+the caller wrote:
+
+```c
+const fn declare_counter(Tokens input) -> Tokens {
+    let name = gensym("counter");
+    return tokens_concat(
+        tokens_concat(tokens_from_text("int "), tokens_from_text(name)),
+        tokens_from_text(" = 0;"));
+}
+```
+
+`declared(name)` answers whether a type name is visible in the declarations
+generated so far — a snapshot, not a promise about the rest of the file. It
+covers typedefs and tags from headers, traits, and anything an earlier generator
+emitted. Ordering between generators is what `require_impl` and
+`try_provide_impl` are for; a generator that needs another one's declaration
+should request the impl, not poll `declared`. The usual shape is to fill a gap
+instead of duplicating a declaration:
+
+```c
+const fn ensure_widget(Tokens input) -> Tokens {
+    if (declared("Widget")) {
+        return tokens_from_text("");
+    }
+    return tokens_from_text("struct Widget { int value; };");
+}
+
+ensure_widget();
+ensure_widget();   // the second call generates nothing
+```
+
+A returned token sequence must form one complete expression; trailing tokens are
+rejected instead of being silently dropped, and the diagnostic names the const
+fn that produced them:
+
+```text
+error: expected an expression, found end of file (from const fn 'bad_expr')
+```
+
+`const fn` does not exist at run time: it emits no symbol. An argument that is
+not a compile-time constant is a diagnostic, and evaluation is limited to 512
+nested calls, so a runaway recursion fails instead of hanging the compiler.
+
+## Macros are compile-time functions
+
+There is one compile-time mechanism, not two: `const fn`. A function that takes
+`Tokens` and returns `Tokens` is a macro, because its call is replaced by the
+syntax it produced:
+
+```c
+#include <stdio.h>
+#include <core/comptime.shyh>
+
+void print_value(int value) { printf("%d\n", value); }
+
+const fn show(Tokens input) -> Tokens {
+    return tokens_concat(
+        tokens_concat(tokens_from_text("print_value("), input),
+        tokens_from_text(");"));
+}
+
+const fn twice(Tokens input) -> Tokens {
+    return tokens_concat(
+        tokens_concat(tokens_from_text("("), input),
+        tokens_from_text(") * 2"));
+}
+
+int main(void) {
+    show(twice(20) + 2);   /* generates print_value((20) * 2 + 2); */
+    return 0;
+}
+```
+
+The call inside `main` expands to a statement and prints `42`. At file scope the
+same call would expand to items instead, so a macro that produces statements is
+called from a function body.
+
+A macro meant for other files lives in a header, next to the traits it targets:
+
+```c
+/* derive.shyh */
+const fn derive_debug(Tokens input) -> Tokens {
+    return tokens_concat(
+        tokens_concat(tokens_from_text("impl Debug for "), input),
+        tokens_from_text(" { fn debug(const self *value, String *out) -> int { ... } }"));
+}
+
+/* user.shyc */
+#include "derive.shyc"
+
+struct Widget { int value; };
+
+derive_debug(Widget);
+```
+
+A compile-time function is visible wherever its header is included, so it needs
+no linkage marker; `pub const fn` is accepted and means nothing. The language
+server indexes these names too: hover on a declaration or a call shows the
+signature, and go-to-definition on a call (including a detached generator call)
+jumps to the declaration. The call goes
+after the declaration it decorates, and `println!("{:?}", value)` then uses the
+generated impl — the argument still has to implement both `Debug` and `Display`,
+because one `FormatArg` carries both.
+
+`println!`, `format!`, and `scanln!` are the same idea with a format string: the
+compiler checks the literal and expands the call to the wrapper for its
+argument count, up to eight. For `println!` and `format!` a literal format
+string is checked for placeholder count, `{}` versus `{:?}`, and brace
+balance; `scanln!` instead counts C conversions, because it hands its string to
+`sscanf`: `scanln!("%d %d", &a, &b)`. A non-literal format string is passed
+through unchecked, and a placeholder without an argument is printed as it was
+written rather than reading past the arguments. Arguments must implement both traits, so a C string is
+wrapped first: `println!("{}", Str::from_cstr(word))`.
+
 ## Slices and library types
 
 A slice is a standard-library transparent structure containing a pointer and a
@@ -289,8 +669,12 @@ C export rules:
 The compiler already renders both directions for the plain-C subset:
 `shyc --emit=c-header` prints an include-guarded header of the translation unit's
 typedefs, record and enum definitions, non-`static` prototypes, and `extern`
-object declarations, and `shyc --emit=c` prints the preprocessed unit as plain C
-without the `#![...]` attribute lines. A generated header carries the main
+object declarations, and `shyc --emit=c` translates the unit back to C source.
+The source form is the preprocessed unit written out again with the sugar
+resolved: an inferred local becomes `__auto_type` (`const __auto_type` when it
+is not `mut`), compile-time calls are already expanded, traits leave nothing
+behind, and `#![...]` attribute lines are dropped. A trait `impl` block and
+inline assembly have no C form yet and are reported by name. A generated header carries the main
 file's `#include` lines and `#define` macros, takes its include guard from the
 output path, and omits declarations that came from an included file, so it
 describes exactly one header. `static` declarations and `impl` blocks are not

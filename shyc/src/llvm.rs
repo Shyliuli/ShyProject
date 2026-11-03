@@ -135,7 +135,11 @@ fn datalayout(triple: &str, layout: Layout) -> &'static str {
     match triple.split('-').next().unwrap_or("") {
         "x86_64" => "e-m:e-p:64:64-i64:64-i128:128-n8:16:32:64-S128",
         "riscv64" | "loongarch64" | "aarch64" => "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128",
-        "i386" | "i486" | "i586" | "i686" | "riscv32" | "loongarch32" => {
+        // clang's riscv32 layout: ILP32, 64-bit i64 aligned to 4 bytes, and no
+        // i128 (which also keeps the emitted module byte-for-byte compatible
+        // with clang's own IR for the same triple).
+        "riscv32" => "e-m:e-p:32:32-i64:64-n32-S128",
+        "i386" | "i486" | "i586" | "i686" | "loongarch32" => {
             "e-m:e-p:32:32-i64:64-i128:128-n8:16:32-S128"
         }
         _ if layout.pointer_bytes <= 4 => "e-m:e-p:32:32-i64:64-i128:128-n8:16:32-S128",

@@ -26,6 +26,7 @@
 mod call;
 mod const_eval;
 mod decl;
+mod deref;
 mod export;
 mod expr;
 mod generics;
@@ -175,6 +176,24 @@ pub(super) struct MethodInfo {
     /// The body of a materialized generic impl method, queued for lowering the
     /// first time method lookup needs it.
     pub deferred: Option<DeferredMethod>,
+}
+
+#[derive(Clone)]
+pub(super) struct DerefStep {
+    pub name: &'static str,
+    pub method: MethodInfo,
+    pub target: TypeId,
+}
+
+#[derive(Clone)]
+pub(super) struct RecordPath {
+    pub record: TypeId,
+}
+
+#[derive(Clone)]
+pub(super) struct AutoMethod {
+    pub method: MethodInfo,
+    pub steps: Vec<DerefStep>,
 }
 
 /// A generic impl method whose signature exists but whose body has not been
@@ -478,7 +497,10 @@ pub(super) struct Lowerer {
 
 impl Lowerer {
     fn new(options: &Options) -> Lowerer {
-        let types = TypeStore::with_pointer_width(options.layout.pointer_bytes);
+        let types = TypeStore::with_data_model(
+            options.layout.pointer_bytes,
+            options.layout.long_bytes,
+        );
         let mut module = ir::Module::new(&options.module_name);
         module.startup = match options.startup {
             StartupMode::Main => ir::Startup::Auto {
@@ -550,7 +572,7 @@ impl Lowerer {
         match self.types.kind(ty) {
             TypeKind::Void => ir::Type::Void,
             TypeKind::Bool => ir::Type::I1,
-            TypeKind::Integer { rank, .. } => match rank.size() {
+            TypeKind::Integer { .. } => match self.types.size_of(ty).unwrap_or(4) {
                 1 => ir::Type::I8,
                 2 => ir::Type::I16,
                 4 => ir::Type::I32,
@@ -1172,6 +1194,11 @@ pub(super) struct SwitchContext {
     pub terminator_block: ir::BlockId,
     pub default: Option<ir::BlockId>,
     pub cases: Vec<ir::SwitchCase>,
+    /// `case low ... high` labels, dispatched by a comparison chain because a
+    /// switch instruction compares one value.
+    pub ranges: Vec<(ir::Constant, ir::Constant, ir::BlockId)>,
+    /// Every label's numeric span, so overlapping labels are reported.
+    pub labels: Vec<(i64, i64)>,
     pub end: ir::BlockId,
     pub span: Span,
 }

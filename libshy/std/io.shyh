@@ -7,4 +7,80 @@
 /* Everything left in the stream, up to the end of input. */
 fn read_to_string(FILE *f) -> String;
 
+/* A cursor over an immutable Str. The view is not advanced; the cursor is. */
+struct StrReader {
+    Str source;
+    int position;
+};
+
+impl StrReader {
+    fn new(Str source) -> StrReader;
+}
+
+impl Reader for StrReader {
+    fn read(self *r, char *data, int max_len) -> int {
+        int available = r.source.len - r.position;
+        if (available <= 0) {
+            return 0;
+        }
+        int n = available < max_len ? available : max_len;
+        for (int i = 0; i < n; i++) {
+            data[i] = r.source.data[r.position + i];
+        }
+        r.position = r.position + n;
+        return n;
+    }
+}
+
+/* A FILE as a byte source or destination. */
+struct FileReader {
+    FILE *file;
+};
+
+impl Reader for FileReader {
+    fn read(self *r, char *data, int max_len) -> int {
+        return (int)fread(data, 1, (size_t)max_len, r.file);
+    }
+}
+
+struct FileWriter {
+    FILE *file;
+};
+
+impl Writer for FileWriter {
+    fn write(self *w, const char *data, int len) -> int {
+        return (int)fwrite(data, 1, (size_t)len, w.file);
+    }
+}
+
+fn stdin_reader(void) -> FileReader;
+fn stdout_writer(void) -> FileWriter;
+fn stderr_writer(void) -> FileWriter;
+
+/* The endpoints behind the stream-less helpers. They start at the standard
+   streams and stay replaceable for embedded targets and tests. */
+fn set_global_writer(FileWriter writer);
+fn global_writer(void) -> FileWriter;
+fn set_global_reader(FileReader reader);
+fn global_reader(void) -> FileReader;
+
+/* Convenience helpers that default to stdio. A program that wants another
+   device implements Reader/Writer for it and calls the trait methods. */
+fn print<B: Buffer>(B *buffer) -> int {
+    let mut out = global_writer();
+    return out.write_buffer(buffer);
+}
+
+fn print_line<B: Buffer>(B *buffer) -> int {
+    let mut out = global_writer();
+    return out.write_line(buffer);
+}
+
+fn getc(void) -> int;
+
+fn get_line<B: Buffer>(B *buffer) -> int {
+    let mut input = global_reader();
+    return input.getline(buffer);
+}
+
 #endif

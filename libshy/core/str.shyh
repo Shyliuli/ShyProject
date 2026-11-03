@@ -1,18 +1,24 @@
 #ifndef SHY_CORE_STR_SHYH
 #define SHY_CORE_STR_SHYH
 
-/* A borrowed view of bytes: a pointer and a length, not NUL-terminated and
-   never owning. Print one with printf("%.*s", s.len, s.ptr). */
+/* A borrowed byte view: pointer plus length, never owning and not
+   NUL-terminated. Bytes are not validated as UTF-8. A view copied from a
+   String is a snapshot: a later String operation that may reallocate leaves it
+   dangling. */
 struct Str {
-    const char *ptr;
+    const char *data;
     int len;
 };
 
 impl Str {
     fn from_cstr(const char *s) -> Str;
-    fn eq(self *s, Str other) -> int;
-    fn eq_cstr(self *s, const char *other) -> int;
-    fn starts_with(self *s, const char *prefix) -> int;
+    fn is_empty(const self *s) -> int;
+    fn eq(const self *s, Str other) -> int;
+    fn eq_cstr(const self *s, const char *other) -> int;
+    fn starts_with(const self *s, const char *prefix) -> int;
+    fn ends_with(const self *s, const char *suffix) -> int;
+    fn find(const self *s, Str needle) -> int;
+    fn slice(const self *s, int start, int len) -> Str;
 }
 
 #endif

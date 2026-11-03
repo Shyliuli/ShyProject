@@ -27,13 +27,20 @@ impl FnLower<'_> {
         op: ast::MemberOp,
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
-        // A payload enum has generated `.tag` and `.payload.<Variant>` members
-        // instead of source fields.
+        self.lower_member_mode(object, name, op, span, false)
+    }
+
+    pub(super) fn lower_member_mode(
+        &mut self,
+        object: &ast::Expr,
+        name: &ast::Name,
+        op: ast::MemberOp,
+        span: Span,
+        mutable: bool,
+    ) -> Result<ExprVal, Diagnostic> {
         if let Some(value) = self.lower_payload_enum_member(object, name, span)? {
             return Ok(value);
         }
-        // A bit-field shares its storage unit with its neighbours, so it is
-        // read through a mask instead of as an ordinary member.
         let object_ty = self.type_of(object)?;
         let record = if self.l.types.is_record(object_ty) {
             Some(object_ty)
@@ -43,12 +50,16 @@ impl FnLower<'_> {
                 .map(|pointee| pointee.ty)
                 .filter(|ty| self.l.types.is_record(*ty))
         };
-        let object_value = self.lower_expr(object)?;
+        let object_value = if mutable {
+            self.lower_expr_for_write(object)?
+        } else {
+            self.lower_expr(object)?
+        };
         if let Some(record) = record
             && let Some((field_ty, offset, width, bit_offset)) =
                 self.l.bit_field(record, &name.text)
         {
-            let (_, base) = self.record_and_address(object_value, span)?;
+            let (_, base, _) = self.record_and_address(object_value, span)?;
             let address = base.offset_by(i64::from(offset));
             let value = self.bit_field_value(address, field_ty, width, bit_offset, span);
             return Ok(ExprVal {
@@ -57,7 +68,7 @@ impl FnLower<'_> {
                 kind: ExprKind::Value(value),
             });
         }
-        let target = self.member_target(object_value, name, op, span)?;
+        let target = self.member_target(object_value, name, op, span, mutable)?;
         Ok(ExprVal {
             ty: target.ty,
             qualifiers: target.qualifiers,
@@ -428,10 +439,35 @@ impl FnLower<'_> {
         } = callee
         {
             let object_ty = self.type_of(object)?;
-            if let Some(record) = self.l.record_of(object_ty)
-                && let Some(method) = self.l.method_of(record, name)?
-            {
-                return self.lower_method_call(object, name, *op, method, args, span);
+            if let Some(resolved) = self.l.method_with_autoderef(object_ty, name)? {
+                let mut receiver = self.lower_expr(object)?;
+                for (index, step) in resolved.steps.iter().enumerate() {
+                    let step_name = ast::Name::new(step.name, name.span);
+                    let step_op = if index == 0 { *op } else { ast::MemberOp::Dot };
+                    receiver = self.lower_method_call_value(
+                        receiver,
+                        None,
+                        &step_name,
+                        step_op,
+                        step.method.clone(),
+                        &[],
+                        span,
+                    )?;
+                }
+                let method_op = if resolved.steps.is_empty() {
+                    *op
+                } else {
+                    ast::MemberOp::Dot
+                };
+                return self.lower_method_call_value(
+                    receiver,
+                    Some(object),
+                    name,
+                    method_op,
+                    resolved.method,
+                    args,
+                    span,
+                );
             }
         }
         // A call with no written arguments instantiates a generic method from
@@ -537,13 +573,13 @@ impl FnLower<'_> {
             ast::Expr::Name(name) => self.l.instantiate_generic_function(name, type_args),
             ast::Expr::Member { object, name, .. } => {
                 let object_ty = self.type_of(object)?;
-                let Some(record) = self.l.record_of(object_ty) else {
+                let Some(record) = self.l.receiver_of(object_ty) else {
                     return Err(Diagnostic::new(
                         span,
-                        "method call needs a struct, union, or pointer receiver",
+                        "method call needs a struct, union, pointer, or scalar receiver",
                     ));
                 };
-                if self.l.method_of(record, name)?.is_some() {
+                if self.l.method_with_autoderef(object_ty, name)?.is_some() {
                     return Err(Diagnostic::new(
                         span,
                         format!("method '{}' is not generic", name.text),
@@ -603,7 +639,7 @@ impl FnLower<'_> {
         let (record, name, skip_params) = match callee {
             ast::Expr::Member { object, name, .. } => {
                 let object_ty = self.type_of(object)?;
-                let Some(record) = self.l.record_of(object_ty) else {
+                let Some(record) = self.l.receiver_of(object_ty) else {
                     return Ok(None);
                 };
                 (record, name, 1)
@@ -614,7 +650,7 @@ impl FnLower<'_> {
                 let Some(ty) = self.l.lookup_named_type(&qualifier.text) else {
                     return Ok(None);
                 };
-                let Some(record) = self.l.record_of(ty) else {
+                let Some(record) = self.l.receiver_of(ty) else {
                     return Ok(None);
                 };
                 (record, name, 0)
@@ -626,14 +662,14 @@ impl FnLower<'_> {
                 ..
             } => {
                 let ty = self.l.generic_qualifier_type(qualifier, args)?;
-                let Some(record) = self.l.record_of(ty) else {
+                let Some(record) = self.l.receiver_of(ty) else {
                     return Ok(None);
                 };
                 (record, name, 0)
             }
             _ => return Ok(None),
         };
-        if self.l.method_of(record, name)?.is_some()
+        if self.l.method_with_autoderef(record, name)?.is_some()
             || !self.l.has_generic_method(record, &name.text)?
         {
             return Ok(None);
@@ -689,18 +725,6 @@ impl FnLower<'_> {
             .any(|scope| scope.bindings.contains_key(name))
     }
 
-    fn lower_method_call(
-        &mut self,
-        object: &ast::Expr,
-        name: &ast::Name,
-        op: ast::MemberOp,
-        method: super::MethodInfo,
-        args: &[ast::Expr],
-        span: Span,
-    ) -> Result<ExprVal, Diagnostic> {
-        self.lower_method_call_target(object, name, op, method, args, span)
-    }
-
     /// Lower a receiver call through one instantiated generic method.
     fn lower_generic_method_call(
         &mut self,
@@ -734,6 +758,20 @@ impl FnLower<'_> {
         args: &[ast::Expr],
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
+        let object_value = self.lower_expr(object)?;
+        self.lower_method_call_value(object_value, Some(object), name, op, method, args, span)
+    }
+
+    pub(super) fn lower_method_call_value(
+        &mut self,
+        object_value: ExprVal,
+        object_expr: Option<&ast::Expr>,
+        name: &ast::Name,
+        op: ast::MemberOp,
+        method: super::MethodInfo,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<ExprVal, Diagnostic> {
         let (params, variadic) = self.function_params(method.ty, span)?;
         let Some(&first_param) = params.first() else {
             return Err(Diagnostic::new(
@@ -741,7 +779,22 @@ impl FnLower<'_> {
                 format!("method '{}' has no self parameter", name.text),
             ));
         };
-        let object_value = self.lower_expr(object)?;
+        if let Some(receiver) = self.l.pointee(first_param)
+            && !receiver.qualifiers.is_const
+        {
+            let mut receiver_ty = object_value.ty;
+            let mut receiver_const = object_value.qualifiers.is_const;
+            while let Some(pointee) = self.l.pointee(receiver_ty) {
+                receiver_const = pointee.qualifiers.is_const;
+                receiver_ty = pointee.ty;
+            }
+            if receiver_const {
+                return Err(Diagnostic::new(
+                    span,
+                    format!("mutable method '{}' needs a writable receiver", name.text),
+                ));
+            }
+        }
         let object_ty = object_value.ty;
         if op == ast::MemberOp::Arrow && !self.l.types.is_pointer(object_ty) {
             return Err(Diagnostic::new(
@@ -764,8 +817,19 @@ impl FnLower<'_> {
         } else if self.l.types.is_pointer(object_ty) || self.l.types.is_array(object_ty) {
             let (mut operand, mut ty) = self.rvalue_val(object_value, span)?;
             // ShyC dereferences automatically: walk the pointer chain until it
-            // reaches the record, so `r.get()` on a `P **r` passes `*r`.
+            // reaches the record, so `r.get()` on a `P **r` passes `*r`. A
+            // pointer receiver for a scalar or enum stops at that pointer, so an
+            // `A *` receiver keeps its address instead of loading the value.
             while let Some(pointee) = self.l.pointee(ty) {
+                let pointer_matches = match (self.l.pointee(first_param), self.l.pointee(ty)) {
+                    (Some(expected), Some(actual)) => {
+                        self.l.types.is_compatible(expected.ty, actual.ty)
+                    }
+                    _ => false,
+                };
+                if pointer_matches {
+                    break;
+                }
                 if self.l.types.is_record(pointee.ty) {
                     break;
                 }
@@ -788,10 +852,20 @@ impl FnLower<'_> {
                 let address = super::address_operand(operand);
                 self.load_value(address, pointee.ty, Qualifiers::NONE)
             }
+        } else if self.l.types.is_pointer(first_param)
+            && self
+                .l
+                .pointee(first_param)
+                .is_some_and(|pointee| self.l.types.is_compatible(pointee.ty, object_ty))
+        {
+            // A scalar or enum receiver has no Deref chain: its method takes
+            // `self *`, so the value is spilled to a slot and its address passed.
+            let address = self.object_address(object_value, span)?;
+            self.address_value(address)
         } else {
             return Err(Diagnostic::new(
                 span,
-                "method call needs a struct, union, or pointer receiver",
+                "method call needs a struct, union, pointer, or scalar receiver",
             ));
         };
         let receiver_type = if self.l.types.is_pointer(first_param) {
@@ -810,6 +884,7 @@ impl FnLower<'_> {
             span,
         )?;
         if name.text == "drop"
+            && let Some(object) = object_expr
             && let ast::Expr::Name(object_name) = object
             && let Ok(super::Resolved::Local(local)) =
                 self.resolve_name(&object_name.text, object_name.span)

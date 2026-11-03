@@ -133,8 +133,9 @@ impl QualifiedType {
 // Built-in types
 // ---------------------------------------------------------------------------
 
-/// Integer rank. Widths are fixed by the target; `Long` and `LongLong` share
-/// the width 8 but keep distinct ranks for the usual arithmetic conversions.
+/// Integer rank. Widths follow the target data model; `Long` and `LongLong`
+/// keep distinct ranks for the usual arithmetic conversions even when both are
+/// 32 or 64 bits wide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IntegerRank {
     Char,
@@ -145,17 +146,19 @@ pub enum IntegerRank {
 }
 
 impl IntegerRank {
-    pub fn size(self) -> u32 {
+    /// Width in bytes for a target whose `long` is `long_bytes` wide.
+    pub fn size(self, long_bytes: u32) -> u32 {
         match self {
             IntegerRank::Char => 1,
             IntegerRank::Short => 2,
             IntegerRank::Int => 4,
-            IntegerRank::Long | IntegerRank::LongLong => 8,
+            IntegerRank::Long => long_bytes,
+            IntegerRank::LongLong => 8,
         }
     }
 
-    pub fn align(self) -> u32 {
-        self.size()
+    pub fn align(self, long_bytes: u32) -> u32 {
+        self.size(long_bytes)
     }
 }
 
@@ -332,31 +335,33 @@ impl Default for TypeStore {
 }
 
 impl TypeStore {
-    /// Creates a type arena for ShyISA, where pointers are 32-bit.
+    /// Creates a type arena for ShyISA: 32-bit pointers, 64-bit `long`.
     pub fn new() -> Self {
-        Self::with_pointer_width(4)
+        Self::with_data_model(4, 8)
     }
 
-    /// Creates a type arena whose pointers are `bytes` wide and aligned.
+    /// Creates a type arena for a target data model.
     ///
-    /// A backend targeting an LP64 platform passes 8, which changes
-    /// `sizeof(void *)`, pointer arithmetic, and every record that contains a
-    /// pointer.
-    pub fn with_pointer_width(bytes: u32) -> Self {
+    /// `pointer_bytes` changes `sizeof(void *)`, pointer arithmetic, and every
+    /// record that contains a pointer. `long_bytes` changes `sizeof(long)` and
+    /// every record or typedef built from it: 8 for ShyISA and LP64, 4 for
+    /// RISC-V ILP32.
+    pub fn with_data_model(pointer_bytes: u32, long_bytes: u32) -> Self {
         let mut types = Vec::new();
 
         let void = push_type(&mut types, TypeKind::Void, None, None);
         let bool_ = push_type(&mut types, TypeKind::Bool, Some(1), Some(1));
-        let char_ = push_integer(&mut types, IntegerRank::Char, false);
-        let unsigned_char = push_integer(&mut types, IntegerRank::Char, true);
-        let short = push_integer(&mut types, IntegerRank::Short, false);
-        let unsigned_short = push_integer(&mut types, IntegerRank::Short, true);
-        let int = push_integer(&mut types, IntegerRank::Int, false);
-        let unsigned_int = push_integer(&mut types, IntegerRank::Int, true);
-        let long = push_integer(&mut types, IntegerRank::Long, false);
-        let unsigned_long = push_integer(&mut types, IntegerRank::Long, true);
-        let long_long = push_integer(&mut types, IntegerRank::LongLong, false);
-        let unsigned_long_long = push_integer(&mut types, IntegerRank::LongLong, true);
+        let char_ = push_integer(&mut types, IntegerRank::Char, false, long_bytes);
+        let unsigned_char = push_integer(&mut types, IntegerRank::Char, true, long_bytes);
+        let short = push_integer(&mut types, IntegerRank::Short, false, long_bytes);
+        let unsigned_short = push_integer(&mut types, IntegerRank::Short, true, long_bytes);
+        let int = push_integer(&mut types, IntegerRank::Int, false, long_bytes);
+        let unsigned_int = push_integer(&mut types, IntegerRank::Int, true, long_bytes);
+        let long = push_integer(&mut types, IntegerRank::Long, false, long_bytes);
+        let unsigned_long = push_integer(&mut types, IntegerRank::Long, true, long_bytes);
+        let long_long = push_integer(&mut types, IntegerRank::LongLong, false, long_bytes);
+        let unsigned_long_long =
+            push_integer(&mut types, IntegerRank::LongLong, true, long_bytes);
         let float = push_type(&mut types, TypeKind::Float32, Some(4), Some(4));
         let double_ = push_type(&mut types, TypeKind::Float64, Some(8), Some(8));
 
@@ -381,8 +386,8 @@ impl TypeStore {
                 float,
                 double_,
             },
-            pointer_bytes: bytes,
-            pointer_align: bytes,
+            pointer_bytes,
+            pointer_align: pointer_bytes,
         }
     }
 
@@ -829,11 +834,16 @@ fn push_type(
     id
 }
 
-fn push_integer(types: &mut Vec<Type>, rank: IntegerRank, unsigned: bool) -> TypeId {
+fn push_integer(
+    types: &mut Vec<Type>,
+    rank: IntegerRank,
+    unsigned: bool,
+    long_bytes: u32,
+) -> TypeId {
     push_type(
         types,
         TypeKind::Integer { rank, unsigned },
-        Some(rank.size()),
-        Some(rank.align()),
+        Some(rank.size(long_bytes)),
+        Some(rank.align(long_bytes)),
     )
 }

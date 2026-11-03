@@ -33,6 +33,8 @@ pub enum SymKind {
     TypeParam,
     ConstParam,
     Label,
+    /// A const fn declaration, a call to one, or a println!/format!/scanln!.
+    Comptime,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,7 +147,11 @@ impl Index {
     }
 }
 
-pub fn build(sources: &SourceMap, unit: &ast::TranslationUnit) -> Index {
+pub fn build(
+    sources: &SourceMap,
+    unit: &ast::TranslationUnit,
+    sites: &[shyc::parser::ComptimeSite],
+) -> Index {
     let mut collector = Collector {
         sources,
         index: Index::default(),
@@ -154,6 +160,7 @@ pub fn build(sources: &SourceMap, unit: &ast::TranslationUnit) -> Index {
     };
     collector.collect_file_scope(unit);
     collector.collect_references(unit);
+    collector.collect_comptime(sites);
     collector.index
 }
 
@@ -582,6 +589,68 @@ impl Collector<'_> {
     }
 
     // -- references -----------------------------------------------------
+
+    /// Adds the compile-time names the parser consumed.
+    ///
+    /// A const fn declaration never reaches the AST, and a call or a macro is
+    /// replaced by its expansion, so both are indexed from the parser's report.
+    fn collect_comptime(&mut self, sites: &[shyc::parser::ComptimeSite]) {
+        use shyc::parser::ComptimeSiteKind;
+
+        let mut declarations: HashMap<usize, usize> = HashMap::new();
+        for site in sites {
+            if site.kind != ComptimeSiteKind::Declaration {
+                continue;
+            }
+            if declarations.contains_key(&site.span.start) {
+                continue;
+            }
+            let detail = match site.signature {
+                Some(signature) => {
+                    let mut text = self.sources.text(signature).trim().to_string();
+                    text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    text
+                }
+                None => format!("const fn {}", site.name),
+            };
+            let id = self.index.push(Sym {
+                name: site.name.clone(),
+                kind: SymKind::Comptime,
+                span: site.span,
+                detail,
+                type_text: None,
+                container: None,
+                scope: None,
+            });
+            declarations.insert(site.span.start, id);
+        }
+
+        for site in sites {
+            match site.kind {
+                ComptimeSiteKind::Declaration => {}
+                ComptimeSiteKind::Call => {
+                    let target = site
+                        .declaration
+                        .and_then(|declaration| declarations.get(&declaration.start).copied())
+                        .or_else(|| self.index.lookup(&site.name).first().copied());
+                    if let Some(target) = target {
+                        self.index.add_ref(site.span, target);
+                    }
+                }
+                ComptimeSiteKind::Macro => {
+                    // Jump to the wrapper the expansion calls, so the macro has
+                    // a real definition in the formatting header.
+                    let target = site
+                        .expansion
+                        .as_deref()
+                        .and_then(|name| self.index.lookup(name).first().copied());
+                    if let Some(target) = target {
+                        self.index.add_ref(site.span, target);
+                    }
+                }
+            }
+        }
+    }
 
     fn collect_references(&mut self, unit: &ast::TranslationUnit) {
         for item in &unit.items {

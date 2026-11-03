@@ -96,16 +96,6 @@ impl super::Lowerer {
                             ),
                         ));
                     }
-                    if let Some(bound) = parameter.bounds.first() {
-                        return Err(Diagnostic::new(
-                            bound.span,
-                            format!(
-                                "trait bounds on generic trait method '{}' are not \
-                                 implemented yet",
-                                name.text
-                            ),
-                        ));
-                    }
                     if parameter.kind == ast::GenericParamKind::Const {
                         return Err(Diagnostic::new(
                             parameter.span,
@@ -214,13 +204,19 @@ impl super::Lowerer {
             return Ok(());
         }
         let ty = self.resolve_type_name(&block.self_type)?;
-        if !self.types.is_record(ty) {
+        let owned = self.types.is_record(ty)
+            || matches!(
+                self.types.kind(ty),
+                TypeKind::Enum(_) | TypeKind::PayloadEnum(_)
+            )
+            || self.types.is_arithmetic(ty);
+        if !owned {
             return Err(Diagnostic::new(
                 block.self_type.span,
-                "impl target must be a struct or union type",
+                "impl target must be a struct, union, enum, or arithmetic type",
             ));
         }
-        let name = self.impl_name(&block.self_type)?;
+        let name = self.impl_name(&block.self_type, ty)?;
         let trait_info = match &block.trait_name {
             Some(trait_name) => {
                 let Some(info) = self.traits.get(&trait_name.text).cloned() else {
@@ -290,6 +286,18 @@ impl super::Lowerer {
                     }),
                 )?;
             }
+            if let Some((_, info, _)) = &trait_info {
+                self.collect_default_methods(
+                    block,
+                    info,
+                    super::ImplTarget {
+                        ty,
+                        name: name.clone(),
+                        instance: None,
+                        trait_impl: trait_impl.clone(),
+                    },
+                )?;
+            }
             if let Some((trait_name, info, _)) = &trait_info {
                 self.check_impl_signatures(block, trait_name, info, ty, trait_impl.as_ref())?;
             }
@@ -341,6 +349,53 @@ impl super::Lowerer {
         Ok(())
     }
 
+    /// Collects the trait's default bodies for the methods `block` leaves out.
+    ///
+    /// The body is lowered once per implementation with `self` bound to the
+    /// implementing type, exactly like a method written in the block, so calls
+    /// and the trait value table find an ordinary method afterwards.
+    pub(super) fn collect_default_methods(
+        &mut self,
+        block: &ast::ImplBlock,
+        info: &TraitInfo,
+        target: super::ImplTarget,
+    ) -> Result<(), Diagnostic> {
+        for trait_method in &info.methods {
+            let Some(name) = &trait_method.declarator.name else {
+                continue;
+            };
+            let Some(body) = &trait_method.body else {
+                continue;
+            };
+            let implemented = block.methods.iter().any(|method| {
+                method
+                    .declarator
+                    .name
+                    .as_ref()
+                    .is_some_and(|method_name| method_name.text == name.text)
+            });
+            if implemented {
+                continue;
+            }
+            // An inherited default is code this translation unit generated,
+            // not a definition the user exported. The `static` path gives it
+            // an internal symbol, so two units that include the same header
+            // and inherit the same default do not define one external symbol
+            // twice. A Shy `fn` is file-local by default, so no storage class
+            // is needed to keep it out of the linker's global namespace.
+            let mut specs = trait_method.specs.clone();
+            specs.storage = None;
+            let declaration = ast::FunctionDecl {
+                span: trait_method.span,
+                specs,
+                declarator: trait_method.declarator.clone(),
+                body: body.clone(),
+            };
+            self.collect_function(&declaration, Some(target.clone()))?;
+        }
+        Ok(())
+    }
+
     /// Checks that the implementation defines exactly the trait's methods.
     /// Signatures are checked later, after each method has a resolved type.
     pub(super) fn check_impl_method_names(
@@ -386,6 +441,11 @@ impl super::Lowerer {
                     .is_some_and(|name| name.text == trait_method_name.text)
             });
             if !implemented {
+                // A trait method with a default body is optional: the impl
+                // inherits it, lowered with `self` bound to this type.
+                if trait_method.body.is_some() {
+                    continue;
+                }
                 return Err(Diagnostic::new(
                     block.span,
                     format!(
@@ -860,7 +920,11 @@ impl super::Lowerer {
         Ok(args)
     }
 
-    fn impl_name(&self, type_name: &ast::TypeName) -> Result<String, Diagnostic> {
+    /// The owner name an `impl` registers its methods under.
+    ///
+    /// A record or enum is named by the tag the user wrote; an arithmetic type
+    /// has no tag, so its canonical spelling (`int`, `unsigned long`) is used.
+    fn impl_name(&self, type_name: &ast::TypeName, ty: TypeId) -> Result<String, Diagnostic> {
         if type_name.declarator.is_some() {
             return Err(Diagnostic::new(
                 type_name.span,
@@ -875,12 +939,20 @@ impl super::Lowerer {
                         return Ok(tag.text.clone());
                     }
                 }
+                ast::TypeSpecifier::Enum(enumeration) => {
+                    if let Some(tag) = &enumeration.tag {
+                        return Ok(tag.text.clone());
+                    }
+                }
                 _ => {}
             }
         }
+        if self.types.is_arithmetic(ty) || self.types.is_bool(ty) {
+            return Ok(self.concrete_type_name(ty));
+        }
         Err(Diagnostic::new(
             type_name.span,
-            "impl target must name a struct or union type",
+            "impl target must name a struct, union, enum, or arithmetic type",
         ))
     }
 }

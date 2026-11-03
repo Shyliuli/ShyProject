@@ -1,0 +1,12 @@
+#ifndef SHY_CORE_COMPTIME_SHYH
+#define SHY_CORE_COMPTIME_SHYH
+
+/* Compile-time-only declarations.
+
+   These types exist while a \`const fn\` runs and are never emitted into
+   generated code. A parameter of type Tokens receives the call's argument
+   tokens exactly as written. */
+
+struct Tokens;
+
+#endif

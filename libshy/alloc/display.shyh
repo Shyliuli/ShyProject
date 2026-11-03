@@ -1,0 +1,46 @@
+#ifndef SHY_ALLOC_DISPLAY_SHYH
+#define SHY_ALLOC_DISPLAY_SHYH
+
+#include <alloc/string.shyh>
+#include <alloc/debug.shyh>
+
+/* Human-facing rendering into a String: no quotes, no escapes. `{}` in a
+   format string uses this trait; `{:?}` uses Debug. */
+trait Display {
+    fn display(const self *value, String *out) -> int;
+}
+
+fn display_bytes(String *out, Str text) -> int {
+    if (text.len <= 0) {
+        return 0;
+    }
+    out.push_str(text);
+    return text.len;
+}
+
+impl Display for int {
+    fn display(const self *value, String *out) -> int {
+        let mut decimal = Debug::from<int>();
+        return decimal.debug(value, out);
+    }
+}
+
+impl Display for char {
+    fn display(const self *value, String *out) -> int {
+        return fmt_putc(out, (int)(unsigned char)*value);
+    }
+}
+
+impl Display for Str {
+    fn display(const self *value, String *out) -> int {
+        return display_bytes(out, *value);
+    }
+}
+
+impl Display for String {
+    fn display(const self *value, String *out) -> int {
+        return display_bytes(out, value.view);
+    }
+}
+
+#endif

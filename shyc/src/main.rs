@@ -14,7 +14,7 @@ use shyc::lexer::{self, Token};
 use shyc::lower::{self, StartupMode};
 use shyc::preprocess::{self, Attributes};
 use shyc::source::SourceMap;
-use shyc::{export, export_instances, llvm, parser, passes, shy};
+use shyc::{c, export, export_instances, llvm, parser, passes, shy};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -97,8 +97,9 @@ fn run() -> Result<(), String> {
             }
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
-            export::reject_let(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
-            export::render_c_source(&preprocessed.tokens)
+            let unit = parser::parse(&preprocessed.tokens)
+                .map_err(|error| sources.render(&error))?;
+            c::source::render(&unit).map_err(|error| sources.render(&error))?
         }
         Stage::CHeader => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
@@ -268,11 +269,11 @@ struct Target {
     layout: Layout,
 }
 
-/// Resolve the target triple and the IR pointer layout it implies.
+/// Resolve the target triple and the IR data model it implies.
 ///
 /// An explicit target is never guessed: the Shy backend only accepts `shy`,
-/// and the LLVM backend only accepts the 64-bit architectures whose layout is
-/// [`Layout::LP64`].
+/// and the LLVM backend accepts the 64-bit architectures whose layout is
+/// [`Layout::LP64`] plus RISC-V ILP32, whose layout is [`Layout::ILP32`].
 fn resolve_target(options: &Options) -> Result<Target, String> {
     let backend = match options.stage {
         Stage::Emit(backend) => Some(backend),
@@ -289,20 +290,21 @@ fn resolve_target(options: &Options) -> Result<Target, String> {
         };
     };
     let arch = name.split('-').next().unwrap_or(name);
+    let layout = target_layout(arch);
     match backend {
         Some(Backend::Shy) if name != "shy" => Err(format!(
             "the Shy backend emits ShyISA (`--target shy`), not `{name}`; \
              use --emit=llvm for that target"
         )),
-        Some(Backend::Llvm) => match arch {
-            "x86_64" | "riscv64" | "loongarch64" | "aarch64" => Ok(Target {
+        Some(Backend::Llvm) => match layout {
+            Some(layout) => Ok(Target {
                 triple: name.into(),
                 abi: abi_kind(name),
-                layout: Layout::LP64,
+                layout,
             }),
-            _ => Err(format!(
-                "unsupported --target `{name}`: --emit=llvm supports x86_64, riscv64, \
-                 loongarch64, and aarch64"
+            None => Err(format!(
+                "unsupported --target `{name}`: --emit=llvm supports x86_64, riscv32, \
+                 riscv64, loongarch64, and aarch64"
             )),
         },
         _ => match arch {
@@ -311,16 +313,27 @@ fn resolve_target(options: &Options) -> Result<Target, String> {
                 abi: abi_plan::AbiKind::ShyV1,
                 layout: Layout::SHY,
             }),
-            "x86_64" | "riscv64" | "loongarch64" | "aarch64" => Ok(Target {
-                triple: name.into(),
-                abi: abi_kind(name),
-                layout: Layout::LP64,
-            }),
-            _ => Err(format!(
-                "unknown target `{name}`: expected `shy` or a 64-bit LLVM triple \
-                 (x86_64, riscv64, loongarch64, aarch64)"
-            )),
+            _ => match layout {
+                Some(layout) => Ok(Target {
+                    triple: name.into(),
+                    abi: abi_kind(name),
+                    layout,
+                }),
+                None => Err(format!(
+                    "unknown target `{name}`: expected `shy` or an LLVM triple \
+                     (x86_64, riscv32, riscv64, loongarch64, aarch64)"
+                )),
+            },
         },
+    }
+}
+
+/// The IR data model of an architecture shyc can lower to.
+fn target_layout(arch: &str) -> Option<Layout> {
+    match arch {
+        "riscv32" => Some(Layout::ILP32),
+        "x86_64" | "riscv64" | "loongarch64" | "aarch64" => Some(Layout::LP64),
+        _ => None,
     }
 }
 
@@ -335,6 +348,7 @@ fn abi_kind(triple: &str) -> abi_plan::AbiKind {
         "x86_64" if triple.contains("windows") => abi_plan::AbiKind::WindowsX64,
         "x86_64" => abi_plan::AbiKind::SysV64,
         "aarch64" => abi_plan::AbiKind::Aapcs64,
+        "riscv32" => abi_plan::AbiKind::Riscv32,
         "riscv64" => abi_plan::AbiKind::Riscv64,
         "loongarch64" => abi_plan::AbiKind::LoongArch64,
         _ => abi_plan::AbiKind::ShyV1,
@@ -477,12 +491,13 @@ fn arguments() -> Result<Option<Options>, String> {
     if target.as_deref().is_some_and(|target| target != "shy") {
         preprocess.undefines.push("__shy__".to_string());
     }
-    // Target facts that a hosted C library needs before it includes anything.
-    if target.as_deref().is_some_and(|target| target != "shy") && !freestanding {
-        // The host C library only applies to a hosted target, and these
-        // directories come after the bundled and `-I` headers, as with gcc.
-        // The Shy target has no host library, and its headers must not win
-        // over the bundled ones.
+    let target_name = target.as_deref();
+    let arch = target_name.and_then(|name| name.split('-').next());
+    let is_shy = target_name.is_none_or(|name| name == "shy");
+    // A hosted C library only applies to the host itself: a cross target must
+    // not search the host's headers. These directories come after the bundled
+    // and `-I` headers, as with gcc.
+    if !is_shy && !freestanding && arch == Some(env::consts::ARCH) {
         for directory in [
             "/usr/lib/clang/23/include",
             "/usr/local/include",
@@ -494,70 +509,102 @@ fn arguments() -> Result<Option<Options>, String> {
                 preprocess.include_dirs.push(path.to_path_buf());
             }
         }
-        for (name, value) in [
+    }
+    if is_shy {
+        preprocess
+            .defines
+            .push(("__SIZEOF_POINTER__".to_string(), "4".to_string()));
+    } else {
+        // Data model and architecture facts. A freestanding header still has
+        // to spell `size_t` and `int64_t` correctly, so these do not depend on
+        // a hosted C library. The Shy target uses its own bundled headers and
+        // only needs the pointer size above.
+        let mut macros: Vec<(&str, &str)> = vec![
             ("__STDC__", "1"),
-            ("__STDC_HOSTED__", "1"),
             ("__STDC_VERSION__", "201710L"),
-            ("__SIZE_TYPE__", "long unsigned int"),
-            ("__PTRDIFF_TYPE__", "long int"),
             ("__WCHAR_TYPE__", "int"),
             ("__CHAR_BIT__", "8"),
             ("__INT_MAX__", "2147483647"),
-            ("__LONG_MAX__", "9223372036854775807L"),
-            ("__linux__", "1"),
-            ("__unix__", "1"),
-            ("__LP64__", "1"),
-            ("__ELF__", "1"),
-            ("__INTPTR_TYPE__", "long int"),
-            ("__UINTPTR_TYPE__", "long unsigned int"),
-            ("__INTMAX_TYPE__", "long int"),
-            ("__UINTMAX_TYPE__", "long unsigned int"),
+            ("__WCHAR_MAX__", "2147483647"),
+            ("__WCHAR_MIN__", "(-2147483647 - 1)"),
+            ("__SCHAR_MAX__", "127"),
+            ("__SHRT_MAX__", "32767"),
             ("__INT8_TYPE__", "signed char"),
             ("__UINT8_TYPE__", "unsigned char"),
             ("__INT16_TYPE__", "short int"),
             ("__UINT16_TYPE__", "short unsigned int"),
             ("__INT32_TYPE__", "int"),
             ("__UINT32_TYPE__", "unsigned int"),
-            ("__INT64_TYPE__", "long int"),
-            ("__UINT64_TYPE__", "long unsigned int"),
-            ("__SIZE_MAX__", "18446744073709551615UL"),
-            ("__INTMAX_MAX__", "9223372036854775807L"),
-            ("__UINTMAX_MAX__", "18446744073709551615UL"),
-            ("__PTRDIFF_MAX__", "9223372036854775807L"),
-            ("__WCHAR_MAX__", "2147483647"),
-            ("__WCHAR_MIN__", "(-2147483647 - 1)"),
-            ("__SCHAR_MAX__", "127"),
-            ("__SHRT_MAX__", "32767"),
             ("__LONG_LONG_MAX__", "9223372036854775807LL"),
             ("__FLT_MAX__", "3.40282346638528859812e+38F"),
             ("__DBL_MAX__", "1.79769313486231570815e+308"),
             ("__DBL_MIN__", "2.22507385850720138309e-308"),
             ("__DBL_EPSILON__", "2.22044604925031308085e-16"),
-        ] {
+            ("__ELF__", "1"),
+        ];
+        if arch == Some("riscv32") {
+            // ILP32: `long`, pointers, and `size_t` are 32 bits; only
+            // `long long` and `intmax_t` stay 64 bits.
+            macros.extend([
+                ("__SIZEOF_POINTER__", "4"),
+                ("__SIZEOF_LONG__", "4"),
+                ("__SIZE_TYPE__", "unsigned int"),
+                ("__PTRDIFF_TYPE__", "int"),
+                ("__INTPTR_TYPE__", "int"),
+                ("__UINTPTR_TYPE__", "unsigned int"),
+                ("__INT64_TYPE__", "long long int"),
+                ("__UINT64_TYPE__", "long long unsigned int"),
+                ("__INTMAX_TYPE__", "long long int"),
+                ("__UINTMAX_TYPE__", "long long unsigned int"),
+                ("__LONG_MAX__", "2147483647"),
+                ("__SIZE_MAX__", "4294967295U"),
+                ("__INTMAX_MAX__", "9223372036854775807LL"),
+                ("__UINTMAX_MAX__", "18446744073709551615ULL"),
+                ("__PTRDIFF_MAX__", "2147483647"),
+            ]);
+        } else {
+            macros.extend([
+                ("__SIZEOF_POINTER__", "8"),
+                ("__SIZEOF_LONG__", "8"),
+                ("__SIZE_TYPE__", "long unsigned int"),
+                ("__PTRDIFF_TYPE__", "long int"),
+                ("__INTPTR_TYPE__", "long int"),
+                ("__UINTPTR_TYPE__", "long unsigned int"),
+                ("__INT64_TYPE__", "long int"),
+                ("__UINT64_TYPE__", "long unsigned int"),
+                ("__INTMAX_TYPE__", "long int"),
+                ("__UINTMAX_TYPE__", "long unsigned int"),
+                ("__LONG_MAX__", "9223372036854775807L"),
+                ("__SIZE_MAX__", "18446744073709551615UL"),
+                ("__INTMAX_MAX__", "9223372036854775807L"),
+                ("__UINTMAX_MAX__", "18446744073709551615UL"),
+                ("__PTRDIFF_MAX__", "9223372036854775807L"),
+                ("__LP64__", "1"),
+            ]);
+        }
+        // The architecture macro comes from the triple, not from the host.
+        let arch_macros: &[(&str, &str)] = match arch {
+            Some("x86_64") => &[("__x86_64__", "1")],
+            Some("aarch64") => &[("__aarch64__", "1")],
+            Some("riscv64") => &[("__riscv", "1"), ("__riscv64", "1"), ("__riscv_xlen", "64")],
+            Some("riscv32") => &[("__riscv", "1"), ("__riscv32", "1"), ("__riscv_xlen", "32")],
+            Some("loongarch64") => &[("__loongarch64", "1")],
+            _ => &[],
+        };
+        macros.extend(arch_macros);
+        if !freestanding {
+            macros.extend([
+                ("__STDC_HOSTED__", "1"),
+                ("__linux__", "1"),
+                ("__unix__", "1"),
+            ]);
+        }
+        for (name, value) in macros {
             preprocess
                 .defines
                 .push((name.to_string(), value.to_string()));
         }
-        // The architecture macro comes from the triple, not from the host.
-        let arch = target.as_deref().and_then(|t| t.split('-').next());
-        let arch_macros: &[&str] = match arch {
-            Some("x86_64") => &["__x86_64__"],
-            Some("aarch64") => &["__aarch64__"],
-            Some("riscv64") => &["__riscv", "__riscv64"],
-            Some("loongarch64") => &["__loongarch64"],
-            _ => &[],
-        };
-        for name in arch_macros {
-            preprocess.defines.push((name.to_string(), "1".to_string()));
-        }
     }
-    // Every target, hosted or freestanding: Shy is ILP32 and every LLVM target
-    // shyc supports is LP64. Headers pick `size_t` and friends from this, the
-    // way they do with gcc and clang.
-    let pointer_size = if target.as_deref().is_none_or(|t| t == "shy") { "4" } else { "8" };
-    preprocess
-        .defines
-        .push(("__SIZEOF_POINTER__".to_string(), pointer_size.to_string()));
     Ok(Some(Options {
         stage: stage.unwrap_or(Stage::Emit(Backend::Shy)),
         input: input.ok_or("no input source file")?,

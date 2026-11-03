@@ -158,6 +158,14 @@ impl Parser {
         params: Option<&Declarator>,
     ) -> Result<Block, Diagnostic> {
         let open = self.expect_punct("{")?;
+        // The body span is recorded so a second pass can re-parse just the
+        // bodies that evaluated a const fn. A function body is the outermost
+        // one, even when the call sits inside a nested block.
+        self.body_stack.push(open);
+        let is_function_body = params.is_some();
+        if is_function_body {
+            self.function_bodies.push(open);
+        }
         self.push_scope();
         if let Some(declarator) = params
             && let Some(DerivedDeclarator::Function(function)) = declarator.derived.first()
@@ -174,10 +182,20 @@ impl Parser {
             if self.at_eof() {
                 return Err(Diagnostic::new(self.here(), "unterminated block"));
             }
+            // A const fn that returns tokens may expand to a statement list,
+            // so one call can contribute zero or more statements.
+            if let Some(expanded) = self.expand_statement_list()? {
+                stmts.extend(expanded);
+                continue;
+            }
             stmts.push(self.statement()?);
         }
         let close = self.expect_punct("}")?;
         self.pop_scope();
+        self.body_stack.pop();
+        if is_function_body {
+            self.function_bodies.pop();
+        }
         Ok(Block {
             span: open.join(close),
             stmts,
@@ -298,16 +316,16 @@ impl Parser {
     fn case_statement(&mut self) -> Result<Stmt, Diagnostic> {
         let start = self.bump().span;
         let value = self.conditional()?;
-        if self.at_punct("...") {
-            return Err(Diagnostic::new(
-                self.here(),
-                "case ranges are not supported",
-            ));
-        }
+        let end = if self.eat_punct("...") {
+            Some(self.conditional()?)
+        } else {
+            None
+        };
         self.expect_punct(":")?;
         let inner = self.statement()?;
         Ok(Stmt::Case {
             value,
+            end,
             span: start.join(inner.span()),
             stmt: Box::new(inner),
         })
@@ -413,5 +431,86 @@ impl Parser {
             operands,
             templates,
         })
+    }
+}
+impl Parser {
+    /// Expands a `const fn` call that stands where statements are written.
+    ///
+    /// The returned tokens must form complete statements; a trailing expression
+    /// without its semicolon is accepted by supplying the one the call site
+    /// left behind.
+    pub(crate) fn expand_statement_list(&mut self) -> Result<Option<Vec<Stmt>>, Diagnostic> {
+        let Some(index) = self.const_fn_generator_ahead() else {
+            return Ok(None);
+        };
+        let start = self.here();
+        self.record_const_call(index, start);
+        self.bump();
+        let (tokens, close) = self.capture_tokens()?;
+        let span = start.join(close);
+        let value = self.call_const(index, vec![super::comptime::Value::Tokens(tokens)], span)?;
+        let super::comptime::Value::Tokens(returned) = value else {
+            return Err(Diagnostic::new(
+                span,
+                "a statement const fn must produce tokens",
+            ));
+        };
+        if returned.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        match self.parse_statement_fragment(returned.clone(), span) {
+            Ok(statements) => Ok(Some(statements)),
+            Err(error) => {
+                // A macro that produces declarations belongs at file scope.
+                if self
+                    .parse_item_fragment(returned, span, None)
+                    .is_ok_and(|(items, _, _)| !items.is_empty())
+                {
+                    let name = self.const_fns[index].name.clone();
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "const fn '{name}' produced declarations, which cannot stand inside a function; call it at file scope"
+                        ),
+                    ));
+                }
+                Err(self.fragment_error(error, index))
+            }
+        }
+    }
+
+    /// Parses a token sequence as statements.
+    pub(crate) fn parse_statement_fragment(
+        &self,
+        mut tokens: Vec<crate::lexer::Token>,
+        span: crate::source::Span,
+    ) -> Result<Vec<Stmt>, Diagnostic> {
+        let needs_semicolon = !matches!(
+            tokens.last().map(|token| &token.kind),
+            Some(crate::lexer::TokenKind::Punct(punct)) if punct == ";" || punct == "}"
+        );
+        if needs_semicolon {
+            tokens.push(crate::lexer::Token {
+                kind: crate::lexer::TokenKind::Punct(";".to_string()),
+                span,
+                at_line_start: false,
+                leading_space: false,
+            });
+        }
+        tokens.push(crate::lexer::Token {
+            kind: crate::lexer::TokenKind::Eof,
+            span,
+            at_line_start: false,
+            leading_space: false,
+        });
+        let mut parser = Parser::new(tokens, false);
+        parser.scopes = self.scopes.clone();
+        parser.const_fns = self.const_fns.clone();
+        parser.body_world = self.body_world.clone();
+        let mut statements = Vec::new();
+        while !parser.at_eof() {
+            statements.push(parser.statement()?);
+        }
+        Ok(statements)
     }
 }

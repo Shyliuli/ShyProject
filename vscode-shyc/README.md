@@ -3,14 +3,18 @@
 Editor support for ShyC and ShyISA:
 
 - `.shyc` and `.shyh` language mode, `.shy` assembly language mode.
-- TextMate highlighting for the current ShyC surface (`fn`, `impl`, `trait`,
-  `let`, generics, payload enums, `use`, `asm!`, attributes).
 - A Rust language server that runs the real `shyc` frontend. Diagnostics,
   completion, go-to-definition, hover, document symbols, and semantic tokens
   therefore always agree with the compiler.
+- TextMate highlighting only for the syntax the compiler's token stream does
+  not carry: comments, preprocessing lines, and literals. Every keyword, type,
+  function, variable, property and operator is classified by the server's
+  lexer and symbol index.
 
 The server reuses `../shyc` as a library; it does not ship a second parser or a
-second list of language rules.
+second list of language rules. The TextMate grammar is deliberately small for
+that reason: anything it also matched would be a second, hand-written ShyC
+grammar that can disagree with the compiler.
 
 ## Layout
 
@@ -31,6 +35,17 @@ npm run build        # cargo build server + tsc
 
 Open this folder in VS Code and press `F5` to launch an Extension Development
 Host.
+
+To build the installable package:
+
+```sh
+npx @vscode/vsce package --dependencies --allow-missing-repository
+code --install-extension shyc-vscode-0.2.0.vsix --force
+```
+
+`--dependencies` is required: the extension loads `vscode-languageclient` at
+runtime, and vsce no longer puts `node_modules` into the package by default.
+Without it the extension fails to activate, so no language server starts.
 
 When the extension starts it uses, in order:
 

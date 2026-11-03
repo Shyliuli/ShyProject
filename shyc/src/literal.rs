@@ -17,15 +17,16 @@ pub struct Integer {
 }
 
 impl Integer {
-    pub fn width(self) -> u32 {
+    pub fn width(self, long_bits: u32) -> u32 {
         match self.rank {
             IntegerRank::Int => 32,
-            IntegerRank::Long | IntegerRank::LongLong => 64,
+            IntegerRank::Long => long_bits,
+            IntegerRank::LongLong => 64,
         }
     }
 }
 
-pub fn integer(text: &str, span: Span) -> Result<Integer, Diagnostic> {
+pub fn integer(text: &str, long_bits: u32, span: Span) -> Result<Integer, Diagnostic> {
     let chars: Vec<char> = text.chars().collect();
     for (index, &c) in chars.iter().enumerate() {
         if c == '\''
@@ -83,15 +84,20 @@ pub fn integer(text: &str, span: Span) -> Result<Integer, Diagnostic> {
     let ranks = [IntegerRank::Int, IntegerRank::Long, IntegerRank::LongLong];
     let first_rank = ranks.iter().position(|rank| *rank == minimum).unwrap();
     for &rank in &ranks[first_rank..] {
-        let signed_max = if rank == IntegerRank::Int {
-            i32::MAX as u64
-        } else {
-            i64::MAX as u64
+        let width = match rank {
+            IntegerRank::Int => 32,
+            IntegerRank::Long => long_bits,
+            IntegerRank::LongLong => 64,
         };
-        let unsigned_max = if rank == IntegerRank::Int {
-            u32::MAX as u64
+        let signed_max = if width >= 64 {
+            i64::MAX as u64
         } else {
+            (1u64 << (width - 1)) - 1
+        };
+        let unsigned_max = if width >= 64 {
             u64::MAX
+        } else {
+            (1u64 << width) - 1
         };
         if !unsigned && value <= signed_max {
             return Ok(Integer {

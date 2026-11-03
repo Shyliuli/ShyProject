@@ -141,8 +141,8 @@ pub struct TraitDecl {
 ///
 /// The declarator is kept exactly as the matching implementation will write
 /// it, so `self` can be resolved against the implementing type when the
-/// implementation is checked. There is no [`Block`] because a trait method is
-/// never defined here.
+/// implementation is checked. A method may carry a default [`Block`]; an
+/// implementation that omits the method inherits it.
 ///
 /// `generics` are the parameters written between the method name and `(`, as
 /// in `fn convert<T>(self *value, T value) -> T`. They are method-local: an
@@ -156,6 +156,9 @@ pub struct TraitMethod {
     pub declarator: Declarator,
     /// Method-local generic parameters, empty for an ordinary method.
     pub generics: Vec<GenericParam>,
+    /// Default implementation. An `impl` that leaves the method out gets this
+    /// body with `self` bound to the implementing type.
+    pub body: Option<Block>,
 }
 
 // ---------------------------------------------------------------------------

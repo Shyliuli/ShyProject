@@ -372,6 +372,10 @@ impl LanguageServer for Backend {
         };
         let offset = analysis.lines.offset(&analysis.text, position);
 
+        if let Some(location) = include_location(&analysis, offset, &self.settings.lock().unwrap()) {
+            return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+        }
+
         if let Some(target) = analysis.target_at(offset) {
             if let Some(location) = symbol_location(&analysis, target) {
                 return Ok(Some(GotoDefinitionResponse::Scalar(location)));
@@ -652,6 +656,35 @@ fn lsp_diagnostic(analysis: &Analysis, diagnostic: &shyc::source::Diagnostic) ->
     }
 }
 
+fn include_location(analysis: &Analysis, offset: usize, settings: &Settings) -> Option<Location> {
+    let line_start = analysis.text[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = analysis.text[offset..].find('\n').map_or(analysis.text.len(), |index| offset + index);
+    let line = analysis.text.get(line_start..line_end)?.trim();
+    let source_path = &analysis.sources.file(analysis.root).path;
+    let (include_name, relative) = if let Some(rest) = line.strip_prefix("#include") {
+        let rest = rest.trim();
+        let name = rest.trim_matches(|ch| ch == '"' || ch == '<' || ch == '>');
+        (name.to_string(), rest.starts_with('"'))
+    } else if let Some(rest) = line.strip_prefix("use ") {
+        let path = rest.trim_end_matches(';').trim();
+        let segments: Vec<&str> = path.split("::").collect();
+        let module = if segments.last() == Some(&"*") { &segments[..segments.len() - 1] } else { &segments[..segments.len().saturating_sub(1)] };
+        if module.is_empty() { return None; }
+        let module = module.strip_prefix(&["crate"]).unwrap_or(module);
+        let module = module.strip_prefix(&["self"]).unwrap_or(module);
+        if module.is_empty() { return None; }
+        let base = module.join("/");
+        let suffix = if module.first() == Some(&"c") { ".h" } else { ".shyh" };
+        (format!("{base}{suffix}"), module.first() == Some(&"self"))
+    } else { return None; };
+    let mut dirs = Vec::new();
+    if relative { dirs.push(source_path.parent()?.to_path_buf()); }
+    dirs.extend(settings.include_dirs.iter().cloned());
+    if let Some(root) = source_path.ancestors().find(|dir| dir.join("Cargo.toml").is_file() || dir.join(".git").exists()) { dirs.push(root.to_path_buf()); }
+    let path = dirs.into_iter().map(|dir| dir.join(&include_name)).find(|path| path.is_file())?;
+    Some(Location { uri: text::uri_for_path(&path)?, range: Range::default() })
+}
+
 fn symbol_location(analysis: &Analysis, id: usize) -> Option<Location> {
     let symbol = analysis.index.symbol(id);
     let file = analysis.sources.file(symbol.span.file);
@@ -689,6 +722,7 @@ fn token_type(kind: SymKind) -> u32 {
         SymKind::Param => TOK_PARAMETER,
         SymKind::TypeParam | SymKind::ConstParam => TOK_TYPE_PARAMETER,
         SymKind::Label => TOK_VARIABLE,
+        SymKind::Comptime => TOK_MACRO,
     }
 }
 
@@ -1085,6 +1119,7 @@ fn completion_item(symbol: &index::Sym, skip_self: bool) -> CompletionItem {
         SymKind::Global | SymKind::Local | SymKind::Param => CompletionItemKind::VARIABLE,
         SymKind::TypeParam | SymKind::ConstParam => CompletionItemKind::TYPE_PARAMETER,
         SymKind::Label => CompletionItemKind::REFERENCE,
+        SymKind::Comptime => CompletionItemKind::FUNCTION,
     });
     if matches!(
         symbol.kind,

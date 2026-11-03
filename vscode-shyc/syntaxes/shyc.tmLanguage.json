@@ -13,28 +13,7 @@
       "include": "#preprocessor"
     },
     {
-      "include": "#strings"
-    },
-    {
-      "include": "#numbers"
-    },
-    {
-      "include": "#declarations"
-    },
-    {
-      "include": "#keywords"
-    },
-    {
-      "include": "#types"
-    },
-    {
-      "include": "#calls"
-    },
-    {
-      "include": "#variables"
-    },
-    {
-      "include": "#operators"
+      "include": "#literals"
     }
   ],
   "repository": {
@@ -53,10 +32,6 @@
     },
     "attributes": {
       "patterns": [
-        {
-          "name": "meta.attribute.shyc",
-          "match": "#!\\[(?:no_main|disable_nonexhaustive_switch|disable_rustic_mut|disable_default_static|mem\\([^\\]]*\\)|stack\\([^\\]]*\\))\\]"
-        },
         {
           "name": "meta.attribute.shyc",
           "match": "#!\\[[^\\]]*\\]"
@@ -86,11 +61,11 @@
         }
       ]
     },
-    "strings": {
+    "literals": {
       "patterns": [
         {
           "name": "string.quoted.double.shyc",
-          "begin": "\\b(?:L|u8|u|U)?\"",
+          "begin": "(?<![A-Za-z0-9_])(?:u8|u|U|L)?\"",
           "end": "\"",
           "patterns": [
             {
@@ -101,7 +76,7 @@
         },
         {
           "name": "string.quoted.single.shyc",
-          "begin": "\\b(?:L|u8|u|U)?'",
+          "begin": "(?<![A-Za-z0-9_])(?:u8|u|U|L)?'",
           "end": "'",
           "patterns": [
             {
@@ -109,253 +84,6 @@
               "match": "\\\\."
             }
           ]
-        }
-      ]
-    },
-    "numbers": {
-      "patterns": [
-        {
-          "name": "constant.numeric.shyc",
-          "match": "\\b(?:0[xX][0-9a-fA-F']+|0[bB][01']+|[0-9][0-9']*(?:\\.[0-9']+)?(?:[eEpP][+-]?[0-9]+)?)[uUlLfF]*\\b"
-        }
-      ]
-    },
-    "keywords": {
-      "patterns": [
-        {
-          "name": "keyword.control.shyc",
-          "match": "\\b(?:if|else|for|while|do|switch|case|default|break|continue|goto|return)\\b"
-        },
-        {
-          "name": "keyword.other.shyc",
-          "match": "\\b(?:impl|trait|fn|let|mut|use|pub)\\b"
-        },
-        {
-          "name": "storage.modifier.shyc",
-          "match": "\\b(?:typedef|static|extern|inline|const|volatile|restrict|auto|register|_Noreturn|_Atomic|_Thread_local|__thread)\\b"
-        },
-        {
-          "name": "keyword.operator.word.shyc",
-          "match": "\\b(?:sizeof|typeof|_Alignof|_Alignas|alignof)\\b"
-        },
-        {
-          "name": "variable.language.self.shyc",
-          "match": "\\bself\\b"
-        },
-        {
-          "name": "keyword.other.asm.shyc",
-          "match": "\\basm!?"
-        }
-      ]
-    },
-    "declarations": {
-      "patterns": [
-        {
-          "match": "\\b(impl)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:<[^>]*>)?\\s+(for)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:<[^>]*>)?",
-          "captures": {
-            "1": {
-              "name": "keyword.other.shyc"
-            },
-            "2": {
-              "name": "entity.name.type.trait.shyc"
-            },
-            "3": {
-              "name": "keyword.other.shyc"
-            },
-            "4": {
-              "name": "entity.name.type.shyc"
-            }
-          }
-        },
-        {
-          "match": "\\b(impl)\\s*(?:<[^>]*>\\s*)?([A-Za-z_][A-Za-z0-9_]*)(?:<[^>]*>)?",
-          "captures": {
-            "1": {
-              "name": "keyword.other.shyc"
-            },
-            "2": {
-              "name": "entity.name.type.shyc"
-            }
-          }
-        },
-        {
-          "match": "\\b(trait)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:<[^>]*>)?",
-          "captures": {
-            "1": {
-              "name": "keyword.other.shyc"
-            },
-            "2": {
-              "name": "entity.name.type.trait.shyc"
-            }
-          }
-        },
-        {
-          "match": "\\b(struct|union)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:<[^>]*>)?",
-          "captures": {
-            "1": {
-              "name": "keyword.other.shyc"
-            },
-            "2": {
-              "name": "entity.name.type.struct.shyc"
-            }
-          }
-        },
-        {
-          "match": "\\b(enum)\\s*(?:\\(([^)]*)\\))?\\s*([A-Za-z_][A-Za-z0-9_]*)(?:<[^>]*>)?",
-          "captures": {
-            "1": {
-              "name": "keyword.other.shyc"
-            },
-            "2": {
-              "name": "storage.type.shyc"
-            },
-            "3": {
-              "name": "entity.name.type.enum.shyc"
-            }
-          }
-        },
-        {
-          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(<[^>]*>)?\\s*\\(",
-          "captures": {
-            "1": {
-              "name": "keyword.other.shyc"
-            },
-            "2": {
-              "name": "entity.name.function.shyc"
-            },
-            "3": {
-              "name": "variable.parameter.type.shyc"
-            }
-          }
-        },
-        {
-          "match": "\\b(let)\\s+(mut\\s+)?([A-Za-z_][A-Za-z0-9_]*)",
-          "captures": {
-            "1": {
-              "name": "keyword.other.shyc"
-            },
-            "2": {
-              "name": "keyword.other.shyc"
-            },
-            "3": {
-              "name": "variable.other.shyc"
-            }
-          }
-        },
-        {
-          "match": "^\\s*(use)\\s+((?:[A-Za-z_][A-Za-z0-9_]*::)*(?:[A-Za-z_][A-Za-z0-9_]*|\\*))\\s*;",
-          "captures": {
-            "1": {
-              "name": "keyword.other.shyc"
-            },
-            "2": {
-              "name": "entity.name.namespace.shyc"
-            }
-          }
-        }
-      ]
-    },
-    "types": {
-      "patterns": [
-        {
-          "name": "storage.type.shyc",
-          "match": "\\b(?:void|_Bool|char|short|int|long|float|double|signed|unsigned|i8|i16|i32|i64|u8|u16|u32|u64|isize|usize|f32|f64|int8_t|int16_t|int32_t|int64_t|uint8_t|uint16_t|uint32_t|uint64_t|intptr_t|uintptr_t|size_t|ptrdiff_t|wchar_t|max_align_t|va_list)\\b"
-        },
-        {
-          "name": "entity.name.type.shyc",
-          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
-        }
-      ]
-    },
-    "calls": {
-      "patterns": [
-        {
-          "match": "::\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\()",
-          "captures": {
-            "1": {
-              "name": "entity.name.function.member.shyc"
-            }
-          }
-        },
-        {
-          "match": "->\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\()",
-          "captures": {
-            "1": {
-              "name": "entity.name.function.member.shyc"
-            }
-          }
-        },
-        {
-          "match": "\\.\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\()",
-          "captures": {
-            "1": {
-              "name": "entity.name.function.member.shyc"
-            }
-          }
-        },
-        {
-          "match": "->\\s*([A-Za-z_][A-Za-z0-9_]*)",
-          "captures": {
-            "1": {
-              "name": "variable.other.property.shyc"
-            }
-          }
-        },
-        {
-          "match": "\\.\\s*([A-Za-z_][A-Za-z0-9_]*)",
-          "captures": {
-            "1": {
-              "name": "variable.other.property.shyc"
-            }
-          }
-        },
-        {
-          "name": "entity.name.function.shyc",
-          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
-        }
-      ]
-    },
-    "variables": {
-      "patterns": [
-        {
-          "match": "^\\s*(?:[A-Za-z_][A-Za-z0-9_]*|(?:const|volatile|signed|unsigned|long|short|struct|union|enum)\\b(?:\\s+[A-Za-z_][A-Za-z0-9_]*)?|self)\\s*(?:\\*\\s*)+([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*(?:=|;|,|\\[|\\)))",
-          "captures": {
-            "1": {
-              "name": "variable.other.shyc"
-            }
-          }
-        },
-        {
-          "match": "^\\s*(?:[A-Za-z_][A-Za-z0-9_]*|(?:const|volatile|signed|unsigned|long|short|struct|union|enum)\\b(?:\\s+[A-Za-z_][A-Za-z0-9_]*)?|self)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*(?:=|;|,|\\[|\\)))",
-          "captures": {
-            "1": {
-              "name": "variable.other.shyc"
-            }
-          }
-        },
-        {
-          "match": "(?<=&)\\s*([A-Za-z_][A-Za-z0-9_]*)\\b",
-          "captures": {
-            "1": {
-              "name": "variable.other.shyc"
-            }
-          }
-        }
-      ]
-    },
-    "operators": {
-      "patterns": [
-        {
-          "name": "keyword.operator.scope.shyc",
-          "match": "::"
-        },
-        {
-          "name": "keyword.operator.try.shyc",
-          "match": "\\?"
-        },
-        {
-          "name": "keyword.operator.shyc",
-          "match": "(?:->|==|!=|<=|>=|\\+=|-=|\\*=|/=|%=|&&|\\|\\||[+\\-*/%=!<>.&|^~])"
         }
       ]
     }

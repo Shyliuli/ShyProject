@@ -2,21 +2,55 @@
 #define SHY_ALLOC_STRING_SHYH
 
 #include <core/str.shyh>
+#include <core/deref.shyh>
+#include <core/buffer.shyh>
 
-/* An owned, growable text buffer. `data` always ends with a NUL, so it is
-   also a C string. Start with String::new(). */
+/* Owned NUL-terminated byte buffer; bytes are not validated as UTF-8. The
+   embedded Str is its read-only Deref view, cap is the allocation size. Create
+   with String::new(), or zero-initialize with `String s = {0}` and let the
+   first push allocate; an operation that may reallocate invalidates copies of
+   the view. */
 struct String {
-    char *data;
-    int len;
+    Str view;
     int cap;
 };
 
 impl String {
     fn new(void) -> String;
-    fn push(self *s, int c);
+    fn push(self *s, int byte);
+    fn reserve(self *s, int additional) -> int;
     fn push_str(self *s, Str text);
     fn push_cstr(self *s, const char *text);
-    fn as_str(self *s) -> Str;
+    fn as_str(const self *s) -> Str;
+}
+
+impl Buffer for String {
+    fn data(self *s) -> char * {
+        return (char *)s.view.data;
+    }
+
+    fn len(const self *s) -> int {
+        return s.view.len;
+    }
+
+    fn reserve(self *s, int additional) -> int {
+        return String::reserve(s, additional);
+    }
+
+    fn set_len(self *s, int newlen) -> int {
+        if (newlen < 0 || newlen >= s.cap) {
+            return 0;
+        }
+        s.view.len = newlen;
+        ((char *)s.view.data)[newlen] = 0;
+        return 1;
+    }
+}
+
+impl Deref<Str> for String {
+    fn deref(const self *s) -> const Str * {
+        return &s.view;
+    }
 }
 
 #endif

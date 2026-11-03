@@ -354,7 +354,22 @@ impl Lowerer {
                         self.generic_impl_method_symbol(&target.name, &name, target.ty)
                     }
                     (None, Some(trait_impl)) => {
-                        self.trait_impl_method_symbol(trait_impl, &target.name, &name)
+                        let symbol =
+                            self.trait_impl_method_symbol(trait_impl, &target.name, &name);
+                        // A method follows the same rule as a free function:
+                        // `pub` exports it, everything else stays file-local, so
+                        // a header can define a trait implementation without
+                        // duplicating the symbol in every translation unit.
+                        if self.file_local(
+                            declaration.specs.storage,
+                            declaration.specs.is_shy_fn,
+                            declaration.specs.is_pub,
+                            true,
+                        ) {
+                            self.internal_symbol(&symbol)
+                        } else {
+                            symbol
+                        }
                     }
                     (None, None) => self.inherent_method_symbol(
                         &target.name,
@@ -574,15 +589,6 @@ impl Lowerer {
                     format!(
                         "redefinition of generic method parameter '{}'",
                         parameter.name.text
-                    ),
-                ));
-            }
-            if let Some(bound) = parameter.bounds.first() {
-                return Err(Diagnostic::new(
-                    bound.span,
-                    format!(
-                        "trait bounds on generic method '{}' are not implemented yet",
-                        name.text
                     ),
                 ));
             }
@@ -938,8 +944,61 @@ impl Lowerer {
                     }
                     return self.write_global_init(global, ty, offset, &entry.value);
                 }
+                if self.has_initializable_storage(ty)
+                    && self.is_zero_aggregate_initializer(entries)
+                {
+                    // The byte image starts zeroed, so `{0}` leaves it as is.
+                    return Ok(());
+                }
                 self.write_global_list(global, ty, offset, entries, init.span)
             }
+        }
+    }
+
+    /// Whether an aggregate has at least one leaf a brace list can initialize.
+    ///
+    /// The `{0}` shortcut must not make an empty record look initialized, so it
+    /// only applies when there is storage to zero.
+    fn has_initializable_storage(&self, ty: TypeId) -> bool {
+        if self.types.is_array(ty) {
+            self.array_len(ty) > 0
+        } else if self.types.is_record(ty) {
+            !self.record_fields(ty).is_empty()
+        } else {
+            false
+        }
+    }
+
+    /// Whether `entries` is C's zero idiom for an aggregate, a single `{0}`.
+    ///
+    /// C applies the scalar to the first leaf and zero-initializes every other
+    /// leaf, so the whole object is zero bytes. General brace elision is not
+    /// implemented here: a second entry would belong to the first leaf's
+    /// siblings, which the top-level field mapping cannot express, so only the
+    /// one-entry form is accepted. Its meaning is exactly C's.
+    pub(super) fn is_zero_aggregate_initializer(
+        &mut self,
+        entries: &[ast::InitializerEntry],
+    ) -> bool {
+        let [entry] = entries else {
+            return false;
+        };
+        if !entry.designators.is_empty() {
+            return false;
+        }
+        let ast::InitializerKind::Expr(expr) = &entry.value.kind else {
+            return false;
+        };
+        let Ok(value) = self.eval_const(expr) else {
+            return false;
+        };
+        match value.kind {
+            ConstKind::Int(bits) | ConstKind::Float(bits) => bits == 0,
+            ConstKind::Address {
+                symbol: None,
+                addend: 0,
+            } => true,
+            ConstKind::Address { .. } => false,
         }
     }
 
@@ -1652,6 +1711,10 @@ impl FnLower<'_> {
                         byte: 0,
                         bytes: size,
                     });
+                }
+                if size > 0 && self.l.is_zero_aggregate_initializer(entries) {
+                    // The object is already zero, which is what `{0}` means.
+                    return Ok(());
                 }
                 self.init_local_list(address, ty, entries, span)
             }

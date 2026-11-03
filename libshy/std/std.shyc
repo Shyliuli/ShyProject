@@ -4,6 +4,58 @@
 #include <std/io.shyh>
 #include <std/fs.shyh>
 
+static FileWriter global_out = {0};
+static FileReader global_in = {0};
+
+impl StrReader {
+    pub fn new(Str source) -> StrReader {
+        StrReader reader = {source, 0};
+        return reader;
+    }
+}
+
+pub fn stdin_reader(void) -> FileReader {
+    FileReader reader = {stdin};
+    return reader;
+}
+
+pub fn stdout_writer(void) -> FileWriter {
+    FileWriter writer = {stdout};
+    return writer;
+}
+
+pub fn stderr_writer(void) -> FileWriter {
+    FileWriter writer = {stderr};
+    return writer;
+}
+
+pub fn set_global_writer(FileWriter writer) {
+    global_out = writer;
+}
+
+pub fn global_writer(void) -> FileWriter {
+    if (!global_out.file) {
+        return stdout_writer();
+    }
+    return global_out;
+}
+
+pub fn set_global_reader(FileReader reader) {
+    global_in = reader;
+}
+
+pub fn global_reader(void) -> FileReader {
+    if (!global_in.file) {
+        return stdin_reader();
+    }
+    return global_in;
+}
+
+pub fn getc(void) -> int {
+    let mut input = global_reader();
+    return input.getc();
+}
+
 pub fn read_to_string(FILE *f) -> String {
     let mut s = String::new();
     let mut c = fgetc(f);
@@ -29,7 +81,7 @@ pub fn write_file(const char *path, Str text) -> int {
     if (!f) {
         return 0;
     }
-    let written = fwrite(text.ptr, 1, text.len, f);
+    let written = fwrite(text.data, 1, text.len, f);
     fclose(f);
     return written == (size_t)text.len;
 }

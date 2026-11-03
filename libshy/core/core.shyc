@@ -1,18 +1,14 @@
 // core: types that need no allocator and no operating system.
 
 #include <core/str.shyh>
-
-fn same_bytes(const char *a, const char *b, int n) -> int {
-    for (int i = 0; i < n; i++) {
-        if (a[i] != b[i]) {
-            return 0;
-        }
-    }
-    return 1;
-}
+#include <core/buffer.shyh>
 
 impl Str {
     pub fn from_cstr(const char *s) -> Str {
+        if (s == 0) {
+            Str empty = {0, 0};
+            return empty;
+        }
         let mut n = 0;
         while (s[n]) {
             n = n + 1;
@@ -21,16 +17,87 @@ impl Str {
         return result;
     }
 
-    pub fn eq(self *s, Str other) -> int {
-        return s.len == other.len && same_bytes(s.ptr, other.ptr, s.len);
+    pub fn is_empty(const self *s) -> int {
+        return s.len == 0;
     }
 
-    pub fn eq_cstr(self *s, const char *other) -> int {
+    pub fn eq(const self *s, Str other) -> int {
+        if (s.len != other.len) {
+            return 0;
+        }
+        for (int i = 0; i < s.len; i++) {
+            if (s.data[i] != other.data[i]) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+
+    pub fn eq_cstr(const self *s, const char *other) -> int {
         return s.eq(Str::from_cstr(other));
     }
 
-    pub fn starts_with(self *s, const char *prefix) -> int {
-        let p = Str::from_cstr(prefix);
-        return p.len <= s.len && same_bytes(s.ptr, p.ptr, p.len);
+    pub fn starts_with(const self *s, const char *prefix) -> int {
+        Str p = Str::from_cstr(prefix);
+        if (p.len > s.len) {
+            return 0;
+        }
+        for (int i = 0; i < p.len; i++) {
+            if (s.data[i] != p.data[i]) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+
+    pub fn ends_with(const self *s, const char *suffix) -> int {
+        Str p = Str::from_cstr(suffix);
+        if (p.len > s.len) {
+            return 0;
+        }
+        int start = s.len - p.len;
+        for (int i = 0; i < p.len; i++) {
+            if (s.data[start + i] != p.data[i]) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+
+    pub fn find(const self *s, Str needle) -> int {
+        if (needle.len == 0) {
+            return 0;
+        }
+        if (needle.len > s.len) {
+            return -1;
+        }
+        for (int start = 0; start <= s.len - needle.len; start++) {
+            int matched = 1;
+            for (int i = 0; i < needle.len; i++) {
+                if (s.data[start + i] != needle.data[i]) {
+                    matched = 0;
+                    break;
+                }
+            }
+            if (matched) {
+                return start;
+            }
+        }
+        return -1;
+    }
+
+    pub fn slice(const self *s, int start, int len) -> Str {
+        if (start < 0 || len < 0 || start > s.len || len > s.len - start) {
+            Str empty = {0, 0};
+            return empty;
+        }
+        // A null view has len 0, so only (0, 0) reaches here; do not form
+        // `NULL + 0`, which C leaves undefined.
+        if (s.data == 0) {
+            Str empty = {0, 0};
+            return empty;
+        }
+        Str result = {s.data + start, len};
+        return result;
     }
 }

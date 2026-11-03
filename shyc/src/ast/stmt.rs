@@ -125,10 +125,12 @@ pub enum Stmt {
         body: Box<Stmt>,
         span: Span,
     },
-    /// `case value: stmt`. Labels nest naturally when several cases share a
-    /// statement.
+    /// `case value: stmt`, or `case low ... high: stmt` when `end` is set.
+    /// Labels nest naturally when several cases share a statement.
     Case {
         value: Expr,
+        /// The high end of a case range.
+        end: Option<Expr>,
         stmt: Box<Stmt>,
         span: Span,
     },

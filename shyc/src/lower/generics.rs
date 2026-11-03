@@ -265,16 +265,6 @@ impl Lowerer {
     }
 
     fn register_generic_impl(&mut self, block: &ast::ImplBlock) -> Result<(), Diagnostic> {
-        if let Some(bound) = block
-            .generics
-            .iter()
-            .find_map(|parameter| parameter.bounds.first())
-        {
-            return Err(Diagnostic::new(
-                bound.span,
-                "trait bounds on a generic impl are not implemented yet",
-            ));
-        }
         for (index, parameter) in block.generics.iter().enumerate() {
             let repeated = block.generics[..index]
                 .iter()
@@ -407,6 +397,16 @@ impl Lowerer {
             let Some(env) = self.bind_generic_impl_target(&key, template)? else {
                 continue;
             };
+            // An impl whose parameter bounds do not hold for these arguments
+            // simply does not apply, exactly like an unmatched target.
+            if template
+                .params
+                .iter()
+                .any(|parameter| !parameter.bounds.is_empty())
+                && !self.generic_bounds_hold(&template.params, &env)?
+            {
+                continue;
+            }
             self.materialize_generic_impl(record, &key.name, template, env)?;
         }
         Ok(())
@@ -835,6 +835,18 @@ impl Lowerer {
                         }),
                     )?;
                 }
+                if let Some((_, info, _)) = &trait_info {
+                    self.collect_default_methods(
+                        &template.block,
+                        info,
+                        super::ImplTarget {
+                            ty: record,
+                            name: record_name.to_string(),
+                            instance: Some(instance.clone()),
+                            trait_impl: trait_impl.clone(),
+                        },
+                    )?;
+                }
                 if let Some((trait_name, info, _)) = &trait_info {
                     self.check_impl_method_names(&template.block, trait_name, info, record_name)?;
                     self.check_impl_signatures(
@@ -1229,6 +1241,12 @@ impl Lowerer {
         if let Some(instance) = self.function_instances.get(&key) {
             return Ok(instance.clone());
         }
+        self.check_generic_bounds(
+            &format!("generic method '{}'", name.text),
+            name.span,
+            &template.params,
+            &key.args,
+        )?;
         let mut decl = template.decl.clone();
         for derived in &mut decl.declarator.derived {
             if let ast::DerivedDeclarator::Function(function) = derived {
@@ -1360,6 +1378,58 @@ impl Lowerer {
         ))
     }
 
+    /// Whether every trait bound on `params` holds for `args`.
+    ///
+    /// Unlike [`Self::check_generic_bounds`], an unsatisfied bound is an answer
+    /// rather than a diagnostic: an impl that does not apply is skipped.
+    fn generic_bounds_hold(
+        &mut self,
+        params: &[ast::GenericParam],
+        args: &[GenericArgKey],
+    ) -> Result<bool, Diagnostic> {
+        for (parameter, argument) in params.iter().zip(args) {
+            let GenericArgKey::Type(ty) = argument else {
+                continue;
+            };
+            for bound in &parameter.bounds {
+                let Some(info) = self.traits.get(&bound.name.text).cloned() else {
+                    return Err(Diagnostic::new(
+                        bound.span,
+                        format!("unknown trait '{}'", bound.name.text),
+                    ));
+                };
+                if bound.args.len() != info.params.len() {
+                    return Err(Diagnostic::new(
+                        bound.span,
+                        format!(
+                            "trait '{}' expects {} type argument(s)",
+                            bound.name.text,
+                            info.params.len()
+                        ),
+                    ));
+                }
+                let bound_args = if bound.args.is_empty() {
+                    Vec::new()
+                } else {
+                    self.push_type_scope();
+                    self.bind_generic_args(params, args);
+                    let resolved =
+                        self.resolve_generic_args(&bound.name.text, &info.params, &bound.args);
+                    self.pop_type_scope();
+                    resolved?
+                };
+                self.instantiate_generic_impl(*ty)?;
+                if !self
+                    .trait_impls
+                    .contains(&(bound.name.text.clone(), bound_args, *ty))
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Verifies every trait bound once the concrete type arguments are known.
     ///
     /// A bound is satisfied by an `impl Bound<Args> for Type` already collected
@@ -1370,7 +1440,7 @@ impl Lowerer {
     /// constant identities the implementation registered.
     fn check_generic_bounds(
         &mut self,
-        function: &str,
+        subject: &str,
         span: Span,
         params: &[ast::GenericParam],
         args: &[GenericArgKey],
@@ -1384,9 +1454,8 @@ impl Lowerer {
                     return Err(Diagnostic::new(
                         bound.span,
                         format!(
-                            "trait bound '{}: {}' on generic function '{}' names unknown \
-                             trait '{}'",
-                            parameter.name.text, bound.name.text, function, bound.name.text
+                            "trait bound '{}: {}' on {} names unknown trait '{}'",
+                            parameter.name.text, bound.name.text, subject, bound.name.text
                         ),
                     ));
                 };
@@ -1394,11 +1463,11 @@ impl Lowerer {
                     return Err(Diagnostic::new(
                         bound.span,
                         format!(
-                            "trait bound '{}: {}' on generic function '{}' gives {} trait \
-                             argument(s), but trait '{}' expects {}",
+                            "trait bound '{}: {}' on {} gives {} trait argument(s), but trait \
+                             '{}' expects {}",
                             parameter.name.text,
                             bound.name.text,
-                            function,
+                            subject,
                             bound.args.len(),
                             bound.name.text,
                             info.params.len()
@@ -1427,10 +1496,10 @@ impl Lowerer {
                     return Err(Diagnostic::new(
                         span,
                         format!(
-                            "type parameter '{}' of generic function '{}' requires trait \
-                             '{}', but '{}' does not implement it",
+                            "type parameter '{}' of {} requires trait '{}', but '{}' does not \
+                             implement it",
                             parameter.name.text,
-                            function,
+                            subject,
                             self.bound_trait_name(&bound.name.text, &bound_args),
                             self.concrete_type_name(*ty)
                         ),
@@ -1462,7 +1531,7 @@ impl Lowerer {
     /// The type store keeps no names, so a record or enum is named from the
     /// metadata that already refers to it: its implementation, its generic
     /// instance, or the scope that declared its tag.
-    fn concrete_type_name(&self, ty: TypeId) -> String {
+    pub(super) fn concrete_type_name(&self, ty: TypeId) -> String {
         match self.types.kind(ty) {
             TypeKind::Void => "void".to_string(),
             TypeKind::Bool => "bool".to_string(),
@@ -1550,7 +1619,12 @@ impl Lowerer {
         if let Some(instance) = self.function_instances.get(&key) {
             return Ok(instance.clone());
         }
-        self.check_generic_bounds(&name.text, name.span, &template.params, &key.args)?;
+        self.check_generic_bounds(
+            &format!("generic function '{}'", name.text),
+            name.span,
+            &template.params,
+            &key.args,
+        )?;
         let Some(mut decl) = template.decl.clone() else {
             return Err(Diagnostic::new(
                 name.span,

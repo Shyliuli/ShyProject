@@ -63,7 +63,7 @@ libshy/core/%.h: libshy/core/%.shyh $(SHYC_RELEASE)
 
 install-bin: bin
 	$(INSTALL) -d $(DESTDIR)$(PREFIX)/bin
-	for bin in $(TOOL_BINS) chibicc; do \
+	for bin in $(TOOL_BINS) shyc chibicc; do \
 		$(INSTALL) -m 0755 $(BIN_DIR)/$$bin $(DESTDIR)$(PREFIX)/bin/$$bin; \
 	done
 

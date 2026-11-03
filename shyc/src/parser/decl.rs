@@ -10,7 +10,10 @@ use crate::ast::{
 use crate::lexer::{Token, TokenKind};
 use crate::source::{Diagnostic, Span};
 
+use crate::ast;
+
 use super::Parser;
+use super::comptime::{ConstFn, ParamKind};
 use super::cursor::is_keyword;
 
 /// File-scope type names collected before the real parse.
@@ -129,6 +132,47 @@ impl Parser {
             specs,
             declarators,
         }))
+    }
+
+    /// Parses `const fn name(params) -> T { body }` and records it.
+    ///
+    /// The body is kept as syntax: it runs only when a call to the function is
+    /// evaluated at compile time.
+    pub(crate) fn const_fn_declaration(&mut self) -> Result<(), Diagnostic> {
+        let declaration_start = self.here();
+        self.bump();
+        let (start, specs, declarator) = self.fn_signature()?;
+        let Some(name) = declarator.name.clone() else {
+            return Err(Diagnostic::new(start, "a const fn needs a name"));
+        };
+        let body = self.block_with_params(Some(&declarator))?;
+        let mut params = Vec::new();
+        if let Some(ast::DerivedDeclarator::Function(function)) = declarator.derived.first() {
+            for parameter in &function.params {
+                let Some(param_declarator) = &parameter.declarator else {
+                    continue;
+                };
+                let Some(param_name) = &param_declarator.name else {
+                    continue;
+                };
+                params.push((param_name.text.clone(), param_kind(&parameter.specs, param_declarator)));
+            }
+        }
+        let returns_tokens = returns_tokens_type(&specs);
+        let signature = Span {
+            start: declaration_start.start,
+            end: body.span.start,
+            ..declaration_start
+        };
+        self.record_const_fn_declaration(&name.text, name.span, signature);
+        self.const_fns.push(ConstFn {
+            name: name.text,
+            span: name.span,
+            params,
+            returns_tokens,
+            body,
+        });
+        Ok(())
     }
 
     /// Whether the cursor starts a file-scope `use` import.
@@ -626,25 +670,27 @@ impl Parser {
         })
     }
 
-    /// One method declaration inside a trait. A body is rejected here; the
-    /// declarator's shape and storage class are checked by semantic analysis.
+    /// One method inside a trait: a declaration ending in `;` or a default
+    /// implementation with a body. The declarator's shape and storage class
+    /// are checked by semantic analysis.
     fn trait_method(&mut self) -> Result<TraitMethod, Diagnostic> {
         if self.at_fn_declaration() {
             let (start, specs, declarator) = self.fn_signature()?;
-            if self.at_punct("{") {
-                return Err(Diagnostic::new(
-                    self.here(),
-                    "trait method declarations cannot have a body",
-                ));
-            }
-            let semicolon = self.expect_punct(";")?;
+            let (span, body) = if self.at_punct("{") {
+                let body = self.block_with_params(Some(&declarator))?;
+                (start.join(body.span), Some(body))
+            } else {
+                let semicolon = self.expect_punct(";")?;
+                (start.join(semicolon), None)
+            };
             self.pop_scope();
             let generics = method_generics(&declarator);
             return Ok(TraitMethod {
-                span: start.join(semicolon),
+                span,
                 specs,
                 declarator,
                 generics,
+                body,
             });
         }
 
@@ -656,18 +702,19 @@ impl Parser {
             ));
         }
         let declarator = self.declarator(false)?;
-        if self.at_punct("{") {
-            return Err(Diagnostic::new(
-                self.here(),
-                "trait method declarations cannot have a body",
-            ));
-        }
-        let semicolon = self.expect_punct(";")?;
+        let (span, body) = if self.at_punct("{") {
+            let body = self.block_with_params(Some(&declarator))?;
+            (specs.span.join(body.span), Some(body))
+        } else {
+            let semicolon = self.expect_punct(";")?;
+            (specs.span.join(semicolon), None)
+        };
         Ok(TraitMethod {
-            span: specs.span.join(semicolon),
+            span,
             generics: method_generics(&declarator),
             specs,
             declarator,
+            body,
         })
     }
 
@@ -957,4 +1004,43 @@ fn method_generics(declarator: &Declarator) -> Vec<GenericParam> {
             _ => None,
         })
         .unwrap_or_default()
+}
+/// How one `const fn` parameter is passed: an integer or a string.
+fn param_kind(specs: &DeclSpecs, declarator: &Declarator) -> ParamKind {
+    if declarator
+        .derived
+        .iter()
+        .any(|derived| matches!(derived, DerivedDeclarator::Pointer(_)))
+    {
+        return ParamKind::Str;
+    }
+    for specifier in &specs.type_specs {
+        match specifier {
+            ast::TypeSpecifier::Builtin(_) => return ParamKind::Int,
+            ast::TypeSpecifier::TypedefName(name) => {
+                return match name.text.as_str() {
+                    "Tokens" => ParamKind::Tokens,
+                    "Str" | "String" => ParamKind::Str,
+                    _ => ParamKind::Int,
+                };
+            }
+            ast::TypeSpecifier::Record(record) => {
+                if record.tag.as_ref().is_some_and(|tag| tag.text == "Tokens") {
+                    return ParamKind::Tokens;
+                }
+            }
+            _ => {}
+        }
+    }
+    ParamKind::Int
+}
+/// Whether a declared return type spells the compile-time `Tokens` type.
+fn returns_tokens_type(specs: &DeclSpecs) -> bool {
+    specs.type_specs.iter().any(|specifier| match specifier {
+        ast::TypeSpecifier::TypedefName(name) => name.text == "Tokens",
+        ast::TypeSpecifier::Record(record) => {
+            record.tag.as_ref().is_some_and(|tag| tag.text == "Tokens")
+        }
+        _ => false,
+    })
 }

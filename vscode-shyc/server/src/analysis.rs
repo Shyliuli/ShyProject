@@ -94,11 +94,15 @@ impl Analysis {
         };
 
         let mut attributes = preprocess::Attributes::default();
+        let mut sites = Vec::new();
         let unit = match preprocess::preprocess(&mut sources, file, &options) {
             Ok(output) => {
                 attributes = output.attributes;
-                match parser::parse(&output.tokens) {
-                    Ok(unit) => Some(unit),
+                match parser::parse_with_sites(&output.tokens) {
+                    Ok((unit, expanded)) => {
+                        sites = expanded;
+                        Some(unit)
+                    }
                     Err(error) => {
                         diagnostics.push(error);
                         None
@@ -148,7 +152,7 @@ impl Analysis {
 
         let index = unit
             .as_ref()
-            .map(|unit| index::build(&sources, unit))
+            .map(|unit| index::build(&sources, unit, &sites))
             .unwrap_or_default();
 
         Arc::new(Analysis {
