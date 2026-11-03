@@ -122,29 +122,6 @@ pub struct Entry {
     pub span: Span,
 }
 
-/// The C name each entry gives one generic instance.
-///
-/// The key is the name the C backend mangles on its own (`Vec<int>` is keyed as
-/// `Vec_int`), so a type mention and the table agree on one spelling.
-pub fn aliases(table: &Table) -> HashMap<String, String> {
-    let mut aliases = HashMap::new();
-    for entry in &table.entries {
-        let args = entry
-            .args
-            .iter()
-            .map(|arg| match &arg.kind {
-                crate::ast::GenericArgKind::Type(type_name) => {
-                    crate::c::types::type_name_text(type_name)
-                }
-                crate::ast::GenericArgKind::Const(value) => crate::c::types::expression_text(value),
-            })
-            .collect::<Vec<_>>();
-        let mangled = crate::c::names::instance(&entry.name.text, &args);
-        aliases.insert(mangled, entry.alias.clone());
-    }
-    aliases
-}
-
 /// Parses an instance table from a lexed token stream.
 ///
 /// `tokens` may contain [`TokenKind::Newline`] markers. `names` carries the

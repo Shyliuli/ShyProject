@@ -971,7 +971,8 @@ impl FnLower<'_> {
         // The driver's C export prints a call under the symbol resolved here,
         // so the two backends name one call the same way.
         if let ir::CallTarget::Direct(symbol) = &target {
-            self.l.call_symbols.insert(span, symbol.clone());
+            let context = self.l.impl_context.as_ref().map(|(_, name)| name.clone());
+            self.l.call_symbols.insert((span, context), symbol.clone());
         }
         let signature = self.l.ir_signature(function_ty);
         let TypeKind::Function { result, .. } = self.l.types.kind(function_ty) else {

@@ -1,20 +1,16 @@
-//! The C names ShyC constructs mangle to.
+//! The few names the C backend still makes up.
 //!
-//! A method, a trait value constructor, and a generic instance each need a C
-//! symbol of their own. The C source backend and the header export spell them
-//! here and nowhere else: a header that declares a name the definition does not
-//! have fails at link time, long after either printer could notice.
-//!
-//! The rules are the obvious ones: the receiver comes first, so a method of
-//! `Point` is `Point_move`, and `Display::from<Point>()` is
-//! `Display_from_Point`. A generic instance joins its base name and its
-//! arguments, so `Vec<int>` is `Vec_int`.
+//! Almost every symbol in the C output is the compiler's: a method is
+//! `____Point__move`, a file-local function is `.L.module.name`, and a generic
+//! instance is whatever the instance table or the type printer calls it. What is
+//! left here is the spelling of a trait value constructor, which exists only for
+//! the C output: `Display::from<Point>()` prints as `Display_from_Point()`.
 
 /// Make a compiler symbol a C identifier.
 ///
-/// A file-local symbol is .L.module.name and a method is ____Point__move; the
-/// dot cannot appear in C, so every character that is not an identifier
-/// character becomes _. Nothing else is renamed: the C output calls a symbol
+/// A file-local symbol is `.L.module.name` and a method is `____Point__move`;
+/// the dot cannot appear in C, so every character that is not an identifier
+/// character becomes `_`. Nothing else is renamed: the C output calls a symbol
 /// what the compiler called it.
 pub(crate) fn symbol(symbol: &str) -> String {
     symbol
@@ -29,56 +25,20 @@ pub(crate) fn symbol(symbol: &str) -> String {
         .collect()
 }
 
-/// The C type and function name of one generic instance: `Vec_int`.
-pub(crate) fn instance(base: &str, args: &[String]) -> String {
-    let mut name = type_part(base);
-    for arg in args {
-        name.push('_');
-        name.push_str(&type_part(arg));
-    }
-    name
-}
-
-/// The C symbol of one inherent method: `Point_move`.
-pub(crate) fn method(receiver: &str, method: &str) -> String {
-    format!("{}_{}", type_part(receiver), method)
-}
-
-/// The C symbol of one method of a trait implementation:
-/// `String_Buffer_reserve`.
-///
-/// The trait name is part of the symbol because one receiver can implement
-/// several traits with a method of the same name, and its own inherent method
-/// may share it too.
-pub(crate) fn trait_method(receiver: &str, trait_name: &str, method: &str) -> String {
-    format!(
-        "{}_{}_{}",
-        type_part(receiver),
-        type_part(trait_name),
-        method
-    )
-}
-
 /// The constructor that fills a trait value for one receiver:
 /// `Display_from_Point`.
 pub(crate) fn trait_value(trait_name: &str, receiver: &str) -> String {
-    format!("{}_from_{}", type_part(trait_name), type_part(receiver))
+    format!("{}_from_{}", ident(trait_name), ident(receiver))
 }
 
-/// One type's contribution to a mangled name.
-///
-/// Keywords that only describe storage or a tag are dropped, a pointer becomes
-/// `_ptr`, and the one pointer type with a name of its own keeps it: `char *`
-/// is `str`.
-pub(crate) fn type_part(text: &str) -> String {
-    let (mut base, pointers) = split(text);
-    if base == "char" && pointers == 1 {
-        return "str".to_string();
-    }
+/// One type's contribution to a constructor name.
+pub(crate) fn ident(text: &str) -> String {
+    let (base, pointers) = split(text);
+    let mut name = base.replace(' ', "_");
     for _ in 0..pointers {
-        base.push_str("_ptr");
+        name.push_str("_ptr");
     }
-    base.replace(' ', "_")
+    name
 }
 
 /// Split a C type spelling into its base words and its pointer depth.

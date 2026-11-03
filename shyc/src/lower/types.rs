@@ -567,6 +567,11 @@ impl Lowerer {
         self.types.complete_record(ty, fields).map_err(|error| {
             Diagnostic::new(spec.span, format!("invalid record layout: {error}"))
         })?;
+        // The C export spells a parameter type the way the source declared it,
+        // so the tag behind a type is worth keeping.
+        if let Some(tag) = &tag {
+            self.type_names.insert(ty, tag.clone());
+        }
         Ok(ty)
     }
 

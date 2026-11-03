@@ -715,6 +715,11 @@ pub(crate) fn type_name_text(type_name: &TypeName) -> String {
     type_name_text_in(type_name, Spelling::plain())
 }
 
+/// The same, spelled for the body that is being printed.
+pub(crate) fn type_name_text_with(type_name: &TypeName, spelling: Spelling) -> String {
+    type_name_text_in(type_name, spelling)
+}
+
 fn type_name_text_in(type_name: &TypeName, spelling: Spelling) -> String {
     declare_text_in(&type_name.specs, type_name.declarator.as_ref(), spelling)
 }
@@ -741,12 +746,6 @@ fn declare_text_in(
 /// A header needs expressions only in integer constant expressions, so no
 /// precedence table is needed: wrapping each operator's operands keeps the
 /// meaning of the source without having to decide what binds tighter.
-/// Print a constant expression; enums, array bounds, and generic arguments use
-/// the same spelling as the header.
-pub(crate) fn expression_text(expression: &Expr) -> String {
-    expr_text(expression)
-}
-
 fn expr_text(expression: &Expr) -> String {
     match expression {
         Expr::Number(literal) => literal.text.clone(),

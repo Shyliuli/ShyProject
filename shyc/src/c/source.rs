@@ -28,7 +28,7 @@ use crate::ast::{
 use crate::c::names;
 use crate::c::types::{
     Mention, Spelling, declarator_text_in, record_instance_text, specs_text_in,
-    trait_value_possible, trait_value_text, type_name_text,
+    trait_value_possible, trait_value_text, type_name_text, type_name_text_with,
 };
 use crate::lower::{InstancePlan, Lowered};
 use crate::source::{Diagnostic, Span};
@@ -109,12 +109,14 @@ struct Instance {
     name: String,
     /// The concrete arguments, in source spelling (int, Vec<int>).
     args: Vec<String>,
+    /// The receiver of a generic method; None for a record or free function.
+    receiver: Option<String>,
 }
 
 impl Instance {
     /// The C name of this instance, from the compiler's plan.
     fn c_name(&self, backend: &Backend<'_>) -> String {
-        if let Some(plan) = backend.plan(&self.name, &self.args) {
+        if let Some(plan) = backend.plan(&self.name, &self.args, self.receiver.as_deref()) {
             if let Some(symbol) = &plan.symbol {
                 return names::symbol(symbol);
             }
@@ -175,10 +177,16 @@ impl<'a> Backend<'a> {
         // The compiler already decided which specializations exist, so the work
         // list is its plan rather than a search of the source.
         for plan in &lowered.instances {
-            if plan.layout.is_some() || (plan.receiver.is_none() && plan.symbol.is_some()) {
+            let specialized = plan.layout.is_some()
+                || (plan.receiver.is_none() && plan.symbol.is_some())
+                // A generic method is a template too: its plan carries the
+                // method's own type arguments.
+                || (plan.receiver.is_some() && !plan.args.is_empty());
+            if specialized {
                 backend.instances.borrow_mut().push(Instance {
                     name: plan.name.clone(),
                     args: plan.args.clone(),
+                    receiver: plan.receiver.clone(),
                 });
             }
         }
@@ -332,30 +340,14 @@ impl<'a> Backend<'a> {
             .map(|(_, ty)| ty.clone())
     }
 
-    /// The C symbol of one method of one receiver, when an impl block defines
-    /// it or inherits a default body for it.
+    /// The C symbol of one method of one receiver, from the compiler's plans.
     ///
-    /// An inherent method wins over a trait method of the same name, which is
-    /// how a call with one receiver and no trait qualifier resolves.
+    /// A call the compiler recorded for this exact body is found by span; when
+    /// one template body was lowered for several receivers, the receiver's own
+    /// plan answers instead.
     fn method(&self, receiver: &str, name: &str) -> Option<String> {
-        let blocks = self.impls.get(receiver)?;
-        let defines = |block: &ImplBlock| {
-            find_method(block, name).is_some()
-                || find_prototype(block, name).is_some()
-                || self.inherits(block, name)
-        };
-        for block in blocks.iter().filter(|block| block.trait_name.is_none()) {
-            if defines(block) {
-                return Some(names::method(receiver, name));
-            }
-        }
-        for block in blocks.iter().filter(|block| block.trait_name.is_some()) {
-            if defines(block) {
-                let trait_name = block.trait_name.as_ref()?;
-                return Some(names::trait_method(receiver, &trait_name.text, name));
-            }
-        }
-        None
+        let plan = self.method_plan(receiver, name)?;
+        Some(names::symbol(plan.symbol.as_ref()?))
     }
 
     /// The C symbol of one method: the compiler's answer, whether the method is
@@ -371,8 +363,9 @@ impl<'a> Backend<'a> {
             return names::symbol(symbol);
         }
         // Neither: a method the compiler never lowered, which only happens for a
-        // construct it rejected, so any name will do to report it in C.
-        names::method(receiver, name)
+        // construct it rejected, so the plain name is enough to report it in C.
+        let _ = receiver;
+        name.to_string()
     }
 
     /// The C name of one function definition: the compiler's symbol for it.
@@ -383,34 +376,29 @@ impl<'a> Backend<'a> {
         }
     }
 
+    /// The symbol of one call inside the body that spells self as self_name.
+    ///
+    /// One template body is lowered once per receiver, so the span alone may
+    /// name several calls; the receiver's type picks the one this body means.
+    fn call_symbol(&self, span: Span, context: Option<&str>) -> Option<String> {
+        if let Some(context) = context
+            && let Some(symbol) = self
+                .lowered
+                .call_symbols
+                .get(&(span, Some(context.to_string())))
+        {
+            return Some(symbol.clone());
+        }
+        // A body that is not an impl block resolves against the span alone.
+        self.lowered.call_symbols.get(&(span, None)).cloned()
+    }
+
     /// The compiler's plan for one method of one concrete receiver.
     fn method_plan(&self, receiver: &str, name: &str) -> Option<&'a InstancePlan> {
         self.lowered.instances.iter().find(|plan| {
             plan.name == name
                 && (plan.impl_name.as_deref() == Some(receiver)
                     || plan.receiver.as_deref() == Some(receiver))
-        })
-    }
-
-    /// Whether a block inherits a translatable default body for one method.
-    ///
-    /// A generic default is static-only, like a generic method, so it has no
-    /// symbol a C call could reach.
-    fn inherits(&self, block: &ImplBlock, name: &str) -> bool {
-        let Some(trait_name) = &block.trait_name else {
-            return false;
-        };
-        let Some(declaration) = self.traits.get(&trait_name.text) else {
-            return false;
-        };
-        declaration.methods.iter().any(|method| {
-            method
-                .declarator
-                .name
-                .as_ref()
-                .is_some_and(|method_name| method_name.text == name)
-                && method.body.is_some()
-                && !is_template(&method.declarator)
         })
     }
 
@@ -497,7 +485,12 @@ impl<'a> Backend<'a> {
             };
             parts.push(type_name_text(type_name));
         }
-        Some((names::instance(&qualifier.text, &parts), tag))
+        // The payload enum's C name is the compiler's, like any other instance.
+        let ty = self
+            .plan(&qualifier.text, &parts, None)
+            .and_then(|plan| plan.type_name.clone())
+            .unwrap_or_else(|| qualifier.text.clone());
+        Some((ty, tag))
     }
 
     /// The return type of one trait method.
@@ -875,6 +868,7 @@ impl<'a> Backend<'a> {
             self.enqueue(Instance {
                 name: mention.name,
                 args: mention.args,
+                receiver: None,
             });
         }
     }
@@ -895,11 +889,15 @@ impl<'a> Backend<'a> {
     }
 
     /// The compiler's plan for one specialization.
-    fn plan(&self, name: &str, args: &[String]) -> Option<&'a InstancePlan> {
-        self.lowered
-            .instances
-            .iter()
-            .find(|plan| plan.name == name && plan.args == args)
+    fn plan(
+        &self,
+        name: &str,
+        args: &[String],
+        receiver: Option<&str>,
+    ) -> Option<&'a InstancePlan> {
+        self.lowered.instances.iter().find(|plan| {
+            plan.name == name && plan.args == args && plan.receiver.as_deref() == receiver
+        })
     }
 
     /// The type parameters of a template, in declaration order.
@@ -947,12 +945,16 @@ impl<'a> Backend<'a> {
         for instance in self.instances.borrow().clone() {
             let bindings = self.bindings(&instance);
             let name = instance.c_name(self);
+            if let Some(receiver) = &instance.receiver {
+                output.push_str(&self.method_instance_declaration(&instance, receiver)?);
+                continue;
+            }
             if let Some(record) = self.generic_records.get(&instance.name) {
                 let spelling = self.instance_spelling("void", &bindings);
                 // The layout belongs to the compiler: it printed the header's
                 // types, so it prints this instance too.
                 match self
-                    .plan(&instance.name, &instance.args)
+                    .plan(&instance.name, &instance.args, instance.receiver.as_deref())
                     .and_then(|plan| plan.layout.clone())
                 {
                     Some(layout) => output.push_str(&layout),
@@ -1008,10 +1010,17 @@ impl<'a> Backend<'a> {
             };
             index += 1;
             let name = instance.c_name(self);
+            if let Some(receiver) = &instance.receiver {
+                output.push_str(&self.method_instance_body(&instance, receiver)?);
+                self.drain();
+                continue;
+            }
             if let Some(function) = self.templates.get(&instance.name) {
                 let bindings = self.bindings(&instance);
                 let spelling = self.instance_spelling(&name, &bindings);
                 let declarator = renamed(&function.declarator, &name);
+                // A specialization of a free function has no receiver, so a
+                // call inside it resolves against the span alone.
                 let mut body = Body::instance(
                     self,
                     Some(return_type_in(
@@ -1019,7 +1028,8 @@ impl<'a> Backend<'a> {
                         &function.declarator,
                         spelling,
                     )),
-                    name.clone(),
+                    "void".to_string(),
+                    None,
                     bindings.clone(),
                 );
                 body.parameters(&function.declarator);
@@ -1031,6 +1041,12 @@ impl<'a> Backend<'a> {
                 ));
             }
             if let Some(blocks) = self.generic_impls.get(&instance.name).cloned() {
+                // The compiler records a call inside a template body under the
+                // impl's own name, which is what this body must ask for.
+                let receiver = blocks
+                    .first()
+                    .map(|block| Ty::from_text(&type_name_text(&block.self_type)).base)
+                    .unwrap_or_default();
                 for block in blocks {
                     let bindings = self.block_bindings(block, &instance);
                     let spelling = self.instance_spelling(&name, &bindings);
@@ -1044,6 +1060,7 @@ impl<'a> Backend<'a> {
                             self,
                             Some(return_type_in(method.specs, method.declarator, spelling)),
                             name.clone(),
+                            Some(receiver.clone()),
                             bindings.clone(),
                         );
                         body.parameters(method.declarator);
@@ -1079,65 +1096,6 @@ impl<'a> Backend<'a> {
     }
 }
 
-impl<'a> Backend<'a> {
-    /// Bind a template's type parameters from the argument types of one call.
-    ///
-    /// A parameter that is exactly a type parameter, under any number of
-    /// pointers, binds to the argument type with the same pointers. That is the
-    /// shape these templates take: a value, a pointer to it, or a buffer the
-    /// caller passes by pointer.
-    fn infer(&self, function: &FunctionDecl, actuals: &[Option<Ty>]) -> Option<Instance> {
-        let position = function_position(&function.declarator)?;
-        let DerivedDeclarator::Function(call) = function.declarator.derived.get(position)? else {
-            return None;
-        };
-        let parameters = generic_parameters(&function.declarator);
-        let mut bindings = HashMap::new();
-        for (index, parameter) in call.params.iter().enumerate() {
-            let Some(actual) = actuals.get(index).and_then(|actual| actual.as_ref()) else {
-                continue;
-            };
-            let mut declarator = parameter.declarator.clone().unwrap_or(Declarator {
-                span: parameter.span,
-                name: None,
-                derived: Vec::new(),
-            });
-            declarator.name = None;
-            let text = format!(
-                "{} {}",
-                specs_text_in(&parameter.specs, Spelling::plain()),
-                declarator_text_in(&declarator, Spelling::plain())
-            );
-            let (base, pointers) = names::split(&text);
-            if !parameters.contains(&base) || actual.pointers < pointers {
-                continue;
-            }
-            let mut bound = actual.clone();
-            for _ in 0..pointers {
-                bound = bound.pointee();
-            }
-            bindings.insert(base, ty_text(&bound));
-        }
-        let args = parameters
-            .iter()
-            .map(|parameter| bindings.get(parameter).cloned())
-            .collect::<Option<Vec<_>>>()?;
-        Some(Instance {
-            name: function.declarator.name.as_ref()?.text.clone(),
-            args,
-        })
-    }
-}
-
-/// One resolved type as C spells it.
-fn ty_text(ty: &Ty) -> String {
-    let mut text = ty.base.clone();
-    for _ in 0..ty.pointers {
-        text.push_str(" *");
-    }
-    text
-}
-
 /// The type parameters written on a function declarator, in order.
 fn generic_parameters(declarator: &Declarator) -> Vec<String> {
     let Some(position) = function_position(declarator) else {
@@ -1167,6 +1125,121 @@ fn return_type_in(specs: &DeclSpecs, declarator: &Declarator, spelling: Spelling
         base
     } else {
         format!("{base} {suffix}")
+    }
+}
+
+impl<'a> Backend<'a> {
+    /// The template a generic method instance specializes.
+    ///
+    /// A trait method's default body lives in the trait declaration; an
+    /// inherent generic method lives in the impl template of its record.
+    fn method_template(
+        &self,
+        plan: &InstancePlan,
+    ) -> Option<(&'a DeclSpecs, &'a Declarator, &'a Block)> {
+        if let Some(trait_name) = &plan.trait_name {
+            let declaration = self.traits.get(trait_name)?;
+            let method = declaration.methods.iter().find(|method| {
+                method
+                    .declarator
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| name.text == plan.name)
+            })?;
+            return Some((&method.specs, &method.declarator, method.body.as_ref()?));
+        }
+        let impl_name = plan.impl_name.as_deref()?;
+        let base = impl_name.split('<').next().unwrap_or(impl_name);
+        for block in self.generic_impls.get(base)?.iter() {
+            if let Some(method) = find_method(block, &plan.name) {
+                return Some((&method.specs, &method.declarator, &method.body));
+            }
+        }
+        None
+    }
+
+    /// The type arguments of one generic method instance: the method's own and,
+    /// for a record instance, the receiver's.
+    fn method_bindings(&self, plan: &InstancePlan) -> HashMap<String, String> {
+        let mut bindings = HashMap::new();
+        if let Some((_, declarator, _)) = self.method_template(plan) {
+            for (parameter, arg) in generic_parameters(declarator).iter().zip(&plan.args) {
+                bindings.insert(parameter.clone(), arg.clone());
+            }
+        }
+        if let Some(receiver) = &plan.receiver
+            && let Some(record_plan) = self
+                .lowered
+                .instances
+                .iter()
+                .find(|other| other.type_name.as_deref() == Some(receiver.as_str()))
+            && let Some(record) = self.generic_records.get(&record_plan.name)
+        {
+            for (parameter, arg) in record.generics.iter().zip(&record_plan.args) {
+                bindings.insert(parameter.name.text.clone(), arg.clone());
+            }
+        }
+        bindings
+    }
+
+    /// The declaration of one generic method instance.
+    fn method_instance_declaration(
+        &self,
+        instance: &Instance,
+        receiver: &str,
+    ) -> Result<String, Diagnostic> {
+        let Some(plan) = self.plan(&instance.name, &instance.args, Some(receiver)) else {
+            return Ok(String::new());
+        };
+        let Some((specs, declarator, _)) = self.method_template(plan) else {
+            return Ok(String::new());
+        };
+        let Some(symbol) = &plan.symbol else {
+            return Ok(String::new());
+        };
+        let bindings = self.method_bindings(plan);
+        let spelling = self.instance_spelling(receiver, &bindings);
+        let declarator = renamed(declarator, &names::symbol(symbol));
+        Ok(format!(
+            "static {} {};\n",
+            specs_text_in(specs, spelling),
+            declarator_text_in(&declarator, spelling)
+        ))
+    }
+
+    /// The body of one generic method instance.
+    fn method_instance_body(
+        &self,
+        instance: &Instance,
+        receiver: &str,
+    ) -> Result<String, Diagnostic> {
+        let Some(plan) = self.plan(&instance.name, &instance.args, Some(receiver)) else {
+            return Ok(String::new());
+        };
+        let Some((specs, declarator, body)) = self.method_template(plan) else {
+            return Ok(String::new());
+        };
+        let Some(symbol) = &plan.symbol else {
+            return Ok(String::new());
+        };
+        let bindings = self.method_bindings(plan);
+        let spelling = self.instance_spelling(receiver, &bindings);
+        let declarator = renamed(declarator, &names::symbol(symbol));
+        let returned = return_type_in(specs, &declarator, spelling);
+        let mut printed = Body::instance(
+            self,
+            Some(returned),
+            receiver.to_string(),
+            plan.impl_name.clone(),
+            bindings.clone(),
+        );
+        printed.parameters(&declarator);
+        Ok(format!(
+            "static {} {} {}\n\n",
+            specs_text_in(specs, spelling),
+            declarator_text_in(&declarator, spelling),
+            printed.block(body, 0)?
+        ))
     }
 }
 
@@ -1231,6 +1304,10 @@ struct Body<'a, 'b> {
     /// What `self` means here: the receiver type inside an impl method, `void`
     /// everywhere else.
     self_name: String,
+    /// The receiver this body belongs to, as the compiler names it. One template
+    /// body is lowered once per receiver, so a call inside it is identified by
+    /// this name as well as its span.
+    context: Option<String>,
     /// Type parameters of the specialization this body belongs to, bound to
     /// their concrete spelling. Empty outside a specialization.
     bindings: HashMap<String, String>,
@@ -1251,10 +1328,12 @@ impl<'a, 'b> Body<'a, 'b> {
         return_ty: Option<String>,
         self_name: String,
     ) -> Body<'a, 'b> {
+        let context = Some(self_name.clone());
         Body {
             backend,
             return_ty,
             self_name,
+            context,
             bindings: HashMap::new(),
             instance: false,
             scopes: vec![HashMap::new()],
@@ -1266,12 +1345,14 @@ impl<'a, 'b> Body<'a, 'b> {
         backend: &'a Backend<'b>,
         return_ty: Option<String>,
         self_name: String,
+        context: Option<String>,
         bindings: HashMap<String, String>,
     ) -> Body<'a, 'b> {
         Body {
             backend,
             return_ty,
             self_name,
+            context,
             bindings,
             instance: true,
             scopes: vec![HashMap::new()],
@@ -1739,7 +1820,7 @@ impl<'a, 'b> Body<'a, 'b> {
         // The compiler resolved this call, so the C output prints the symbol it
         // chose. A method call passes its receiver first, which the source
         // arguments do not contain.
-        if let Some(symbol) = self.backend.lowered.call_symbols.get(&span).cloned() {
+        if let Some(symbol) = self.backend.call_symbol(span, self.context.as_deref()) {
             let mut printed = Vec::new();
             if let Expr::Member { object, op, .. } = callee {
                 let receiver = match self.ty(object) {
@@ -1809,7 +1890,10 @@ impl<'a, 'b> Body<'a, 'b> {
                             "a generic call has no C form; name the instance instead",
                         ));
                     }
-                    let symbol = names::trait_value(&qualifier.text, &type_name_text(receiver));
+                    let symbol = names::trait_value(
+                        &qualifier.text,
+                        &type_name_text_with(receiver, self.spelling()),
+                    );
                     return Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")));
                 }
                 if let Some((ty, tag)) = self.backend.variant(qualifier, &[], &name.text) {
@@ -1844,7 +1928,10 @@ impl<'a, 'b> Body<'a, 'b> {
                             "Trait::from<> needs a type argument",
                         ));
                     };
-                    let symbol = names::trait_value(&qualifier.text, &type_name_text(receiver));
+                    let symbol = names::trait_value(
+                        &qualifier.text,
+                        &type_name_text_with(receiver, self.spelling()),
+                    );
                     return Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")));
                 }
                 if let Some((ty, tag)) = self.backend.variant(qualifier, type_args, &name.text) {
@@ -1869,23 +1956,6 @@ impl<'a, 'b> Body<'a, 'b> {
                 span,
                 "a generic call has no C form; name the instance instead",
             ));
-        }
-        if let Expr::Name(name) = callee
-            && let Some(function) = self.backend.templates.get(&name.text).copied()
-        {
-            let actuals = args.iter().map(|arg| self.ty(arg)).collect::<Vec<_>>();
-            let Some(instance) = self.backend.infer(function, &actuals) else {
-                return Err(Diagnostic::new(
-                    span,
-                    format!(
-                        "cannot infer the type arguments of '{}'; name the instance instead",
-                        name.text
-                    ),
-                ));
-            };
-            let symbol = instance.c_name(self.backend);
-            self.backend.enqueue(instance);
-            return Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")));
         }
         Ok(format!(
             "{}({})",

@@ -61,8 +61,8 @@ pub struct Lowered {
     /// backend prints: the template, its concrete arguments spelled as C, and
     /// the type name or symbol the compiler gave it.
     pub instances: Vec<InstancePlan>,
-    /// The symbol every call expression resolved to, by span.
-    pub call_symbols: HashMap<Span, String>,
+    /// The symbol every call expression resolved to, by span and receiver.
+    pub call_symbols: HashMap<(Span, Option<String>), String>,
     /// The symbol every function and method definition emits, by span.
     pub declaration_symbols: HashMap<Span, String>,
     /// Externally visible file-scope functions by C name, in name order. The
@@ -95,8 +95,16 @@ fn instance_plans(
     lowerer: &Lowerer,
     c_types: &HashMap<TypeId, crate::export_instances::CTypeName>,
 ) -> Vec<InstancePlan> {
+    // A plain record is declared under its source tag, so its C spelling is the
+    // tag; a generic instance is spelled by the type printer.
+    let spell = |ty: TypeId| match lowerer.type_names.get(&ty) {
+        Some(tag) => tag.clone(),
+        None => crate::export_instances::type_text(&lowerer.types, c_types, ty),
+    };
     let text = |arg: &GenericArgKey| match arg {
-        GenericArgKey::Type(ty) => crate::export_instances::type_text(&lowerer.types, c_types, *ty),
+        // The C backend declares a plain record under its source tag, so an
+        // argument naming one has to use the same spelling.
+        GenericArgKey::Type(ty) => spell(*ty),
         GenericArgKey::Int(value) => value.to_string(),
     };
     let mut plans = Vec::new();
@@ -104,11 +112,7 @@ fn instance_plans(
         plans.push(InstancePlan {
             name: key.name.clone(),
             args: key.args.iter().map(text).collect(),
-            type_name: Some(crate::export_instances::type_text(
-                &lowerer.types,
-                c_types,
-                *ty,
-            )),
+            type_name: Some(spell(*ty)),
             layout: Some(crate::export_instances::layout_text(
                 &lowerer.types,
                 c_types,
@@ -138,11 +142,7 @@ fn instance_plans(
             args: method.args.iter().map(text).collect(),
             type_name: None,
             symbol: Some(method.symbol.clone()),
-            receiver: Some(crate::export_instances::type_text(
-                &lowerer.types,
-                c_types,
-                method.record,
-            )),
+            receiver: Some(spell(method.record)),
             impl_name: Some(method.impl_name.clone()),
             trait_name: method.trait_name.clone(),
             layout: None,
@@ -579,12 +579,16 @@ pub(super) struct Lowerer {
     pub generic_impl_instances: HashMap<GenericImplInstanceKey, Span>,
     /// Nesting level of the generic instantiation currently being resolved.
     pub instantiation_depth: u32,
+    /// The source tag behind each record and enum type, so a C declaration can
+    /// name a type the way the source does.
+    pub type_names: HashMap<TypeId, String>,
     /// Every generic method the compiler materialized: which template it came
     /// from and what it bound, so the C export can print the body.
     pub method_instances: Vec<MethodInstancePlan>,
-    /// The symbol every call expression resolved to, by span. The C backend
-    /// prints a call under the name the compiler already chose for it.
-    pub call_symbols: HashMap<Span, String>,
+    /// The symbol every call expression resolved to, by span and the receiver
+    /// the body belongs to. One trait default or template method body is
+    /// lowered once per receiver, so the span alone does not identify a call.
+    pub call_symbols: HashMap<(Span, Option<String>), String>,
     /// The symbol every function and method definition emits, by span.
     pub declaration_symbols: HashMap<Span, String>,
     /// Every trait declaration, by name. Registered before any `impl` is
@@ -641,6 +645,7 @@ impl Lowerer {
             type_scopes: vec![TypeScope::default()],
             enum_consts: HashMap::new(),
             generic_records: HashMap::new(),
+            type_names: HashMap::new(),
             method_instances: Vec::new(),
             call_symbols: HashMap::new(),
             declaration_symbols: HashMap::new(),
