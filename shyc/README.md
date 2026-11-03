@@ -71,6 +71,12 @@ clang -c api_wrapper.c -o api_wrapper.o
 clang client.c api_wrapper.o lib.o -o client
 ```
 
+`--emit=c` accepts the same table: a generic use then prints the alias the
+table gives it (`Vec<int>` prints as `vec_int` instead of `Vec_int`), so a
+translated unit and the generated header name one instance the same way. The
+table itself is not printed by that output: an instance is a symbol of its own,
+and the header or wrapper provides it.
+
 The instance table is compile-time input, not C source. `--instances` names the
 concrete generic records, enums, and functions that may cross the C boundary:
 everything else stays internal to its translation unit. Each entry is

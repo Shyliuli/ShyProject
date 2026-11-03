@@ -16,7 +16,43 @@ use crate::ast::{
     Initializer, InitializerKind, MemberDecl, MemberOp, ParamDecl, PostfixOp, Qualifier,
     RecordKind, RecordSpec, StorageClass, TraitDecl, TraitMethod, TypeName, TypeSpecifier, UnaryOp,
 };
+use std::collections::HashMap;
+
 use crate::c::names;
+
+/// How one output spells a type.
+///
+/// Two things vary between the outputs and even between declarations: what
+/// self denotes (a trait signature erases it to void, an impl method keeps its
+/// receiver) and what a generic instance is called (the instance table may give
+/// it a C name of its own). Everything else about a type is fixed, so both
+/// travel together instead of as separate parameters.
+#[derive(Clone, Copy)]
+pub(crate) struct Spelling<'a> {
+    /// What self denotes here.
+    pub self_name: &'a str,
+    /// C name of each generic instance, keyed by the name this backend mangles
+    /// (Vec<int> is keyed as Vec_int). Empty without an instance table.
+    pub aliases: Option<&'a HashMap<String, String>>,
+}
+
+impl<'a> Spelling<'a> {
+    /// The spelling outside a trait signature and without an instance table.
+    pub(crate) fn plain() -> Spelling<'a> {
+        Spelling {
+            self_name: "void",
+            aliases: None,
+        }
+    }
+
+    /// The C name of one generic instance.
+    pub(crate) fn instance(&self, mangled: String) -> String {
+        match self.aliases.and_then(|aliases| aliases.get(&mangled)) {
+            Some(alias) => alias.clone(),
+            None => mangled,
+        }
+    }
+}
 
 /// Printed for a construct a C header cannot express; the host compiler then
 /// reports the generated header instead of accepting a changed meaning.
@@ -265,17 +301,17 @@ pub(crate) fn declarator_uses_generics(declarator: &Declarator) -> bool {
 /// definition, not the declaration. An empty specifier list means C's implicit
 /// `int`.
 pub(crate) fn specs_text(specs: &DeclSpecs) -> String {
-    specs_text_in(specs, "void")
+    specs_text_in(specs, Spelling::plain())
 }
 
 /// Print the type part of declaration specifiers, with self spelled as
-/// self_name.
+/// spelling.
 ///
 /// A trait signature erases self to void, because a trait value stores function
 /// pointers that take the implementing type through void *. An impl method keeps
 /// the concrete type, so the two callers need different spellings of the same
 /// keyword.
-pub(crate) fn specs_text_in(specs: &DeclSpecs, self_name: &str) -> String {
+pub(crate) fn specs_text_in(specs: &DeclSpecs, spelling: Spelling) -> String {
     let mut words = Vec::new();
     for qualifier in &specs.qualifiers {
         words.push(qualifier_text(*qualifier).to_string());
@@ -284,7 +320,7 @@ pub(crate) fn specs_text_in(specs: &DeclSpecs, self_name: &str) -> String {
         words.push("int".to_string());
     }
     for specifier in &specs.type_specs {
-        words.push(specifier_text(specifier, self_name));
+        words.push(specifier_text(specifier, spelling));
     }
     words.join(" ")
 }
@@ -298,40 +334,40 @@ fn qualifier_text(qualifier: Qualifier) -> &'static str {
     }
 }
 
-fn specifier_text(specifier: &TypeSpecifier, self_name: &str) -> String {
+fn specifier_text(specifier: &TypeSpecifier, spelling: Spelling) -> String {
     match specifier {
         TypeSpecifier::Builtin(builtin) => builtin_text(*builtin).to_string(),
         TypeSpecifier::TypedefName(name) => name.text.clone(),
-        TypeSpecifier::Generic(generic) => generic_spec_text(generic),
-        TypeSpecifier::Record(record) => record_text(record),
-        TypeSpecifier::Enum(enumeration) => enum_text(enumeration),
+        TypeSpecifier::Generic(generic) => generic_spec_text(generic, spelling),
+        TypeSpecifier::Record(record) => record_text(record, spelling),
+        TypeSpecifier::Enum(enumeration) => enum_text(enumeration, spelling),
         TypeSpecifier::Atomic(type_name) => {
-            format!("_Atomic({})", type_name_text_in(type_name, self_name))
+            format!("_Atomic({})", type_name_text_in(type_name, spelling))
         }
         // `self` appears only in a trait method signature here. The trait
         // value structure erases the implementing type, so `self *value`
         // prints as `void *value`. A by-value `self` is caught before this
         // printer is used, because `void value` is not a C object.
-        TypeSpecifier::SelfType => self_name.to_string(),
+        TypeSpecifier::SelfType => spelling.self_name.to_string(),
     }
 }
 
 /// A generic use prints as the instance name C can spell: Vec<int> is
 /// Vec_int. The instance itself is a separate declaration, so this is a name,
 /// not a definition.
-fn generic_spec_text(generic: &GenericSpec) -> String {
+fn generic_spec_text(generic: &GenericSpec, spelling: Spelling) -> String {
     let args = generic
         .args
         .iter()
         .map(|arg| match &arg.kind {
-            GenericArgKind::Type(type_name) => type_name_text(type_name),
+            GenericArgKind::Type(type_name) => type_name_text_in(type_name, spelling),
             GenericArgKind::Const(value) => expr_text(value),
         })
         .collect::<Vec<_>>();
-    names::instance(&generic.name.text, &args)
+    spelling.instance(names::instance(&generic.name.text, &args))
 }
 
-fn generic_params_text(params: &[GenericParam]) -> String {
+fn generic_params_text(params: &[GenericParam], spelling: Spelling) -> String {
     if params.is_empty() {
         return String::new();
     }
@@ -346,7 +382,13 @@ fn generic_params_text(params: &[GenericParam]) -> String {
                 let bounds = param
                     .bounds
                     .iter()
-                    .map(|bound| format!("{}{}", bound.name.text, generic_args_text(&bound.args)))
+                    .map(|bound| {
+                        format!(
+                            "{}{}",
+                            bound.name.text,
+                            generic_args_text(&bound.args, spelling)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(" + ");
                 text.push_str(": ");
@@ -359,14 +401,14 @@ fn generic_params_text(params: &[GenericParam]) -> String {
     format!("<{params}>")
 }
 
-fn generic_args_text(args: &[GenericArg]) -> String {
+fn generic_args_text(args: &[GenericArg], spelling: Spelling) -> String {
     if args.is_empty() {
         return String::new();
     }
     let args = args
         .iter()
         .map(|arg| match &arg.kind {
-            GenericArgKind::Type(type_name) => type_name_text(type_name),
+            GenericArgKind::Type(type_name) => type_name_text_in(type_name, spelling),
             GenericArgKind::Const(value) => expr_text(value),
         })
         .collect::<Vec<_>>()
@@ -393,7 +435,7 @@ fn builtin_text(builtin: BuiltinType) -> &'static str {
 ///
 /// Members are indented one level deeper than the record, so a nested
 /// definition stays readable.
-fn record_text(record: &RecordSpec) -> String {
+fn record_text(record: &RecordSpec, spelling: Spelling) -> String {
     let keyword = match record.kind {
         RecordKind::Struct => "struct",
         RecordKind::Union => "union",
@@ -402,7 +444,7 @@ fn record_text(record: &RecordSpec) -> String {
         Some(tag) => format!(" {}", tag.text),
         None => String::new(),
     };
-    let generics = generic_params_text(&record.generics);
+    let generics = generic_params_text(&record.generics, spelling);
     let Some(members) = &record.members else {
         return format!("{keyword}{tag}{generics}");
     };
@@ -421,7 +463,7 @@ fn record_text(record: &RecordSpec) -> String {
 /// C has no payload enum, so a definition with payload variants is printed as
 /// the layout it really has: a tag followed by one union of the payloads. A
 /// plain enum keeps its ordinary `enum` spelling.
-fn enum_text(enumeration: &EnumSpec) -> String {
+fn enum_text(enumeration: &EnumSpec, spelling: Spelling) -> String {
     let underlying = match &enumeration.underlying {
         Some(type_name) => format!("({})", type_name_text(type_name)),
         None => String::new(),
@@ -430,7 +472,7 @@ fn enum_text(enumeration: &EnumSpec) -> String {
         Some(tag) => format!(" {}", tag.text),
         None => String::new(),
     };
-    let generics = generic_params_text(&enumeration.generics);
+    let generics = generic_params_text(&enumeration.generics, spelling);
     let Some(enumerators) = &enumeration.enumerators else {
         return format!("enum{underlying}{tag}{generics}");
     };
@@ -438,7 +480,7 @@ fn enum_text(enumeration: &EnumSpec) -> String {
         .iter()
         .any(|enumerator| enumerator.payload.is_some())
     {
-        return payload_enum_text(enumeration, enumerators);
+        return payload_enum_text(enumeration, enumerators, spelling);
     }
     let mut items = Vec::new();
     for enumerator in enumerators {
@@ -455,7 +497,11 @@ fn enum_text(enumeration: &EnumSpec) -> String {
 /// A payload enum without an explicit storage type uses `int` for its tag, so
 /// the exported header says `int` too. Every payloadless variant still only
 /// contributes its tag value and no union member.
-fn payload_enum_text(enumeration: &EnumSpec, enumerators: &[Enumerator]) -> String {
+fn payload_enum_text(
+    enumeration: &EnumSpec,
+    enumerators: &[Enumerator],
+    spelling: Spelling,
+) -> String {
     let tag_type = match &enumeration.underlying {
         Some(type_name) => type_name_text(type_name),
         None => "int".to_string(),
@@ -464,7 +510,7 @@ fn payload_enum_text(enumeration: &EnumSpec, enumerators: &[Enumerator]) -> Stri
         Some(tag) => format!(" {}", tag.text),
         None => String::new(),
     };
-    let generics = generic_params_text(&enumeration.generics);
+    let generics = generic_params_text(&enumeration.generics, spelling);
     let mut members = Vec::new();
     for enumerator in enumerators {
         if let Some(payload) = &enumerator.payload {
@@ -517,11 +563,11 @@ fn indented(text: &str) -> String {
 /// already has, an array or function suffix appends to it. A suffix applied to
 /// a pointer needs parentheses, which is what separates `*a[3]` from `(*a)[3]`.
 pub(crate) fn declarator_text(declarator: &Declarator) -> String {
-    declarator_text_in(declarator, "void")
+    declarator_text_in(declarator, Spelling::plain())
 }
 
-/// Print one declarator, spelling self as self_name in its parameters.
-pub(crate) fn declarator_text_in(declarator: &Declarator, self_name: &str) -> String {
+/// Print one declarator, spelling self as spelling in its parameters.
+pub(crate) fn declarator_text_in(declarator: &Declarator, spelling: Spelling) -> String {
     let mut text = match &declarator.name {
         Some(name) => name.text.clone(),
         None => String::new(),
@@ -540,11 +586,7 @@ pub(crate) fn declarator_text_in(declarator: &Declarator, self_name: &str) -> St
                 text = format!("{}{}", grouped(&text), array_text(array));
             }
             DerivedDeclarator::Function(function) => {
-                text = format!(
-                    "{}{}",
-                    grouped(&text),
-                    function_text_in(function, self_name)
-                );
+                text = format!("{}{}", grouped(&text), function_text_in(function, spelling));
             }
         }
     }
@@ -568,37 +610,41 @@ fn array_text(array: &ArrayDeclarator) -> String {
     }
 }
 
-fn function_text_in(function: &FunctionDeclarator, self_name: &str) -> String {
+fn function_text_in(function: &FunctionDeclarator, spelling: Spelling) -> String {
     let mut params = Vec::new();
     for param in &function.params {
-        params.push(parameter_text_in(param, self_name));
+        params.push(parameter_text_in(param, spelling));
     }
     if function.variadic {
         params.push("...".to_string());
     }
     format!(
         "{}({})",
-        generic_params_text(&function.generics),
+        generic_params_text(&function.generics, spelling),
         params.join(", ")
     )
 }
 
-fn parameter_text_in(param: &ParamDecl, self_name: &str) -> String {
-    declare_text_in(&param.specs, param.declarator.as_ref(), self_name)
+fn parameter_text_in(param: &ParamDecl, spelling: Spelling) -> String {
+    declare_text_in(&param.specs, param.declarator.as_ref(), spelling)
 }
 
 pub(crate) fn type_name_text(type_name: &TypeName) -> String {
-    type_name_text_in(type_name, "void")
+    type_name_text_in(type_name, Spelling::plain())
 }
 
-fn type_name_text_in(type_name: &TypeName, self_name: &str) -> String {
-    declare_text_in(&type_name.specs, type_name.declarator.as_ref(), self_name)
+fn type_name_text_in(type_name: &TypeName, spelling: Spelling) -> String {
+    declare_text_in(&type_name.specs, type_name.declarator.as_ref(), spelling)
 }
 
 /// A specifier list followed by an optional declarator.
-fn declare_text_in(specs: &DeclSpecs, declarator: Option<&Declarator>, self_name: &str) -> String {
-    let base = specs_text_in(specs, self_name);
-    match declarator.map(|declarator| declarator_text_in(declarator, self_name)) {
+fn declare_text_in(
+    specs: &DeclSpecs,
+    declarator: Option<&Declarator>,
+    spelling: Spelling,
+) -> String {
+    let base = specs_text_in(specs, spelling);
+    match declarator.map(|declarator| declarator_text_in(declarator, spelling)) {
         Some(text) if !text.is_empty() => format!("{base} {text}"),
         _ => base,
     }
@@ -613,6 +659,12 @@ fn declare_text_in(specs: &DeclSpecs, declarator: Option<&Declarator>, self_name
 /// A header needs expressions only in integer constant expressions, so no
 /// precedence table is needed: wrapping each operator's operands keeps the
 /// meaning of the source without having to decide what binds tighter.
+/// Print a constant expression; enums, array bounds, and generic arguments use
+/// the same spelling as the header.
+pub(crate) fn expression_text(expression: &Expr) -> String {
+    expr_text(expression)
+}
+
 fn expr_text(expression: &Expr) -> String {
     match expression {
         Expr::Number(literal) => literal.text.clone(),
@@ -638,7 +690,7 @@ fn expr_text(expression: &Expr) -> String {
             format!(
                 "{}{}::{}",
                 qualifier.text,
-                generic_args_text(args),
+                generic_args_text(args, Spelling::plain()),
                 name.text
             )
         }
@@ -701,7 +753,7 @@ fn expr_text(expression: &Expr) -> String {
             format!(
                 "{}{}({args})",
                 expr_text(callee),
-                generic_args_text(type_args)
+                generic_args_text(type_args, Spelling::plain())
             )
         }
         Expr::Index { array, index, .. } => {

@@ -27,14 +27,16 @@ use crate::ast::{
 };
 use crate::c::names;
 use crate::c::types::{
-    declaration_uses_generics, declarator_text, declarator_text_in, declarator_uses_generics,
-    specs_text, specs_text_in, specs_use_generics, trait_value_text, type_name_text,
+    Spelling, declarator_text_in, specs_text_in, trait_value_text, type_name_text,
 };
 use crate::source::{Diagnostic, Span};
 
 /// Render the whole unit as one C translation unit.
-pub fn render(unit: &TranslationUnit) -> Result<String, Diagnostic> {
-    Backend::new(unit).render(unit)
+pub fn render(
+    unit: &TranslationUnit,
+    aliases: &HashMap<String, String>,
+) -> Result<String, Diagnostic> {
+    Backend::new(unit, aliases).render(unit)
 }
 
 /// One C type, as this backend needs it: a base name and a pointer depth.
@@ -83,10 +85,13 @@ struct Backend<'a> {
     impls: HashMap<String, Vec<&'a ImplBlock>>,
     /// Every trait declaration, by name.
     traits: HashMap<String, &'a TraitDecl>,
+    /// The C name the instance table gives each generic instance, keyed by the
+    /// name this backend mangles.
+    aliases: &'a HashMap<String, String>,
 }
 
 impl<'a> Backend<'a> {
-    fn new(unit: &'a TranslationUnit) -> Backend<'a> {
+    fn new(unit: &'a TranslationUnit, aliases: &'a HashMap<String, String>) -> Backend<'a> {
         let mut backend = Backend {
             objects: HashMap::new(),
             functions: HashMap::new(),
@@ -94,6 +99,7 @@ impl<'a> Backend<'a> {
             enums: HashMap::new(),
             impls: HashMap::new(),
             traits: HashMap::new(),
+            aliases,
         };
         for item in &unit.items {
             match item {
@@ -114,6 +120,14 @@ impl<'a> Backend<'a> {
             }
         }
         backend
+    }
+
+    /// How this output spells a type, with self as self_name.
+    fn spelling<'s>(&'s self, self_name: &'s str) -> Spelling<'s> {
+        Spelling {
+            self_name,
+            aliases: Some(self.aliases),
+        }
     }
 
     fn declaration(&mut self, declaration: &Declaration) {
@@ -184,8 +198,9 @@ impl<'a> Backend<'a> {
     /// A function declarator answers with its return type: only a call asks for
     /// it, and the parameters are never part of a name.
     fn ty_of(&self, specs: &DeclSpecs, declarator: &Declarator) -> Ty {
+        let spelling = self.spelling("void");
         match function_position(declarator) {
-            Some(position) => Ty::from_text(&return_type_text(specs, declarator, position)),
+            Some(position) => Ty::from_text(&self.return_type_text_at(specs, declarator, position)),
             None => {
                 // The declared name is not part of the type: only the
                 // operators around it are.
@@ -193,10 +208,37 @@ impl<'a> Backend<'a> {
                 anonymous.name = None;
                 Ty::from_text(&format!(
                     "{} {}",
-                    specs_text_in(specs, "void"),
-                    declarator_text(&anonymous)
+                    specs_text_in(specs, spelling),
+                    declarator_text_in(&anonymous, spelling)
                 ))
             }
+        }
+    }
+
+    /// The type a function returns, spelled for this output.
+    fn return_type_text(&self, function: &FunctionDecl) -> String {
+        let position = function_position(&function.declarator).unwrap_or(0);
+        self.return_type_text_at(&function.specs, &function.declarator, position)
+    }
+
+    fn return_type_text_at(
+        &self,
+        specs: &DeclSpecs,
+        declarator: &Declarator,
+        position: usize,
+    ) -> String {
+        let spelling = self.spelling("void");
+        let returned = Declarator {
+            span: declarator.span,
+            name: None,
+            derived: declarator.derived[position + 1..].to_vec(),
+        };
+        let base = specs_text_in(specs, spelling);
+        let suffix = declarator_text_in(&returned, spelling);
+        if suffix.is_empty() {
+            base
+        } else {
+            format!("{base} {suffix}")
         }
     }
 
@@ -332,10 +374,11 @@ impl<'a> Backend<'a> {
 
     /// Print one file-scope declaration as a definition, initializer included.
     fn item_declaration(&self, declaration: &Declaration) -> Result<String, Diagnostic> {
-        if declaration_uses_generics(declaration) {
+        if is_template_declaration(declaration) {
             return Ok(String::new());
         }
-        let specs = specs_text_in(&declaration.specs, "void");
+        let spelling = self.spelling("void");
+        let specs = specs_text_in(&declaration.specs, spelling);
         if declaration.declarators.is_empty() {
             // An enum's tag names its type too, and C has no forward enum
             // declaration, so the typedef is written with the definition.
@@ -350,7 +393,7 @@ impl<'a> Backend<'a> {
         let mut globals = Body::new(self, None);
         let mut declarators = Vec::new();
         for declarator in &declaration.declarators {
-            let mut text = declarator_text(&declarator.declarator);
+            let mut text = declarator_text_in(&declarator.declarator, spelling);
             if let Some(initializer) = &declarator.init {
                 text.push_str(" = ");
                 text.push_str(&globals.initializer(initializer)?);
@@ -363,15 +406,16 @@ impl<'a> Backend<'a> {
     fn function(&self, function: &FunctionDecl) -> Result<String, Diagnostic> {
         // A generic function is a template: C has no spelling for it, and each
         // instance is a symbol of its own, named by the instance table.
-        if specs_use_generics(&function.specs) || declarator_uses_generics(&function.declarator) {
+        if is_template(&function.declarator) {
             return Ok(String::new());
         }
+        let spelling = self.spelling("void");
         let signature = format!(
             "{} {}",
-            specs_text_in(&function.specs, "void"),
-            declarator_text(&function.declarator)
+            specs_text_in(&function.specs, spelling),
+            declarator_text_in(&function.declarator, spelling)
         );
-        let mut body = Body::new(self, Some(return_type_text_for(function)));
+        let mut body = Body::new(self, Some(self.return_type_text(function)));
         body.parameters(&function.declarator);
         Ok(format!("{signature} {}", body.block(&function.body, 0)?))
     }
@@ -392,8 +436,8 @@ impl<'a> Backend<'a> {
             let linkage = if method.specs.is_pub { "" } else { "static " };
             output.push_str(&format!(
                 "{linkage}{} {};\n",
-                specs_text_in(&method.specs, &receiver),
-                declarator_text_in(&declarator, &receiver)
+                specs_text_in(&method.specs, self.spelling(&receiver)),
+                declarator_text_in(&declarator, self.spelling(&receiver))
             ));
         }
         if let Some(trait_name) = &block.trait_name {
@@ -420,10 +464,10 @@ impl<'a> Backend<'a> {
             let linkage = if method.specs.is_pub { "" } else { "static " };
             let signature = format!(
                 "{linkage}{} {}",
-                specs_text_in(&method.specs, &receiver),
-                declarator_text_in(&declarator, &receiver)
+                specs_text_in(&method.specs, self.spelling(&receiver)),
+                declarator_text_in(&declarator, self.spelling(&receiver))
             );
-            let mut body = Body::named(self, Some(return_type_text_for(method)), receiver.clone());
+            let mut body = Body::named(self, Some(self.return_type_text(method)), receiver.clone());
             body.parameters(&method.declarator);
             output.push_str(&format!("{signature} {}", body.block(&method.body, 0)?));
             output.push_str("\n\n");
@@ -477,6 +521,32 @@ impl<'a> Backend<'a> {
     }
 }
 
+/// Whether a declaration declares a template rather than naming an instance.
+///
+/// A generic function or a generic record definition has no C spelling, so it
+/// prints nothing. A declaration that merely mentions an instance does print:
+/// its type is a concrete name such as Box_int.
+fn is_template(declarator: &Declarator) -> bool {
+    declarator.derived.iter().any(|derived| match derived {
+        DerivedDeclarator::Function(function) => !function.generics.is_empty(),
+        _ => false,
+    })
+}
+
+fn is_template_declaration(declaration: &Declaration) -> bool {
+    for specifier in &declaration.specs.type_specs {
+        match specifier {
+            TypeSpecifier::Record(record) if !record.generics.is_empty() => return true,
+            TypeSpecifier::Enum(enumeration) if !enumeration.generics.is_empty() => return true,
+            _ => {}
+        }
+    }
+    declaration
+        .declarators
+        .iter()
+        .any(|declarator| is_template(&declarator.declarator))
+}
+
 /// The forward typedef of a record definition, if the specifier list is one.
 fn forward_record(specs: &DeclSpecs) -> Option<String> {
     let [TypeSpecifier::Record(record)] = &specs.type_specs[..] else {
@@ -503,27 +573,6 @@ fn function_position(declarator: &Declarator) -> Option<usize> {
 
 fn has_function(declarator: &Declarator) -> bool {
     function_position(declarator).is_some()
-}
-
-/// The type a function returns, from its specifier list and declarator.
-fn return_type_text(specs: &DeclSpecs, declarator: &Declarator, position: usize) -> String {
-    let returned = Declarator {
-        span: declarator.span,
-        name: None,
-        derived: declarator.derived[position + 1..].to_vec(),
-    };
-    let base = specs_text_in(specs, "void");
-    let suffix = declarator_text(&returned);
-    if suffix.is_empty() {
-        base
-    } else {
-        format!("{base} {suffix}")
-    }
-}
-
-fn return_type_text_for(function: &FunctionDecl) -> String {
-    let position = function_position(&function.declarator).unwrap_or(0);
-    return_type_text(&function.specs, &function.declarator, position)
 }
 
 fn find_method<'a>(block: &'a ImplBlock, name: &str) -> Option<&'a FunctionDecl> {
@@ -596,7 +645,10 @@ impl<'a, 'b> Body<'a, 'b> {
             };
             let ty = match &parameter.declarator {
                 Some(declarator) => self.backend.ty_of(&parameter.specs, declarator),
-                None => Ty::from_text(&specs_text(&parameter.specs)),
+                None => Ty::from_text(&specs_text_in(
+                    &parameter.specs,
+                    self.backend.spelling("void"),
+                )),
             };
             self.bind(&name.text, ty);
         }
@@ -778,10 +830,13 @@ impl<'a, 'b> Body<'a, 'b> {
     }
 
     fn declaration(&mut self, declaration: &Declaration) -> Result<String, Diagnostic> {
-        let specs = specs_text_in(&declaration.specs, &self.self_name);
+        let specs = specs_text_in(&declaration.specs, self.backend.spelling(&self.self_name));
         let mut declarators = Vec::new();
         for declarator in &declaration.declarators {
-            let mut text = declarator_text_in(&declarator.declarator, &self.self_name);
+            let mut text = declarator_text_in(
+                &declarator.declarator,
+                self.backend.spelling(&self.self_name),
+            );
             if let Some(initializer) = &declarator.init {
                 text.push_str(" = ");
                 text.push_str(&self.initializer(initializer)?);
