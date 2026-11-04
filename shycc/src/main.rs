@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, bail};
 
+mod probe;
+
 static TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +54,10 @@ struct Options {
     /// this stops after the frontend.
     emit: Option<String>,
     emit_debug_info: bool,
+    /// `--constfn-probe`: ask the compiler for const-fn probe rounds and run
+    /// them in the emulator. Explicit opt-in only, and the final image is never
+    /// the thing that is probed.
+    probe: bool,
     compile_args: Vec<String>,
     /// `-Wl,` items, forwarded to clang; the Shy linker validates them itself.
     link_args: Vec<String>,
@@ -116,6 +122,7 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         sysroot: None,
         emit: None,
         emit_debug_info: false,
+        probe: false,
         compile_args: Vec::new(),
         link_args: Vec::new(),
         inputs: Vec::new(),
@@ -171,6 +178,7 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                 opts.emit = Some(what.to_string());
             }
             "-###" => opts.print_only = true,
+            "--constfn-probe" | "--probe" => opts.probe = true,
             "-save-temps" | "--save-temps" => opts.save_temps = true,
             "-E" => opts.stage = Stage::Preprocess,
             "-S" => opts.stage = Stage::Asm,
@@ -267,6 +275,31 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
 
     if opts.emit_debug_info && !opts.emit_source_lines {
         bail!("--shy-emit-debug-info requires --shy-emit-source-lines");
+    }
+
+    if opts.probe {
+        if opts.stage != Stage::Link {
+            bail!(
+                "`--constfn-probe` needs a final link; it cannot be combined with \
+                 -E, -S, or -c"
+            );
+        }
+        if opts.emit.is_some() {
+            bail!("`--constfn-probe` needs a final link; it cannot be combined with --emit");
+        }
+        if opts.print_only {
+            bail!("`--constfn-probe` cannot be combined with -###, which only prints commands");
+        }
+        if opts.backend != Backend::Shyc {
+            bail!("`--constfn-probe` requires the Shy pipeline (`--backend shyc`)");
+        }
+        if opts.target != "shy" {
+            bail!(
+                "`--constfn-probe` only applies to the shy target; `{}` is linked by \
+                 clang and produces no Shy image to probe",
+                opts.target
+            );
+        }
     }
 
     Ok(opts)
@@ -388,6 +421,12 @@ fn forwarded_to_shyc(arg: &str) -> bool {
 }
 
 fn run(mut opts: Options) -> Result<()> {
+    if opts.probe {
+        // Probe rounds replace the ordinary pipeline: they need the compiler's
+        // requests, which `shyc` does not emit yet. Refuse before building
+        // anything rather than fall back to running the final image.
+        probe::rounds()?;
+    }
     let repo = repo_root();
     opts.target = normalize_target(&opts.target);
     if opts.target == "host" {
@@ -1162,6 +1201,8 @@ fn print_usage() {
          outputs: -o <file>, --sym <file>, -save-temps, -###,
          \x20 --emit=c|c-header|c-wrapper|shy|llvm (print text instead of linking)\n\
          debug: --shy-emit-source-lines, --shy-emit-debug-info\n\
+         probe: --constfn-probe (alias --probe) runs const-fn probe rounds in the\n\
+         \x20 emulator for a shy final link; opt-in only, not wired up yet\n\
          inputs: .shyc/.c, .shy, .sobj\n\
          backend: --backend shyc|chibicc (default shyc)\n\
          target: --target <name> (default shy); rv64/riscv64, rv32/riscv32, x64/x86_64,\n\
