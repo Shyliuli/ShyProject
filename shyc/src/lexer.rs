@@ -62,8 +62,40 @@ pub struct Token {
     pub leading_space: bool,
 }
 
+/// The source spelling of one token, exactly as it was written.
+///
+/// Preprocessing keeps literal bodies without their quotes and keeps a
+/// `Newline` token, so a caller that wants the text back asks here instead of
+/// rebuilding it from the kind. Probe images bake these spellings, so this is
+/// the one definition of the spelling.
+pub fn spelling(token: &Token) -> String {
+    match &token.kind {
+        TokenKind::Ident(text) | TokenKind::Number(text) | TokenKind::Punct(text) => text.clone(),
+        TokenKind::StringLiteral { prefix, raw } => format!("{prefix}\"{raw}\""),
+        TokenKind::CharLiteral { prefix, raw } => format!("{prefix}'{raw}'"),
+        TokenKind::Newline => "\n".to_string(),
+        TokenKind::Eof => String::new(),
+    }
+}
+
 /// Lexes `file` into tokens, ending with exactly one [`TokenKind::Eof`].
 pub fn lex(sources: &SourceMap, file: FileId) -> Result<Vec<Token>, Diagnostic> {
+    let (tokens, error) = scan(sources, file, false);
+    match error {
+        Some(error) => Err(error),
+        None => Ok(tokens),
+    }
+}
+
+/// Lexes a buffer that is still being typed, reporting the first error.
+///
+/// The editor must keep coloring a half-written line, so a broken literal or
+/// byte is reported once and skipped instead of ending the scan.
+pub fn lex_partial(sources: &SourceMap, file: FileId) -> (Vec<Token>, Option<Diagnostic>) {
+    scan(sources, file, true)
+}
+
+fn scan(sources: &SourceMap, file: FileId, recover: bool) -> (Vec<Token>, Option<Diagnostic>) {
     let text = &sources.file(file).text;
     let cooked = remove_line_continuations(text);
     let mut lexer = Lexer {
@@ -75,9 +107,11 @@ pub fn lex(sources: &SourceMap, file: FileId) -> Result<Vec<Token>, Diagnostic> 
         at_line_start: true,
         leading_space: false,
         tokens: Vec::new(),
+        recover,
+        error: None,
     };
-    lexer.run()?;
-    Ok(lexer.tokens)
+    let run_error = lexer.run().err();
+    (lexer.tokens, lexer.error.or(run_error))
 }
 
 /// C punctuators plus Shy's `::`, longest first.
@@ -140,6 +174,10 @@ struct Lexer<'a> {
     at_line_start: bool,
     leading_space: bool,
     tokens: Vec<Token>,
+    /// Editor mode: skip a bad literal or byte after reporting it once.
+    recover: bool,
+    /// The first error seen in editor mode.
+    error: Option<Diagnostic>,
 }
 
 impl Lexer<'_> {
@@ -173,6 +211,16 @@ impl Lexer<'_> {
             leading_space: false,
         };
         self.tokens.push(eof);
+        Ok(())
+    }
+
+    /// Reports an error. In editor mode the scan continues, so the caller
+    /// sees the first diagnostic but keeps the rest of the file.
+    fn reported(&mut self, error: Diagnostic) -> Result<(), Diagnostic> {
+        if !self.recover {
+            return Err(error);
+        }
+        self.error.get_or_insert(error);
         Ok(())
     }
 
@@ -230,10 +278,10 @@ impl Lexer<'_> {
                         self.pos += 1;
                     }
                     if !terminated {
-                        return Err(Diagnostic::new(
+                        self.reported(Diagnostic::new(
                             self.span_to_eof(start),
                             "unterminated block comment",
-                        ));
+                        ))?;
                     }
                     self.leading_space = true;
                 }
@@ -289,7 +337,11 @@ impl Lexer<'_> {
             return Ok(());
         }
         if byte == b'\\' {
-            return Err(self.backslash_error());
+            let error = self.backslash_error();
+            self.reported(error)?;
+            self.pos += 1;
+            self.leading_space = true;
+            return Ok(());
         }
         if let Some(width) = self.ident_start(start) {
             self.lex_ident(width)?;
@@ -379,10 +431,12 @@ impl Lexer<'_> {
         let content_start = self.pos;
         loop {
             let Some((c, width)) = self.char_at(self.pos) else {
-                return Err(Diagnostic::new(
+                self.reported(Diagnostic::new(
                     self.span_to_eof(start),
                     format!("unterminated {what} literal"),
-                ));
+                ))?;
+                let raw = self.text(content_start, self.pos);
+                return Ok((raw, self.pos));
             };
             if c == quote as char {
                 let raw = self.text(content_start, self.pos);
@@ -392,10 +446,12 @@ impl Lexer<'_> {
             if c == '\n' {
                 // A bare newline is not allowed inside a literal; a continued
                 // line was already joined, so this really is the end.
-                return Err(Diagnostic::new(
+                self.reported(Diagnostic::new(
                     self.span(start, self.pos),
                     format!("unterminated {what} literal"),
-                ));
+                ))?;
+                let raw = self.text(content_start, self.pos);
+                return Ok((raw, self.pos));
             }
             if c == '\\' {
                 // Skip the escaped character so `\"` cannot close the literal.
@@ -423,15 +479,19 @@ impl Lexer<'_> {
             }
         }
         let Some((c, width)) = self.char_at(start) else {
-            return Err(Diagnostic::new(
+            self.reported(Diagnostic::new(
                 self.span_to_eof(start),
                 "invalid UTF-8 in source",
-            ));
+            ))?;
+            self.pos = self.bytes.len();
+            return Ok(());
         };
-        Err(Diagnostic::new(
+        self.reported(Diagnostic::new(
             self.span(start, start + width),
             format!("unexpected character {c:?} in source"),
-        ))
+        ))?;
+        self.pos = start + width;
+        Ok(())
     }
 
     /// `\u`/`\U` would be a C universal character name; a lone `\` is usually a

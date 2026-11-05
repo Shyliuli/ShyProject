@@ -3,6 +3,10 @@ name = "emu"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "emu"
+path = "src/lib.rs"
+
 [[bin]]
 name = "emu"
 path = "src/main.rs"

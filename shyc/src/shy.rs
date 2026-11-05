@@ -51,7 +51,7 @@
 //! `emit_source_comments` it emits a best-effort `//source file:<offset>`
 //! comment before instructions that have a span.
 
-mod abi;
+pub(crate) mod abi;
 mod call;
 mod cmp;
 mod frame;

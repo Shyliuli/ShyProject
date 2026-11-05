@@ -2,255 +2,114 @@
 #define SHY_STD_FMT_SHYH
 
 #include <stdio.h>
+#include <core/comptime.shyh>
 #include <alloc/string.shyh>
 #include <alloc/debug.shyh>
 #include <alloc/display.shyh>
 #include <std/io.shyh>
 
-/* Format strings over erased arguments.
+/* Formatting over the Display and Debug traits.
 
    {} renders with Display, {:?} with Debug, {{ and }} are literal braces, and
-   any other specifier is rejected by the compiler. One argument is one void
-   pointer plus the two trait values that know how to render it, so a single
-   format() serves every combination of types.
+   {name} inserts that variable. The compiler checks a literal format string
+   and expands the call itself: the literal pieces are pushed into a String and
+   each argument is rendered by one statically dispatched display/debug call,
+   so nothing is parsed at run time. The names the expansion lands on are
+   below; they are trivial on purpose.
 
-   println!(...), format!(...), and scanln!(...) are the compile-time
-   spellings: the compiler checks the literal format string and turns the call
-   into the wrapper for its argument count. */
+   scanln! is the exception: it hands its string to sscanf, which reads the C
+   conversions at run time, so it keeps one wrapper per argument count. Those
+   wrappers are generated at the end of this file. */
 
-struct FormatArg {
-    void *value;
-    Display display;
-    Debug debug;
-};
-
-fn format_arg<A: Debug + Display>(A *value) -> FormatArg {
-    FormatArg argument = {(void *)value, Display::from<A>(), Debug::from<A>()};
-    return argument;
+fn fmt_begin(void) -> String {
+    return String::new();
 }
 
-fn format(Str fmt, FormatArg *args, int count) -> String {
-    let mut out = String::new();
-    int i = 0;
-    int next = 0;
-    while (i < fmt.len) {
-        if (fmt.data[i] == '{' && i + 1 < fmt.len && fmt.data[i + 1] == '{') {
-            fmt_putc(&out, '{');
-            i = i + 2;
-            continue;
+fn fmt_display<A: Display>(A value, String *out) -> int {
+    return value.display(out);
+}
+
+fn fmt_debug<A: Debug>(A value, String *out) -> int {
+    return value.debug(out);
+}
+
+/* Ends println!: write the built line to the global writer. */
+fn fmt_line(String *line) -> int {
+    let mut out = global_writer();
+    return out.write_line(line);
+}
+
+/* sscanf writes through one pointer per conversion, so scanln! needs a typed
+   wrapper for every arity. scanln_generation(8) sets the largest one, the same
+   limit the compiler enforces.
+
+   The wrappers are text, and text is built with the ordinary String the rest
+   of this file already uses: push_cstr for the fixed pieces, push for one
+   character, and fmt_unsigned for the arity number. tokens_from_text then
+   hands the finished source to the compiler's lexer. */
+
+const fn append_value_name(String *out, int index) {
+    String::push(out, 'a' + index);
+}
+
+const fn append_type_name(String *out, int index) {
+    String::push(out, 'A' + index);
+}
+
+/* "<A, B, C>" */
+const fn append_type_parameters(String *out, int count) {
+    String::push_cstr(out, "<");
+    for (int i = 0; i < count; i++) {
+        if (i > 0) {
+            String::push_cstr(out, ", ");
         }
-        if (fmt.data[i] == '}' && i + 1 < fmt.len && fmt.data[i + 1] == '}') {
-            fmt_putc(&out, '}');
-            i = i + 2;
-            continue;
-        }
-        if (fmt.data[i] == '{') {
-            int close = i + 1;
-            while (close < fmt.len && fmt.data[close] != '}') {
-                close = close + 1;
-            }
-            if (close < fmt.len && next < count) {
-                int width = close - i - 1;
-                let mut render = args[next];
-                if (width == 0) {
-                    render.display.display(render.value, &out);
-                    next = next + 1;
-                } else if (width == 2 && fmt.data[i + 1] == ':' && fmt.data[i + 2] == '?') {
-                    render.debug.debug(render.value, &out);
-                    next = next + 1;
-                }
-                i = close + 1;
-                continue;
-            }
-        }
-        fmt_putc(&out, fmt.data[i]);
-        i = i + 1;
+        append_type_name(out, i);
     }
-    return out;
+    String::push_cstr(out, ">");
 }
 
-fn format0(const char *fmt) -> String {
-    return format(Str::from_cstr(fmt), 0, 0);
+/* "const char *fmt, A *a, B *b" */
+const fn append_pointer_parameters(String *out, int count) {
+    String::push_cstr(out, "const char *fmt");
+    for (int i = 0; i < count; i++) {
+        String::push_cstr(out, ", ");
+        append_type_name(out, i);
+        String::push_cstr(out, " *");
+        append_value_name(out, i);
+    }
 }
 
-fn format1<A: Debug + Display>(const char *fmt, A a) -> String {
-    FormatArg args[1];
-    args[0] = format_arg(&a);
-    return format(Str::from_cstr(fmt), args, 1);
+/* ", a, b" */
+const fn append_passed_arguments(String *out, int count) {
+    for (int i = 0; i < count; i++) {
+        String::push_cstr(out, ", ");
+        append_value_name(out, i);
+    }
 }
 
-fn format2<A: Debug + Display, B: Debug + Display>(const char *fmt, A a, B b) -> String {
-    FormatArg args[2];
-    args[0] = format_arg(&a);
-    args[1] = format_arg(&b);
-    return format(Str::from_cstr(fmt), args, 2);
+const fn scanln_wrapper(int count) -> String {
+    let mut text = String::new();
+    String::push_cstr(&text, "fn scanln");
+    fmt_unsigned(&text, (unsigned int)count);
+    append_type_parameters(&text, count);
+    String::push_cstr(&text, "(");
+    append_pointer_parameters(&text, count);
+    String::push_cstr(&text, ") -> int { let mut line = String::new(); get_line(&line); return sscanf((const char *)line.data(), fmt");
+    append_passed_arguments(&text, count);
+    String::push_cstr(&text, "); }");
+    return text;
 }
 
-fn format3<A: Debug + Display, B: Debug + Display, C: Debug + Display>(const char *fmt, A a, B b, C c) -> String {
-    FormatArg args[3];
-    args[0] = format_arg(&a);
-    args[1] = format_arg(&b);
-    args[2] = format_arg(&c);
-    return format(Str::from_cstr(fmt), args, 3);
+const fn scanln_generation(int count) -> Tokens {
+    let mut text = String::new();
+    for (int n = 1; n <= count; n++) {
+        String::push_cstr(&text, " ");
+        let wrapper = scanln_wrapper(n);
+        String::push_str(&text, wrapper.view);
+    }
+    return tokens_from_text(text.view.data);
 }
 
-fn format4<A: Debug + Display, B: Debug + Display, C: Debug + Display, D: Debug + Display>(const char *fmt, A a, B b, C c, D d) -> String {
-    FormatArg args[4];
-    args[0] = format_arg(&a);
-    args[1] = format_arg(&b);
-    args[2] = format_arg(&c);
-    args[3] = format_arg(&d);
-    return format(Str::from_cstr(fmt), args, 4);
-}
-
-fn format5<A: Debug + Display, B: Debug + Display, C: Debug + Display, D: Debug + Display, E: Debug + Display>(const char *fmt, A a, B b, C c, D d, E e) -> String {
-    FormatArg args[5];
-    args[0] = format_arg(&a);
-    args[1] = format_arg(&b);
-    args[2] = format_arg(&c);
-    args[3] = format_arg(&d);
-    args[4] = format_arg(&e);
-    return format(Str::from_cstr(fmt), args, 5);
-}
-
-fn format6<A: Debug + Display, B: Debug + Display, C: Debug + Display, D: Debug + Display, E: Debug + Display, F: Debug + Display>(const char *fmt, A a, B b, C c, D d, E e, F f) -> String {
-    FormatArg args[6];
-    args[0] = format_arg(&a);
-    args[1] = format_arg(&b);
-    args[2] = format_arg(&c);
-    args[3] = format_arg(&d);
-    args[4] = format_arg(&e);
-    args[5] = format_arg(&f);
-    return format(Str::from_cstr(fmt), args, 6);
-}
-
-fn format7<A: Debug + Display, B: Debug + Display, C: Debug + Display, D: Debug + Display, E: Debug + Display, F: Debug + Display, G: Debug + Display>(const char *fmt, A a, B b, C c, D d, E e, F f, G g) -> String {
-    FormatArg args[7];
-    args[0] = format_arg(&a);
-    args[1] = format_arg(&b);
-    args[2] = format_arg(&c);
-    args[3] = format_arg(&d);
-    args[4] = format_arg(&e);
-    args[5] = format_arg(&f);
-    args[6] = format_arg(&g);
-    return format(Str::from_cstr(fmt), args, 7);
-}
-
-fn format8<A: Debug + Display, B: Debug + Display, C: Debug + Display, D: Debug + Display, E: Debug + Display, F: Debug + Display, G: Debug + Display, H: Debug + Display>(const char *fmt, A a, B b, C c, D d, E e, F f, G g, H h) -> String {
-    FormatArg args[8];
-    args[0] = format_arg(&a);
-    args[1] = format_arg(&b);
-    args[2] = format_arg(&c);
-    args[3] = format_arg(&d);
-    args[4] = format_arg(&e);
-    args[5] = format_arg(&f);
-    args[6] = format_arg(&g);
-    args[7] = format_arg(&h);
-    return format(Str::from_cstr(fmt), args, 8);
-}
-
-fn println0(const char *fmt) -> int {
-    let mut line = format0(fmt);
-    let mut out = global_writer();
-    return out.write_line(&line);
-}
-
-fn println1<A: Debug + Display>(const char *fmt, A a) -> int {
-    let mut line = format1(fmt, a);
-    let mut out = global_writer();
-    return out.write_line(&line);
-}
-
-fn println2<A: Debug + Display, B: Debug + Display>(const char *fmt, A a, B b) -> int {
-    let mut line = format2(fmt, a, b);
-    let mut out = global_writer();
-    return out.write_line(&line);
-}
-
-fn println3<A: Debug + Display, B: Debug + Display, C: Debug + Display>(const char *fmt, A a, B b, C c) -> int {
-    let mut line = format3(fmt, a, b, c);
-    let mut out = global_writer();
-    return out.write_line(&line);
-}
-
-fn println4<A: Debug + Display, B: Debug + Display, C: Debug + Display, D: Debug + Display>(const char *fmt, A a, B b, C c, D d) -> int {
-    let mut line = format4(fmt, a, b, c, d);
-    let mut out = global_writer();
-    return out.write_line(&line);
-}
-
-fn println5<A: Debug + Display, B: Debug + Display, C: Debug + Display, D: Debug + Display, E: Debug + Display>(const char *fmt, A a, B b, C c, D d, E e) -> int {
-    let mut line = format5(fmt, a, b, c, d, e);
-    let mut out = global_writer();
-    return out.write_line(&line);
-}
-
-fn println6<A: Debug + Display, B: Debug + Display, C: Debug + Display, D: Debug + Display, E: Debug + Display, F: Debug + Display>(const char *fmt, A a, B b, C c, D d, E e, F f) -> int {
-    let mut line = format6(fmt, a, b, c, d, e, f);
-    let mut out = global_writer();
-    return out.write_line(&line);
-}
-
-fn println7<A: Debug + Display, B: Debug + Display, C: Debug + Display, D: Debug + Display, E: Debug + Display, F: Debug + Display, G: Debug + Display>(const char *fmt, A a, B b, C c, D d, E e, F f, G g) -> int {
-    let mut line = format7(fmt, a, b, c, d, e, f, g);
-    let mut out = global_writer();
-    return out.write_line(&line);
-}
-
-fn println8<A: Debug + Display, B: Debug + Display, C: Debug + Display, D: Debug + Display, E: Debug + Display, F: Debug + Display, G: Debug + Display, H: Debug + Display>(const char *fmt, A a, B b, C c, D d, E e, F f, G g, H h) -> int {
-    let mut line = format8(fmt, a, b, c, d, e, f, g, h);
-    let mut out = global_writer();
-    return out.write_line(&line);
-}
-
-/* Read one line from the global Reader and scan it with a C format string.
-   scanf needs output pointers, so the arguments are addresses. */
-fn scanln1<A>(const char *fmt, A *a) -> int {
-    let mut line = String::new();
-    get_line(&line);
-    return sscanf((const char *)line.data(), fmt, a);
-}
-
-fn scanln2<A, B>(const char *fmt, A *a, B *b) -> int {
-    let mut line = String::new();
-    get_line(&line);
-    return sscanf((const char *)line.data(), fmt, a, b);
-}
-
-fn scanln3<A, B, C>(const char *fmt, A *a, B *b, C *c) -> int {
-    let mut line = String::new();
-    get_line(&line);
-    return sscanf((const char *)line.data(), fmt, a, b, c);
-}
-
-fn scanln4<A, B, C, D>(const char *fmt, A *a, B *b, C *c, D *d) -> int {
-    let mut line = String::new();
-    get_line(&line);
-    return sscanf((const char *)line.data(), fmt, a, b, c, d);
-}
-
-fn scanln5<A, B, C, D, E>(const char *fmt, A *a, B *b, C *c, D *d, E *e) -> int {
-    let mut line = String::new();
-    get_line(&line);
-    return sscanf((const char *)line.data(), fmt, a, b, c, d, e);
-}
-
-fn scanln6<A, B, C, D, E, F>(const char *fmt, A *a, B *b, C *c, D *d, E *e, F *f) -> int {
-    let mut line = String::new();
-    get_line(&line);
-    return sscanf((const char *)line.data(), fmt, a, b, c, d, e, f);
-}
-
-fn scanln7<A, B, C, D, E, F, G>(const char *fmt, A *a, B *b, C *c, D *d, E *e, F *f, G *g) -> int {
-    let mut line = String::new();
-    get_line(&line);
-    return sscanf((const char *)line.data(), fmt, a, b, c, d, e, f, g);
-}
-
-fn scanln8<A, B, C, D, E, F, G, H>(const char *fmt, A *a, B *b, C *c, D *d, E *e, F *f, G *g, H *h) -> int {
-    let mut line = String::new();
-    get_line(&line);
-    return sscanf((const char *)line.data(), fmt, a, b, c, d, e, f, g, h);
-}
+scanln_generation(8);
 
 #endif

@@ -311,31 +311,37 @@ impl Lowerer {
                     // ...; x; })` still types as `T`.
                     let mut declared: Vec<(String, TypeId)> = Vec::new();
                     for statement in &block.stmts {
-                        let ast::Stmt::Decl(declaration) = statement else {
-                            continue;
-                        };
-                        if declaration.specs.storage == Some(ast::StorageClass::Typedef) {
-                            continue;
-                        }
-                        let specs = self.resolve_specs(&declaration.specs)?;
-                        for item in &declaration.declarators {
-                            let resolved = self.resolve_declarator(
-                                specs.ty,
-                                specs.qualifiers,
-                                &item.declarator,
-                            )?;
-                            if let Some(name) = &item.declarator.name {
-                                declared.push((name.text.clone(), resolved.ty));
+                        match statement {
+                            ast::Stmt::Decl(declaration) => {
+                                if declaration.specs.storage == Some(ast::StorageClass::Typedef) {
+                                    continue;
+                                }
+                                let specs = self.resolve_specs(&declaration.specs)?;
+                                for item in &declaration.declarators {
+                                    let resolved = self.resolve_declarator(
+                                        specs.ty,
+                                        specs.qualifiers,
+                                        &item.declarator,
+                                    )?;
+                                    if let Some(name) = &item.declarator.name {
+                                        declared.push((name.text.clone(), resolved.ty));
+                                    }
+                                }
                             }
+                            // An inferred local has no written type, so it
+                            // gets one from its initializer, which may use the
+                            // declarations before it.
+                            ast::Stmt::Let(declaration) => {
+                                let ty = self.type_of(&declaration.init, &mut |name: &str| {
+                                    declared_type(&declared, name).or_else(|| local(name))
+                                })?;
+                                declared.push((declaration.name.text.clone(), ty));
+                            }
+                            _ => {}
                         }
                     }
                     let mut scoped = |name: &str| -> Option<TypeId> {
-                        declared
-                            .iter()
-                            .rev()
-                            .find(|(declared, _)| declared == name)
-                            .map(|(_, ty)| *ty)
-                            .or_else(|| local(name))
+                        declared_type(&declared, name).or_else(|| local(name))
                     };
                     let ty = self.type_of(expr, &mut scoped)?;
                     Ok(self.decay_type(ty))
@@ -852,6 +858,15 @@ impl Lowerer {
             "called object is not a function",
         ))
     }
+}
+
+/// The type a statement expression already declared for `name`.
+fn declared_type(declared: &[(String, TypeId)], name: &str) -> Option<TypeId> {
+    declared
+        .iter()
+        .rev()
+        .find(|(declared, _)| declared == name)
+        .map(|(_, ty)| *ty)
 }
 
 /// The expression that a GNU statement expression yields, if it has one.

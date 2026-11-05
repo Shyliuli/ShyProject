@@ -102,6 +102,7 @@ function configuration() {
   const config = vscode.workspace.getConfiguration("shyc");
   return {
     libshyPath: config.get<string>("libshyPath", ""),
+    shyccPath: config.get<string>("shyccPath", ""),
     includeDirs: config.get<string[]>("includeDirs", []),
     defines: config.get<string[]>("defines", []),
     diagnosticsEnabled: config.get<boolean>("diagnostics.enabled", true),

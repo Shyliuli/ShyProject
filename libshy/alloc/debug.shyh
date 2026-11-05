@@ -7,8 +7,8 @@
    are single quoted, strings are quoted and escaped.
 
    The method is deliberately not generic: a trait value (`Debug::from<int>()`)
-   is a table of plain function pointers, which is what lets `format` render
-   arguments of different types through one erased signature. */
+   is a table of plain function pointers, so one table type serves every
+   concrete type that implements the trait. */
 trait Debug {
     fn debug(const self *value, String *out) -> int;
 }

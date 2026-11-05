@@ -138,6 +138,11 @@
           "default": "",
           "description": "Path to the shyc-lsp binary. Empty means search target/ and the extension's server/ directory."
         },
+        "shyc.shyccPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the shycc driver used to run const fn probe rounds. Empty means search the workspace target/ directories, the server's directory, and PATH."
+        },
         "shyc.libshyPath": {
           "type": "string",
           "default": "",

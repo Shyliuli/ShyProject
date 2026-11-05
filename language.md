@@ -1,7 +1,7 @@
 # ShyC language direction
 
-This document records the language boundary before the first public release. The
-compiler currently has no published language version. The independent `shyc`
+The language is at version **0.1.0**: the first release boundary, still open to
+change before 1.0. This document records that boundary. The independent `shyc`
 frontend is the main implementation; the chibicc fork remains an early
 bootstrap and ShyOS compatibility validator.
 
@@ -310,22 +310,22 @@ char buffer[round_up(37, 16)];    // 48 bytes
 ```
 
 A string argument is the text the program would see at run time: escapes are
-already decoded, so `str_len("a\tb")` is 3 and `tokens_from_text("\"x\"")`
-lexes a quoted token.
+already decoded, so a `const char *` parameter receives the three bytes of
+`"a\tb"`, and `tokens_from_text("\"x\"")` lexes a quoted token.
 
-A `const fn` may take integers and strings, use `let`, `if`, `while`, `for`,
-`do`/`while`, `break`, `continue`, `return`, compound assignment, arithmetic,
-comparisons, indexing, `switch` (labels, case ranges like `'0' ... '9'`,
-fallthrough, `default` anywhere, `break`), and call other `const fn`s. `goto` and `sizeof` are rejected with a
-message that names the alternative.
-Three builtins inspect strings: `str_len(text)`, `str_byte(text, index)` and
-`str_eq(left, right)`, so counting or scanning a literal is normal ShyC code:
+A `const fn` is compiled like any other function and runs in an emulator while
+the program is built, so its body is ordinary ShyC: pointers, globals, `goto`,
+`sizeof`, loops, and the standard library all work. Nothing is interpreted, and
+nothing from the header set is special-cased. Building text is therefore normal
+ShyC code, which is what lets a generator write declarations the way a template
+would (see `libshy/std/fmt.shyh`, which builds the `println!` wrappers with
+`String` and hands the finished source to `tokens_from_text`):
 
 ```c
 const fn count_placeholders(const char *fmt) -> int {
     let mut count = 0;
     let mut i = 0;
-    while (i + 1 < str_len(fmt)) {
+    while (fmt[i] != 0) {
         if (fmt[i] == '{' && fmt[i + 1] == '}') {
             count = count + 1;
             i = i + 2;
@@ -367,15 +367,20 @@ const fn echo(Tokens input) -> Tokens {
     return input;
 }
 
-long widened = (echo(long))value;   // a cast to long
-int size = sizeof(echo(int));       // 4
+long widened = (echo(long))3;   // a cast to long
+int size = sizeof(echo(int));   // 4
 ```
 
 A token result also fills the other syntax slots. A **generator** call stands on
 its own and ends with `;`: in statement position it is a statement list, and at
 file scope it is an item list. The semicolon is what tells a generator apart
-from a declaration whose type the call supplies. Calling one in the wrong place
-is reported by name, not as a parse error:
+from a declaration whose type the call supplies. Arguments follow the signature
+like any other call: a single `Tokens` parameter receives the syntax as
+written, everything else is an ordinary expression list, so
+`format_generation(8)` passes the integer 8. A `;` written last closes that
+token argument the way it closes a statement, so it is not one of the tokens:
+`count_tokens(a b c;)` receives three. Calling a generator in the wrong
+place is reported by name, not as a parse error:
 
 ```text
 error: const fn 'show' produced statements, which cannot stand at file scope; call it inside a function
@@ -418,121 +423,129 @@ struct Point {
 An item-level `const fn` is a **generator**. Generators are not run in source
 order: they are scheduled by what they need and what they can provide.
 
-- `require_impl(type, trait)` needs an impl. It returns 1 when the impl exists;
-  otherwise the generator waits in queue 1 until someone provides it. A generic
-  implementation covers its instantiations: `impl<T> Show for Box<T>` answers
-  `require_impl("Box<int>", "Show")`. The match also checks the argument count
-  and the bounds written on the impl's parameters, so `impl<T: Show> Show for
-  Box<T>` covers `Box<int>` only when `int: Show` holds. The same rule applies
-  to the type checker: an impl whose bounds do not hold for the concrete
-  arguments simply does not exist for that type, so `Box<Plain>.show()` is an
-  error rather than a silent call. Builtin spellings are canonicalized, so
-  `impl Show for unsigned int` answers `implements("int unsigned", "Show")`,
-  and `long int` is the same type as `long`. Trait arguments are part of the
-  key: `impl Convert<int> for Alpha` answers `implements("Alpha",
-  "Convert<int>")` but not `Convert<char>` or a bare `Convert`. Constant
-  arguments are canonicalized on both sides, so `At<0x10>` is `At<16>`.
-- `try_provide_impl(type, trait)` offers one. It returns 0 when the impl already
-  exists; otherwise the generator waits in queue 2, ready to provide it.
+- `require_impl(type, trait)` needs an impl. Both literal names and names
+  computed by the generator use the same compiler-side world matcher. Generic
+  impls check their parameter bounds: `impl<T: Show> Show for Box<T>` matches
+  `Box<int>` when `int: Show` holds, and builtin spellings such as
+  `int unsigned` and `unsigned int` compare equally. Trait arguments remain
+  part of the key, so `Convert<int>` and `Convert<char>` are distinct.
+  A missing impl suspends an item generator at the query; it does not return
+  empty tokens. Once another generator's output satisfies the need, the
+  suspended generator runs again against the updated world. A query inside a
+  branch that is not executed never creates a dependency. Outside an item
+  generator, a missing impl returns 0 without suspending.
 
-Every generator that can run, runs. When nothing is left to run, one waiting
-provider is granted and runs again, which wakes everyone in queue 1 that needed
-that impl. When the waiters and the offers form a loop — each provider needs what another
-offers — the cycle is reported as the chain it is:
+  If no runnable work remains, compilation fails at the waiting call site,
+  naming the type and trait that are still missing:
+
+  ```text
+  error: const fn 'consume_marker' waits for type 'Widget' to implement trait 'Marker', but no runnable generator provides it
+  ```
+
+- `try_provide_impl(type, trait)` offers one. It answers 0 when the impl already
+  exists and 1 otherwise, so the provider emits the impl once and produces
+  nothing after a later round sees it. Several generators may offer the same
+  impl in one round: the earliest in source order keeps its answer, and the
+  others stay unanswered until the next round, when they find the impl already
+  there. Outside an item generator this query returns 0. A generator that emits
+  an impl without offering it still collides with a hand-written one and is
+  reported.
+
+Ready generators of one round are asked concurrently, each in its own probe run
+against the same round world. Generators in one round therefore run
+independently: one does not see another's output or the impls it offers, and
+`declared` and `implements` answer every one of them from that same world.
+Answers are collected in source order, which is the order that decides which of
+two offers of one impl keeps its answer. Each generated fragment joins the
+declaration world on the next parse round, which can wake suspended generators.
+Two generators that emit the same impl without successfully guarding with
+`try_provide_impl` still collide at merge:
 
 ```text
-error: dependency cycle between generators: 'A' needs 'T1' -> 'B' needs 'T2' -> 'A' needs 'T1' (cycle)
-```
-
-If queue 1 still has sleepers at the end, nothing provides what they
-need and the compiler says so:
-
-```text
-error: type 'Widget' needs trait 'Marker', but nothing provides it (in const fn 'consume_marker')
+error: trait 'Marker' is already implemented for 'Widget'
 ```
 
 **Generated source may generate more.** A generator's own output is parsed by
 the same routine as the main file, so a generated item may call another
-generator; that call joins the same queue and is scheduled by its needs, not by
-where it appeared. A fragment may even declare a `const fn` of its own: the
-declaration is merged into the unit and later generators can call it.
+generator. A fragment may even declare a `const fn` of its own: the declaration
+is merged into the unit and later generators can call it.
 
-**Function bodies run last.** Once the generators settle, the world is final and
-a `const fn` called inside a function body reads it (only the function
-bodies that actually call one are parsed again, and a generated fragment that
-calls one is parsed again by itself once the world settles): `implements(type, trait)`
-answers for the generated declarations too. A body cannot block or inject a
-global impl — `require_impl` there is a plain query and `try_provide_impl`
-returns 0.
+**Function bodies are resolved after the generators settle.** The declarations
+are parsed in one stage, expanding generators until none is left waiting, and
+the function bodies are parsed in a second stage against that settled world. A
+`const fn` called inside a body therefore sees every declaration the generators
+produced, wherever the generator stands in the file.
 
-Two generators that emit the same `impl Trait for Type` are a conflict, even if
-both asked `try_provide_impl` — the duplicate is reported at the merge instead of
-one silently winning:
-
-```text
-error: duplicate implementation of 'Marker' for 'Widget'
-```
-
-A provider that was granted an impl but never produced it is reported at its own
-call site:
-
-```text
-error: generator granted to provide 'Marker' for 'Widget' produced no such implementation
-```
-
-The check runs against the settled world, so a provider may emit the impl through
-a generator it calls and still count.
-
-When the granted provider is itself stuck, the message follows the chain of
-providers until it reaches the end:
+A generator can call an ordinary helper that itself calls a scalar-returning
+`const fn` with value arguments. In the probe, both calls are compiled as
+ordinary machine code and use that round's world. In the final program, the
+helper's const fn call is still replaced by its compile-time answer when the
+trampoline can carry it: a plain non-template, non-variadic function of at most
+eight named parameters, each `int`, `unsigned`, `_Bool`, `const char *`, or
+`Tokens`, returning `int`, `unsigned`, `_Bool`, or `Tokens` by value. A value
+call in a function body outside that set is not asked: it stays an ordinary
+call, and the final program emits the const fn as an ordinary function, so
+`char`, `long`, enum, typedef and pointer results and struct pointer parameters
+work at run time. A template or variadic `const fn` cannot become an ordinary
+call: its call stays a request and is reported when the trampoline cannot serve
+it. A file-scope initializer holds data, not code, so a `const fn` call there
+is reported the same way. A request that would run a helper whose Tokens syntax
+expansion is unresolved is left unanswered and asked again once that expansion
+exists, so the other requests of the round are still answered and an unused
+helper costs nothing. When no request in a round can run, compilation fails at
+the blocked call and names the helper:
 
 ```text
-error: type 'Widget' needs trait 'Marker', but its provider 'provider_a' is still waiting for 'Widget' to implement 'Extra', its provider 'provider_b' is still waiting for 'Widget' to implement 'Third', nothing provides it (in const fn 'consumer')
+error: const fn 'gen' cannot be probed in this round: the body of 'helper' still holds an unresolved const fn syntax expansion
 ```
 
-A provider may itself wait for another impl, so providers form a chain: one
-provides what another needs, and the waiter is woken when it appears.
-
-When several generators offer the same impl, the one that runs first provides it
-and the rest find it already there and emit nothing. Generators run in source
-order within a round, so the winner does not depend on how the scheduler
-interleaved them. A grant stays reserved while that provider waits on something
-else, so no second provider is handed the same impl in the meantime.
-
-A provider never produces a second impl for the same type and trait, so a
-hand-written impl and a generated one cannot collide:
-
-```c
-const fn provide_marker(Tokens input) -> Tokens {
-    if (try_provide_impl("Widget", "Marker")) {
-        return tokens_from_text(
-            "impl Marker for Widget { fn marker(const self *v) -> int { return 7; } }");
-    }
-    return tokens_from_text("");
-}
-
-const fn consume_marker(Tokens input) -> Tokens {
-    if (require_impl("Widget", "Marker")) {
-        return tokens_from_text("int use_marker(void) { return 1; }");
-    }
-    return tokens_from_text("");
-}
-```
+An indirect call to such a helper is caught while the probe runs, so the round
+is rejected instead of answering from a missing expansion.
 
 The compile-time builtins over token sequences are `tokens_len`, `token_text`,
-`tokens_text`, `tokens_slice`, `tokens_concat`, `tokens_from_int`, and
-`tokens_from_text` (the last one lexes a string). `gensym(prefix)` returns a
-fresh name, so a macro that declares something can avoid colliding with names
-the caller wrote:
+`tokens_text`, `tokens_slice`, `tokens_concat`, `tokens_from_int` and
+`tokens_from_text` (the last one lexes a string). There is no `gensym`: a macro
+that must not collide with a caller's name asks `declared` and picks a distinct
+name itself.
+
+### Trying a call at compile time
+
+`try_run(f, arg..., &result)` asks the compiler to run `f` now and store its
+result. It returns 1 when the call could be run and 0 when it failed, so one
+macro can choose between a folded and a runtime path:
 
 ```c
-const fn declare_counter(Tokens input) -> Tokens {
-    let name = gensym("counter");
-    return tokens_concat(
-        tokens_concat(tokens_from_text("int "), tokens_from_text(name)),
-        tokens_from_text(" = 0;"));
+int scale(int value, int factor) { return value * factor; }
+
+const fn fold(int value) -> int {
+    let mut result = 0;
+    if (try_run(scale, value, 3, &result)) {
+        return result;
+    }
+    return -1;
 }
+
+int folded = fold(14);   // 42, computed while compiling
 ```
+
+Any function defined in the translation unit can be tried, not just a `const
+fn`. The attempt runs in a child emulator with its own stack: when it reaches
+the end, its memory writes are committed and `result` holds the value; when it
+traps, runs out of budget, or makes an unsupported host request, its writes are
+rolled back and the call is reported as "not now". Read-only `declared` and
+`implements` queries are allowed in the child and read the same round world.
+Compiler failures such as exhausted token storage or an unresolved syntax
+expansion terminate compilation even inside `try_run`; they are not failed
+attempts at running the user function. Arguments and the result are `int` in
+this slice. A wrong argument count, an unknown function, a `const fn`
+as the target, or an out-parameter that is not a local is reported as an error
+instead, because that call would be wrong at run time too.
+
+The child runs in the probe image, not in the finished program, so a tried
+function has to be a pure function of its arguments: its stack and the address
+of a local differ from the ones the running program would see, and a value that
+depends on either differs too. Every tried call starts from the same round
+state, so two calls of one function do not see each other's writes.
 
 `declared(name)` answers whether a type name is visible in the declarations
 generated so far — a snapshot, not a promise about the rest of the file. It
@@ -562,9 +575,25 @@ fn that produced them:
 error: expected an expression, found end of file (from const fn 'bad_expr')
 ```
 
-`const fn` does not exist at run time: it emits no symbol. An argument that is
-not a compile-time constant is a diagnostic, and evaluation is limited to 512
-nested calls, so a runaway recursion fails instead of hanging the compiler.
+A call the probe answers leaves no call behind: its answer stands in its place,
+so an argument of an answered call has to be a compile-time constant, and
+anything else is a diagnostic. A `const fn` that ordinary code still names at
+run time is emitted as an ordinary function: a call the trampoline cannot
+carry, or an address taken as `add` or `&add`, as in
+`int (*fp)(int, int) = add;`. A file-scope initializer runs no code at all, so
+a `const fn` the trampoline cannot carry is reported there instead of being
+called. A probe run has an instruction budget and a
+wall-clock limit, so a runaway recursion fails instead of hanging the compiler.
+Token builders use bounded memory pools. If a pool is exhausted, compilation
+fails with the pool name, requested amount, and remaining capacity; the compiler
+does not accept an empty expansion as a substitute.
+
+`shycc --constfn-steps <n>` sets the instruction budget for each probe run
+(default 32000000, maximum 100000000). `--constfn-timeout-ms <n>` sets the
+wall-clock limit in milliseconds (default 2000, maximum 60000).
+`--constfn-rounds <n>` caps compilation rounds (default 256). All three values
+must be positive. These options also apply to `--emit=c` and `--emit=c-header`;
+they do not change the separate child budget used by `try_run`.
 
 ## Macros are compile-time functions
 
@@ -624,18 +653,22 @@ server indexes these names too: hover on a declaration or a call shows the
 signature, and go-to-definition on a call (including a detached generator call)
 jumps to the declaration. The call goes
 after the declaration it decorates, and `println!("{:?}", value)` then uses the
-generated impl — the argument still has to implement both `Debug` and `Display`,
-because one `FormatArg` carries both.
+generated impl — the argument still has to implement `Debug`.
 
-`println!`, `format!`, and `scanln!` are the same idea with a format string: the
-compiler checks the literal and expands the call to the wrapper for its
-argument count, up to eight. For `println!` and `format!` a literal format
-string is checked for placeholder count, `{}` versus `{:?}`, and brace
-balance; `scanln!` instead counts C conversions, because it hands its string to
-`sscanf`: `scanln!("%d %d", &a, &b)`. A non-literal format string is passed
-through unchecked, and a placeholder without an argument is printed as it was
-written rather than reading past the arguments. Arguments must implement both traits, so a C string is
-wrapped first: `println!("{}", Str::from_cstr(word))`.
+`println!` and `format!` take a **literal** format string. The compiler checks
+it once — placeholder count, `{}` versus `{:?}`, brace balance, and
+`{name}` names — and expands the call into the code that renders it: the
+literal pieces are pushed into a `String` and every argument becomes one
+`Display` or `Debug` call picked for its concrete type. Nothing about the
+format survives into the program, so there is no format string to parse and no
+per-arity wrapper to call. The expansion is a GNU statement expression, so it
+works wherever an expression does.
+
+`scanln!` is different: it hands its string to `sscanf`, so the compiler only
+counts C conversions and calls a wrapper, up to eight arguments:
+`scanln!("%d %d", &a, &b)`. An argument must implement the trait its
+placeholder names, so a C string is wrapped first:
+`println!("{}", Str::from_cstr(word))`.
 
 ## Slices and library types
 

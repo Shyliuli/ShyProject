@@ -3,10 +3,114 @@
 
 /* Compile-time-only declarations.
 
-   These types exist while a \`const fn\` runs and are never emitted into
-   generated code. A parameter of type Tokens receives the call's argument
-   tokens exactly as written. */
+   These types exist while a `const fn` runs and are never emitted into a
+   normal program. A parameter of type Tokens receives the call's argument
+   tokens exactly as written; a probe image bakes that sequence into the
+   static data below so the function can be compiled as ordinary code. */
 
-struct Tokens;
+/* How one baked token is spelled, matching the lexer's token kinds. */
+enum TokenKind {
+    TOKEN_IDENT = 0,
+    TOKEN_NUMBER = 1,
+    TOKEN_STRING = 2,
+    TOKEN_CHAR = 3,
+    TOKEN_PUNCT = 4,
+    TOKEN_NEWLINE = 5,
+    TOKEN_EOF = 6
+};
+
+/* A sequence of source tokens.
+
+   `count` entries describe the sequence, and each pointer names a parallel
+   array of `count` elements:
+
+   - `texts[i]` is the source spelling of token i, NUL-terminated;
+   - `kinds[i]` is its TokenKind;
+   - `lens[i]` is the byte length of that spelling;
+   - `spans` holds two ints per token, the start and end byte offset of the
+     token in the file the call was written in.
+
+   The fields are ordinary data so a const fn can be compiled like any other
+   function; only the compiler allocates the arrays. */
+struct Tokens {
+    int count;
+    int *kinds;
+    char **texts;
+    int *lens;
+    int *spans;
+};
+
+/* Accessors and builders over a Tokens value.
+
+   tokens_len returns the number of tokens. token_text returns the spelling of
+   one token, or NULL when the index is out of range.
+
+   tokens_from_int returns one token of kind TOKEN_NUMBER whose spelling is the
+   decimal form of value, with a leading '-' when value is negative; its byte
+   length is that spelling's length.
+
+   tokens_slice returns a view of len tokens starting at start. Both bounds are
+   clamped to the sequence: a negative start or length counts as 0, and a
+   length that runs past the end stops at the last token. The arrays are not
+   copied; the pointers move by element size, so the view reads its input's
+   spellings.
+
+   tokens_concat returns a new sequence of left.count + right.count tokens,
+   copied into storage the compiler allocated, so the result outlives both
+   inputs.
+
+   tokens_text returns every spelling concatenated in order as one
+   NUL-terminated string: empty sequences give "". If the result does not fit
+   the token arena, compilation fails.
+
+   The four builders materialize spans as 0, 0, like a baked sequence. The
+   probe image implements all of these as ordinary functions over a fixed
+   static arena that it never frees: 65536 ints, 8192 text pointers, and 65536
+   spelling bytes per round. Exhausting any pool aborts the probe with an
+   allocation diagnostic; no empty or truncated answer is accepted. */
+int tokens_len(struct Tokens tokens);
+const char *token_text(struct Tokens tokens, int index);
+const char *tokens_text(struct Tokens tokens);
+struct Tokens tokens_slice(struct Tokens tokens, int start, int len);
+struct Tokens tokens_concat(struct Tokens left, struct Tokens right);
+struct Tokens tokens_from_int(int value);
+
+/* Lexing text needs the compiler's lexer, so an ordinary definition cannot
+   provide it. The attribute marks the declaration the compiler serves; a large
+   enough probe round will answer it through a host request, and until that is
+   wired up a round that reaches it is reported as unsupported. */
+#[const_fn_token_builtin]
+struct Tokens tokens_from_text(const char *text);
+
+/* The answer to a name.
+   `declared` is 1 when `name` is a declaration visible in the round being
+   compiled, and 0 otherwise. Every file-scope name counts: a function, an
+   object, a type, a tag, a trait, or an import. */
+#[const_fn_token_builtin]
+int declared(const char *name);
+
+/* The answer to a pair.
+   `implements` is 1 when `owner` implements `trait_name` in the round being
+   compiled, and 0 otherwise. Literal and computed names use the same host
+   matcher: generic impls check their bounds and builtin spellings are
+   canonicalized. For example, `impl Show for unsigned int` answers
+   `implements("int unsigned", "Show")`. */
+#[const_fn_token_builtin]
+int implements(const char *owner, const char *trait_name);
+
+/* The queue test a generator uses to wait for an impl.
+   `require_impl` answers 1 when the round sees the impl. Otherwise an item
+   generator suspends until another generator provides it; the query does not
+   complete with empty output. Outside item generators it answers 0. Names may
+   be literal strings or computed at probe execution time. */
+#[const_fn_token_builtin]
+int require_impl(const char *owner, const char *trait_name);
+
+/* The queue test a generator uses to provide an impl.
+   `try_provide_impl` answers 0 when the round already sees the impl and 1
+   otherwise in an item generator, so a provider emits it once and then
+   produces nothing. Outside item generators the query answers 0. */
+#[const_fn_token_builtin]
+int try_provide_impl(const char *owner, const char *trait_name);
 
 #endif

@@ -13,8 +13,8 @@ use shyc::ir::Layout;
 use shyc::lexer::{self, Token, TokenKind};
 use shyc::lower::{self, StartupMode};
 use shyc::preprocess::{self, Attributes};
-use shyc::source::SourceMap;
-use shyc::{c, export_instances, llvm, parser, passes, shy};
+use shyc::source::{Diagnostic, SourceMap, Span};
+use shyc::{c, export_instances, llvm, parser, passes, probe, shy};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -43,6 +43,14 @@ struct Options {
     freestanding: bool,
     /// Explicit generic instance table (`--instances`).
     instances: Option<PathBuf>,
+    /// `--constfn-probe`: compile one probe round instead of the program.
+    probe: bool,
+    /// `--probe-answers`: answers of the previous round.
+    probe_answers: Option<PathBuf>,
+    /// `--probe-manifest`: where this round's requests are written.
+    probe_manifest: Option<PathBuf>,
+    /// `--probe-object`: where a round with requests writes its probe unit.
+    probe_object: Option<PathBuf>,
     preprocess: preprocess::Options,
 }
 
@@ -72,6 +80,9 @@ fn run() -> Result<(), String> {
                 .into(),
         );
     }
+    if options.probe {
+        return probe_round(&options);
+    }
     let text = fs::read_to_string(&options.input)
         .map_err(|error| format!("{}: {error}", options.input.display()))?;
     let mut sources = SourceMap::default();
@@ -91,10 +102,7 @@ fn run() -> Result<(), String> {
                 .map_err(|error| sources.render(&error))?;
             let unit =
                 parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
-            // The C output names what the compiler resolved: symbols, instance
-            // types, and specializations, so it lowers the unit first.
-            let lowered = lower_instances(&options, &unit, &preprocessed.attributes, &mut sources)?;
-            c::source::render(&unit, &lowered).map_err(|error| sources.render(&error))?
+            render_c_source(&options, &unit, &preprocessed.attributes, &mut sources)?
         }
         Stage::CHeader => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
@@ -110,15 +118,13 @@ fn run() -> Result<(), String> {
                 includes: preprocessed.includes,
                 defines: preprocessed.defines,
             };
-            if options.instances.is_none() {
-                c::header::render_c_header(&unit, &header_options)
-            } else {
-                let lowered =
-                    lower_instances(&options, &unit, &preprocessed.attributes, &mut sources)?;
-                let unspelled = c::header::unspelled_function_names(&unit, file);
-                let section = export_instances::render_header_section(&lowered, &unspelled);
-                c::header::render_c_header_with(&unit, &header_options, &section)
-            }
+            render_header(
+                &options,
+                &unit,
+                &header_options,
+                &preprocessed.attributes,
+                &mut sources,
+            )?
         }
         Stage::CWrapper => {
             let Some(_) = options.instances else {
@@ -195,15 +201,7 @@ fn run() -> Result<(), String> {
             }
         }
     };
-    match options.output {
-        Some(path) => {
-            fs::write(&path, output).map_err(|error| format!("{}: {error}", path.display()))
-        }
-        None => io::stdout()
-            .lock()
-            .write_all(output.as_bytes())
-            .map_err(|error| error.to_string()),
-    }
+    write_output(options.output.as_deref(), &output)
 }
 
 /// Parses the explicit instance table, if the driver was given one.
@@ -256,6 +254,40 @@ fn lower_instances(
         },
     )
     .map_err(|error| sources.render(&error))
+}
+
+/// The C source of one unit. It names what the compiler resolved: symbols,
+/// instance types, and specializations, so it lowers the unit first.
+fn render_c_source(
+    options: &Options,
+    unit: &shyc::ast::TranslationUnit,
+    attributes: &Attributes,
+    sources: &mut SourceMap,
+) -> Result<String, String> {
+    let lowered = lower_instances(options, unit, attributes, sources)?;
+    c::source::render(unit, &lowered).map_err(|error| sources.render(&error))
+}
+
+/// The C header of one unit, plus the explicit instance section when the
+/// driver gave a table.
+fn render_header(
+    options: &Options,
+    unit: &shyc::ast::TranslationUnit,
+    header_options: &c::header::HeaderOptions,
+    attributes: &Attributes,
+    sources: &mut SourceMap,
+) -> Result<String, String> {
+    if options.instances.is_none() {
+        return Ok(c::header::render_c_header(unit, header_options));
+    }
+    let lowered = lower_instances(options, unit, attributes, sources)?;
+    let unspelled = c::header::unspelled_function_names(unit, header_options.root);
+    let section = export_instances::render_header_section(&lowered, &unspelled);
+    Ok(c::header::render_c_header_with(
+        unit,
+        header_options,
+        &section,
+    ))
 }
 
 struct Target {
@@ -367,6 +399,10 @@ fn arguments() -> Result<Option<Options>, String> {
     let mut opt_level = 0;
     let mut freestanding = false;
     let mut instances = None;
+    let mut probe = false;
+    let mut probe_answers = None;
+    let mut probe_manifest = None;
+    let mut probe_object = None;
     let mut preprocess = preprocess::Options::default();
     // The bundled headers describe the Shy target, so they are searched before
     // any `-I` directory and before the host C library.
@@ -394,7 +430,12 @@ fn arguments() -> Result<Option<Options>, String> {
                      --emit=llvm requires a 64-bit --target triple; \
                      assembly and linking stay in shycc; \
                      --instances lists explicit generic instances to export to C \
-                     (with --emit=c-header / --emit=c-wrapper or a code generator)"
+                     (with --emit=c-header / --emit=c-wrapper or a code generator); \
+                     --constfn-probe --probe-answers <file> --probe-manifest <file> \
+                     [--probe-object <file>] compiles one const-fn probe round \
+                     instead of the program (-S, --emit=c, --emit=c-header; \
+                     --probe-object receives the probe unit of a round with \
+                     requests, which then writes no main output)"
                 );
                 return Ok(None);
             }
@@ -419,6 +460,40 @@ fn arguments() -> Result<Option<Options>, String> {
             }
             flag if flag.starts_with("--instances=") => {
                 instances = Some(PathBuf::from(&flag["--instances=".len()..]));
+                None
+            }
+            "--constfn-probe" | "--probe" => {
+                probe = true;
+                None
+            }
+            "--probe-answers" => {
+                probe_answers = Some(PathBuf::from(
+                    args.next().ok_or("--probe-answers requires a path")?,
+                ));
+                None
+            }
+            "--probe-manifest" => {
+                probe_manifest = Some(PathBuf::from(
+                    args.next().ok_or("--probe-manifest requires a path")?,
+                ));
+                None
+            }
+            "--probe-object" => {
+                probe_object = Some(PathBuf::from(
+                    args.next().ok_or("--probe-object requires a path")?,
+                ));
+                None
+            }
+            flag if flag.starts_with("--probe-answers=") => {
+                probe_answers = Some(PathBuf::from(&flag["--probe-answers=".len()..]));
+                None
+            }
+            flag if flag.starts_with("--probe-manifest=") => {
+                probe_manifest = Some(PathBuf::from(&flag["--probe-manifest=".len()..]));
+                None
+            }
+            flag if flag.starts_with("--probe-object=") => {
+                probe_object = Some(PathBuf::from(&flag["--probe-object=".len()..]));
                 None
             }
             flag if flag.starts_with("--target=") => {
@@ -608,14 +683,76 @@ fn arguments() -> Result<Option<Options>, String> {
                 .push((name.to_string(), value.to_string()));
         }
     }
+    let stage = stage.unwrap_or(Stage::Emit(Backend::Shy));
+    if probe {
+        // A probe round runs Shy assembly, so only the outputs whose final
+        // text can follow a round take part: the assembly itself and the two C
+        // text outputs. A probe unit is not a program, so an export table
+        // would name the program instead of the probe.
+        match stage {
+            Stage::Emit(Backend::Shy) | Stage::CSource | Stage::CHeader => {}
+            Stage::Emit(Backend::Llvm) => {
+                return Err(
+                    "--constfn-probe cannot be combined with --emit=llvm: a probe round is \
+                     Shy assembly"
+                        .into(),
+                );
+            }
+            Stage::CWrapper => {
+                return Err(
+                    "--constfn-probe cannot be combined with --emit=c-wrapper: a probe round \
+                     produces no wrapper"
+                        .into(),
+                );
+            }
+            _ => {
+                return Err(
+                    "--constfn-probe only applies to -S / --emit=shy, --emit=c, or \
+                     --emit=c-header"
+                        .into(),
+                );
+            }
+        }
+        if matches!(stage, Stage::CSource | Stage::CHeader) && probe_object.is_none() {
+            // The round's assembly is not the C text the user asked for, so it
+            // needs a path of its own; repurposing the main output would print
+            // Shy assembly as C.
+            return Err(
+                "--constfn-probe with --emit=c or --emit=c-header requires --probe-object <path>"
+                    .into(),
+            );
+        }
+        if target.as_deref().is_some_and(|name| name != "shy") {
+            return Err(
+                "--constfn-probe only applies to the shy target: other targets link through \
+                 clang and have no Shy probe image"
+                    .into(),
+            );
+        }
+        if instances.is_some() {
+            return Err("--constfn-probe cannot be combined with --instances".into());
+        }
+        if probe_manifest.is_none() {
+            return Err("--constfn-probe requires --probe-manifest <path>".into());
+        }
+    } else if probe_answers.is_some() || probe_manifest.is_some() || probe_object.is_some() {
+        return Err(
+            "--probe-answers, --probe-manifest, and --probe-object only apply to --constfn-probe"
+                .into(),
+        );
+    }
     Ok(Some(Options {
-        stage: stage.unwrap_or(Stage::Emit(Backend::Shy)),
+        stage,
         input: input.ok_or("no input source file")?,
         output,
         target,
         opt_level,
         freestanding,
         instances,
+        probe,
+        probe_answers,
+        probe_manifest,
+        probe_object,
         preprocess,
     }))
 }
@@ -738,4 +875,476 @@ fn use_declaration_end(tokens: &[Token], start: usize) -> Option<usize> {
 /// The first index at or after `from` whose token is not a newline marker.
 fn next_significant(tokens: &[Token], from: usize) -> Option<usize> {
     (from..tokens.len()).find(|&index| !matches!(tokens[index].kind, TokenKind::Newline))
+}
+/// First line of both files of the const-fn probe protocol.
+const PROBE_HEADER: &str = "shyc-probe 1";
+
+/// The manifest word for one result kind.
+///
+/// The probe module classifies the result; this only spells the classification
+/// for the driver, so both sides agree on what the returned 32-bit word means.
+fn kind_word(kind: probe::ResultKind) -> &'static str {
+    match kind {
+        probe::ResultKind::I32Signed => "i32s",
+        probe::ResultKind::I32Unsigned => "i32u",
+        probe::ResultKind::Bool => "bool",
+        probe::ResultKind::Tokens => "tokens",
+    }
+}
+
+/// The value the program sees, from the decimal a driver wrote for a scalar
+/// answer, or why this kind has no decimal form.
+fn int_answer(kind: probe::ResultKind, decimal: i128) -> Result<i64, String> {
+    let bits = decimal as u64 as u32;
+    let (range, value) = match kind {
+        probe::ResultKind::I32Signed => (-2_147_483_648..=2_147_483_647, i64::from(bits as i32)),
+        probe::ResultKind::I32Unsigned => (0..=4_294_967_295, i64::from(bits)),
+        probe::ResultKind::Bool => (0..=1, i64::from(bits)),
+        probe::ResultKind::Tokens => {
+            return Err("a Tokens result has no decimal answer".to_string());
+        }
+    };
+    if !range.contains(&decimal) {
+        return Err(format!(
+            "{decimal} is out of range for a `{}` answer",
+            kind_word(kind)
+        ));
+    }
+    Ok(value)
+}
+
+/// Compiles one probe round of a translation unit.
+///
+/// With requests, the round produces the internal probe assembly the driver
+/// links and runs, and the manifest names them: `--probe-object` receives that
+/// assembly, and without it the assembly is the main output (`-S`). Without
+/// requests, the output is what the selected stage would produce for the
+/// program itself and the manifest is header-only.
+fn probe_round(options: &Options) -> Result<(), String> {
+    let text = fs::read_to_string(&options.input)
+        .map_err(|error| format!("{}: {error}", options.input.display()))?;
+    let mut sources = SourceMap::default();
+    let file = sources.add(options.input.clone(), text);
+    let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
+        .map_err(|error| sources.render(&error))?;
+    let manifest_path = options
+        .probe_manifest
+        .as_deref()
+        .ok_or("--constfn-probe requires --probe-manifest <path>")?;
+
+    // An answer's reading comes from the declaration, and the round's requests
+    // name the function each key belongs to. Both come from a parse without
+    // answers; the source is the same, so the keys are the same.
+    let mut parsed = parser::parse_for_probe(&preprocessed.tokens, parser::Answers::default())
+        .map_err(|error| sources.render(&error))?;
+    if let Some(path) = options.probe_answers.as_deref() {
+        // One answer can unlock requests that only exist after an expansion (a
+        // generator may emit a call of its own), so keep feeding answers until
+        // the file has nothing new for the parse it just produced.
+        let mut collected: Vec<(parser::RequestKey, parser::Answer)> = Vec::new();
+        loop {
+            let fresh = read_answers(path, &parsed, &collected)?;
+            if fresh.is_empty() {
+                break;
+            }
+            collected.extend(fresh);
+            let mut answers = parser::Answers::default();
+            for (key, answer) in &collected {
+                answers.insert(key.clone(), answer.clone());
+            }
+            parsed = parser::parse_for_probe(&preprocessed.tokens, answers)
+                .map_err(|error| sources.render(&error))?;
+        }
+    }
+
+    let target = resolve_target(options)?;
+    let attributes = &preprocessed.attributes;
+    if !parsed.requests.is_empty() {
+        // A declaration this round has not shaped yet is layout or data, and no
+        // probe run can trap a read of it. Those requests are answered before
+        // any other, so a generator never reads a template the file has not
+        // finished; the sites come from the whole request list, so a request
+        // the trim below drops still keeps its declaration out of the image.
+        if parsed
+            .requests
+            .iter()
+            .any(|request| matches!(request.place, parser::Place::Type | parser::Place::Member))
+        {
+            // Values can depend on a type produced by this round, so finish
+            // layout requests before evaluating global initializers as well.
+            parsed.requests.retain(|request| {
+                matches!(request.place, parser::Place::Type | parser::Place::Member)
+            });
+        } else if !parsed.unresolved_declarations.is_empty() {
+            let declarations = parsed.unresolved_declarations.as_slice();
+            parsed
+                .requests
+                .retain(|request| declarations.contains(&request.site));
+        }
+        // A probe image is not a program. Its unit holds the `const fn` clones
+        // and the `_start` trampoline that calls them, so it is lowered without
+        // the compiler's automatic startup and never reaches a `main`.
+        let program = match probe::build(&mut parsed) {
+            probe::Outcome::Unit(program) => program,
+            probe::Outcome::Nothing => {
+                return Err("const-fn probe round has requests but no probe unit".into());
+            }
+            probe::Outcome::Unsupported {
+                function,
+                span,
+                reason,
+            } => {
+                let error = Diagnostic::new(
+                    span,
+                    format!("const fn '{function}' cannot be probed in this round: {reason}"),
+                );
+                return Err(sources.render(&error));
+            }
+        };
+        let lowered = lower::lower(
+            &program.unit,
+            &lower::Options {
+                // A probe image is linked next to the packaged library objects,
+                // so its module name must not repeat theirs: a user file named
+                // `std.shyc` would otherwise collide on `.L.std.*` sections.
+                module_name: "probe".to_string(),
+                layout: target.layout,
+                startup: StartupMode::Manual,
+                abi: target.abi,
+                disable_nonexhaustive_switch: attributes.disable_nonexhaustive_switch,
+                disable_rustic_mut: attributes.disable_rustic_mut,
+                disable_default_static: attributes.disable_default_static,
+                exports: Vec::new(),
+            },
+        )
+        .map_err(|error| sources.render(&error))?;
+        let assembly = shy::emit(
+            &lowered.module,
+            &shy::Options {
+                layout: target.layout,
+                emit_source_comments: false,
+            },
+        )
+        .map_err(|error| sources.render(&error))?;
+        let trampoline = probe::emit_probe_asm(&lowered, &program.calls)
+            .map_err(|reason| format!("{}: probe trampoline: {reason}", options.input.display()))?;
+        let manifest = round_manifest(&parsed, &sources)?;
+        fs::write(manifest_path, manifest)
+            .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+        let assembly = format!("{assembly}{trampoline}");
+        // A C output has no room for assembly, and a round with requests is not
+        // its final text: the driver sends the probe unit to its own path.
+        if let Some(path) = options.probe_object.as_deref() {
+            return fs::write(path, assembly)
+                .map_err(|error| format!("{}: {error}", path.display()));
+        }
+        return write_output(options.output.as_deref(), &assembly);
+    }
+    // Nothing is left to ask, so this unit is the program: the selected stage
+    // renders it exactly as it would without probe rounds.
+    let output = match options.stage {
+        Stage::CSource => render_c_source(options, &parsed.unit, attributes, &mut sources)?,
+        Stage::CHeader => {
+            // The output path names the include guard. Without `-o` the header
+            // goes to stdout, so the input path names it instead.
+            let guard_path = options.output.as_deref().unwrap_or(options.input.as_path());
+            let header_options = c::header::HeaderOptions {
+                guard: c::header::header_guard(guard_path),
+                root: file,
+                includes: preprocessed.includes,
+                defines: preprocessed.defines,
+            };
+            render_header(
+                options,
+                &parsed.unit,
+                &header_options,
+                attributes,
+                &mut sources,
+            )?
+        }
+        _ => {
+            let startup = if attributes.no_main || options.freestanding {
+                StartupMode::Manual
+            } else {
+                StartupMode::Main
+            };
+            let mut lowered = lower::lower(
+                &parsed.unit,
+                &lower::Options {
+                    module_name: module_name(&options.input),
+                    layout: target.layout,
+                    startup,
+                    abi: target.abi,
+                    disable_nonexhaustive_switch: attributes.disable_nonexhaustive_switch,
+                    disable_rustic_mut: attributes.disable_rustic_mut,
+                    disable_default_static: attributes.disable_default_static,
+                    exports: Vec::new(),
+                },
+            )
+            .map_err(|error| sources.render(&error))?;
+            lowered.module.resources.memory_bytes = attributes.memory.map(u64::from);
+            lowered.module.resources.stack_bytes = attributes.stack.map(u64::from);
+            if options.opt_level > 0 {
+                for function in &mut lowered.module.functions {
+                    passes::optimize(function, options.opt_level);
+                }
+            }
+            shy::emit(
+                &lowered.module,
+                &shy::Options {
+                    layout: target.layout,
+                    emit_source_comments: false,
+                },
+            )
+            .map_err(|error| sources.render(&error))?
+        }
+    };
+    // A round that reaches here has no request, so the manifest is header-only
+    // and the output above is the program.
+    let manifest = round_manifest(&parsed, &sources)?;
+    fs::write(manifest_path, manifest)
+        .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+    write_output(options.output.as_deref(), &output)
+}
+
+/// Reads the answers of the previous round.
+///
+/// A scalar answer is `<key>\tint32\t<decimal>`, where the decimal is shaped
+/// by the kind the manifest named for that request. A Tokens answer is
+/// `<key>\ttokens\t<count>\t<kind>:<hex>;...`, one semicolon-terminated token
+/// record per entry, and a count of zero spells no entries at all. A missing
+/// file is a first round, not an error.
+fn read_answers(
+    path: &Path,
+    parsed: &parser::ParseOutput,
+    known: &[(parser::RequestKey, parser::Answer)],
+) -> Result<Vec<(parser::RequestKey, parser::Answer)>, String> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some(PROBE_HEADER) {
+        return Err(format!(
+            "{}: the first line must be `{PROBE_HEADER}`",
+            path.display()
+        ));
+    }
+    let mut fresh = Vec::new();
+    for (index, line) in lines.enumerate() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let number = index + 2;
+        let mut fields = line.splitn(5, '\t');
+        let (Some(key), Some(kind), Some(value)) = (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(format!(
+                "{}:{number}: expected `<key>\\t<kind>\\t<value>`",
+                path.display()
+            ));
+        };
+        let detail = fields.next();
+        let extra = fields.next();
+        let Some(key) = parser::RequestKey::from_text(key) else {
+            return Err(format!(
+                "{}:{number}: malformed request key `{key}`",
+                path.display()
+            ));
+        };
+        // An answer for a call this parse does not ask about cannot change the
+        // result: a file that keeps earlier rounds' entries is expected. The
+        // ones already handed to the parse are skipped, so the caller can tell
+        // when feeding more stops changing anything.
+        if known.iter().any(|(seen, _)| *seen == key) {
+            continue;
+        }
+        let Some(request) = parsed.requests.iter().find(|request| request.key == key) else {
+            continue;
+        };
+        let answer = match kind {
+            "int32" => {
+                let kind =
+                    probe::result_kind(&parsed.const_fns[request.function]).map_err(|reason| {
+                        format!(
+                            "{}:{number}: const fn '{}': {reason}",
+                            path.display(),
+                            request.name
+                        )
+                    })?;
+                let decimal: i128 = value.trim().parse().map_err(|_| {
+                    format!(
+                        "{}:{number}: `{}` is not a decimal integer",
+                        path.display(),
+                        value.trim()
+                    )
+                })?;
+                let value = int_answer(kind, decimal)
+                    .map_err(|reason| format!("{}:{number}: {reason}", path.display()))?;
+                parser::Answer::Int(value)
+            }
+            "tokens" => {
+                if extra.is_some() {
+                    return Err(format!(
+                        "{}:{number}: unexpected fields after token answer",
+                        path.display()
+                    ));
+                }
+                parser::Answer::Tokens(
+                    token_answer(value, detail, request.site)
+                        .map_err(|reason| format!("{}:{number}: {reason}", path.display()))?,
+                )
+            }
+            "suspended" => {
+                let need = match value {
+                    "0" => false,
+                    "1" => true,
+                    _ => {
+                        return Err(format!(
+                            "{}:{number}: suspension kind must be 0 or 1",
+                            path.display()
+                        ));
+                    }
+                };
+                let owner = detail.and_then(decode_hex).ok_or_else(|| {
+                    format!("{}:{number}: invalid suspension owner hex", path.display())
+                })?;
+                let trait_name = extra.and_then(decode_hex).ok_or_else(|| {
+                    format!("{}:{number}: invalid suspension trait hex", path.display())
+                })?;
+                parser::Answer::Suspended {
+                    need,
+                    owner: String::from_utf8(owner).map_err(|_| {
+                        format!("{}:{number}: suspension owner is not UTF-8", path.display())
+                    })?,
+                    trait_name: String::from_utf8(trait_name).map_err(|_| {
+                        format!("{}:{number}: suspension trait is not UTF-8", path.display())
+                    })?,
+                }
+            }
+            other => {
+                return Err(format!(
+                    "{}:{number}: `{other}` is not an answer kind this stage reads",
+                    path.display()
+                ));
+            }
+        };
+        fresh.push((key, answer));
+    }
+    Ok(fresh)
+}
+
+/// The tokens one `tokens` answer names, or why the line is malformed.
+///
+/// Every spelling is a byte record the probe committed, in the order the
+/// generator produced them, and every token carries the span of the call that
+/// asked for the answer, the way tokens generated in this process do.
+fn token_answer(count: &str, items: Option<&str>, span: Span) -> Result<Vec<Token>, String> {
+    let count: usize = count
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{count}` is not a token count"))?;
+    let mut tokens = Vec::with_capacity(count);
+    for item in items.unwrap_or("").split_terminator(';') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let (kind, hex) = item
+            .split_once(':')
+            .ok_or_else(|| format!("`{item}` is not `<kind>:<hex>`"))?;
+        let number: u32 = kind
+            .trim()
+            .parse()
+            .map_err(|_| format!("`{kind}` is not a token kind number"))?;
+        let bytes = decode_hex(hex.trim()).ok_or_else(|| format!("`{hex}` is not hex"))?;
+        let spelling =
+            String::from_utf8(bytes).map_err(|_| format!("token {number} is not valid UTF-8"))?;
+        let Some(kind) = parser::token_from_probe(number, &spelling) else {
+            return Err(format!("`{number}` is not a token kind"));
+        };
+        let at_line_start = tokens.last().map_or(true, |previous: &Token| {
+            matches!(previous.kind, TokenKind::Newline)
+        });
+        tokens.push(Token {
+            kind,
+            span,
+            at_line_start,
+            leading_space: true,
+        });
+    }
+    if tokens.len() != count {
+        return Err(format!(
+            "the answer names {count} token(s) but spells {}",
+            tokens.len()
+        ));
+    }
+    Ok(tokens)
+}
+
+/// The bytes a hex string spells, or `None` when it is not hex.
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    let digits = text.as_bytes();
+    if !digits.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(digits.len() / 2);
+    for pair in digits.chunks_exact(2) {
+        let pair = std::str::from_utf8(pair).ok()?;
+        bytes.push(u8::from_str_radix(pair, 16).ok()?);
+    }
+    Some(bytes)
+}
+
+/// The manifest of one round: `id\tkey\tkind` per request.
+///
+/// The id is the request's index, which is the adapter `probe::build`
+/// generates for it, so a RESULT frame can be paired with the request that
+/// asked. The kind is what the driver needs to shape the answer it writes.
+fn manifest_text(
+    requests: &[parser::ProbeRequest],
+    const_fns: &[parser::ConstFn],
+) -> Result<String, (usize, String)> {
+    let mut text = String::from(PROBE_HEADER);
+    text.push('\n');
+    for (id, request) in requests.iter().enumerate() {
+        let kind =
+            probe::result_kind(&const_fns[request.function]).map_err(|reason| (id, reason))?;
+        text.push_str(&format!(
+            "{id}\t{}\t{}\n",
+            request.key.text(),
+            kind_word(kind)
+        ));
+    }
+    Ok(text)
+}
+
+/// The manifest of one round, or the diagnostic of a request it cannot name.
+fn round_manifest(parsed: &parser::ParseOutput, sources: &SourceMap) -> Result<String, String> {
+    match manifest_text(&parsed.requests, &parsed.const_fns) {
+        Ok(text) => Ok(text),
+        Err((id, reason)) => {
+            let request = &parsed.requests[id];
+            let error = Diagnostic::new(
+                request.site,
+                format!(
+                    "const fn '{}' cannot be probed in this round: {reason}",
+                    request.name
+                ),
+            );
+            Err(sources.render(&error))
+        }
+    }
+}
+
+/// Writes a backend's text to `-o`, or to stdout.
+fn write_output(path: Option<&Path>, text: &str) -> Result<(), String> {
+    match path {
+        Some(path) => fs::write(path, text).map_err(|error| format!("{}: {error}", path.display())),
+        None => io::stdout()
+            .lock()
+            .write_all(text.as_bytes())
+            .map_err(|error| error.to_string()),
+    }
 }

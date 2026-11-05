@@ -10,6 +10,12 @@ mod probe;
 
 static TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// Default limits of one probe round: the emulator's own defaults.
+const DEFAULT_PROBE_STEPS: u64 = 32_000_000;
+const DEFAULT_PROBE_TIMEOUT_MS: u64 = 2_000;
+/// A probe that keeps asking for the same thing is a bug; stop instead.
+const DEFAULT_PROBE_ROUNDS: usize = 256;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
     Preprocess,
@@ -54,10 +60,22 @@ struct Options {
     /// this stops after the frontend.
     emit: Option<String>,
     emit_debug_info: bool,
-    /// `--constfn-probe`: ask the compiler for const-fn probe rounds and run
-    /// them in the emulator. Explicit opt-in only, and the final image is never
-    /// the thing that is probed.
+    /// Whether `const fn` calls run as probe rounds in the emulator.
+    ///
+    /// On by default (`--constfn-probe` spells it, `--no-constfn-probe` turns
+    /// it off): the probe image is temporary and the final image is never the
+    /// thing that is executed.
     probe: bool,
+    /// Instruction budget of one probe round.
+    constfn_steps: u64,
+    /// Wall-clock budget of one probe round, in milliseconds.
+    constfn_timeout_ms: u64,
+    /// Rounds a probe may take before it counts as unsettled.
+    constfn_rounds: usize,
+    /// `--probe-only`: run the probe rounds of one input and stop.
+    probe_only: bool,
+    /// Where `--probe-only` writes the answers its rounds collected.
+    probe_answers: Option<PathBuf>,
     compile_args: Vec<String>,
     /// `-Wl,` items, forwarded to clang; the Shy linker validates them itself.
     link_args: Vec<String>,
@@ -99,6 +117,20 @@ impl Drop for TempFiles {
     }
 }
 
+/// Default library objects a probe image links, and the final link reuses when
+/// it links the same libraries.
+///
+/// A probe unit may call the same String and Display helpers the program would,
+/// so the probe image always links the default libraries, even under
+/// `-nostdlib`: that flag governs the program's dependencies, not the compiler's
+/// const-fn execution environment. The objects reach the temporary probe image;
+/// the artifact still gets exactly what the final link lists. Building them once
+/// keeps each probe round from recompiling libshy.
+struct ProbeLibs {
+    libshy: Vec<PathBuf>,
+    float: PathBuf,
+}
+
 fn main() -> Result<()> {
     let opts = parse_args(env::args().skip(1).collect())?;
     run(opts)
@@ -122,7 +154,12 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         sysroot: None,
         emit: None,
         emit_debug_info: false,
-        probe: false,
+        probe: cfg!(feature = "constfn-probe"),
+        constfn_steps: DEFAULT_PROBE_STEPS,
+        constfn_timeout_ms: DEFAULT_PROBE_TIMEOUT_MS,
+        constfn_rounds: DEFAULT_PROBE_ROUNDS,
+        probe_only: false,
+        probe_answers: None,
         compile_args: Vec::new(),
         link_args: Vec::new(),
         inputs: Vec::new(),
@@ -179,6 +216,45 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
             }
             "-###" => opts.print_only = true,
             "--constfn-probe" | "--probe" => opts.probe = true,
+            "--no-constfn-probe" => opts.probe = false,
+            "--probe-only" => {
+                opts.probe = true;
+                opts.probe_only = true;
+            }
+            "--probe-answers" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    bail!("option `--probe-answers` requires an argument");
+                };
+                opts.probe_answers = Some(PathBuf::from(value));
+            }
+            "--constfn-steps" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    bail!("option `--constfn-steps` requires an argument");
+                };
+                opts.constfn_steps = value.parse().with_context(|| {
+                    format!("`--constfn-steps` needs an unsigned integer, got `{value}`")
+                })?;
+            }
+            "--constfn-timeout-ms" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    bail!("option `--constfn-timeout-ms` requires an argument");
+                };
+                opts.constfn_timeout_ms = value.parse().with_context(|| {
+                    format!("`--constfn-timeout-ms` needs an unsigned integer, got `{value}`")
+                })?;
+            }
+            "--constfn-rounds" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    bail!("option `--constfn-rounds` requires an argument");
+                };
+                opts.constfn_rounds = value.parse().with_context(|| {
+                    format!("`--constfn-rounds` needs an unsigned integer, got `{value}`")
+                })?;
+            }
             "-save-temps" | "--save-temps" => opts.save_temps = true,
             "-E" => opts.stage = Stage::Preprocess,
             "-S" => opts.stage = Stage::Asm,
@@ -278,14 +354,23 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
     }
 
     if opts.probe {
+        if opts.constfn_rounds == 0 {
+            bail!("`--constfn-rounds` must be at least 1");
+        }
+        probe::check_limits(opts.constfn_steps, opts.constfn_timeout_ms)?;
         if opts.stage != Stage::Link {
             bail!(
-                "`--constfn-probe` needs a final link; it cannot be combined with \
-                 -E, -S, or -c"
+                "`--constfn-probe` needs a final link or a C text output; it cannot be \
+                 combined with -E, -S, or -c"
             );
         }
-        if opts.emit.is_some() {
-            bail!("`--constfn-probe` needs a final link; it cannot be combined with --emit");
+        if let Some(emit) = &opts.emit
+            && !matches!(emit.as_str(), "c" | "c-header")
+        {
+            bail!(
+                "`--constfn-probe` only applies to a final link, --emit=c, or \
+                 --emit=c-header; `--emit={emit}` cannot run probe rounds"
+            );
         }
         if opts.print_only {
             bail!("`--constfn-probe` cannot be combined with -###, which only prints commands");
@@ -299,6 +384,20 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                  clang and produces no Shy image to probe",
                 opts.target
             );
+        }
+    }
+    if opts.probe_only && opts.probe_answers.is_none() {
+        bail!("`--probe-only` requires `--probe-answers <path>`");
+    }
+    if opts.probe_answers.is_some() && !opts.probe_only {
+        bail!("`--probe-answers` is only valid with `--probe-only`");
+    }
+    if opts.probe_only {
+        if opts.inputs.len() != 1 {
+            bail!("`--probe-only` takes exactly one input file");
+        }
+        if opts.emit.is_some() {
+            bail!("`--probe-only` cannot be combined with --emit");
         }
     }
 
@@ -422,10 +521,9 @@ fn forwarded_to_shyc(arg: &str) -> bool {
 
 fn run(mut opts: Options) -> Result<()> {
     if opts.probe {
-        // Probe rounds replace the ordinary pipeline: they need the compiler's
-        // requests, which `shyc` does not emit yet. Refuse before building
-        // anything rather than fall back to running the final image.
-        probe::rounds()?;
+        // The runner is compiled in only with the `constfn-probe` feature; a
+        // default build refuses the flag before anything runs.
+        probe::ensure_runner()?;
     }
     let repo = repo_root();
     opts.target = normalize_target(&opts.target);
@@ -438,10 +536,34 @@ fn run(mut opts: Options) -> Result<()> {
             opts.target = triple;
         }
     }
+    if opts.probe_only {
+        // The editor only needs the answers, not an assembly file or an image.
+        let mut temps = TempFiles::new(false);
+        let mut libs: Option<ProbeLibs> = None;
+        let asm = temps.temp_path(".probe.shy");
+        run_probe_unit(&repo, &opts, &opts.inputs[0], &asm, &mut temps, &mut libs)?;
+        return Ok(());
+    }
     if let Some(emit) = opts.emit.clone() {
+        // Probe rounds keep one set of temporary files and one copy of the
+        // default libraries for every input of this run.
+        let mut probe_temps = TempFiles::new(false);
+        let mut probe_libs: Option<ProbeLibs> = None;
         for input in &opts.inputs {
             ensure_kind(input, InputKind::C)?;
-            run_emit(&repo, &opts, input, opts.output.as_deref(), &emit)?;
+            if opts.probe {
+                run_emit_probe(
+                    &repo,
+                    &opts,
+                    input,
+                    opts.output.as_deref(),
+                    &emit,
+                    &mut probe_temps,
+                    &mut probe_libs,
+                )?;
+            } else {
+                run_emit(&repo, &opts, input, opts.output.as_deref(), &emit, None)?;
+            }
         }
         return Ok(());
     }
@@ -452,6 +574,12 @@ fn run(mut opts: Options) -> Result<()> {
         bail!("unsupported linker option for Shy linker: {arg}");
     }
     let mut temps = TempFiles::new(opts.save_temps || opts.print_only);
+    // Probe images and round files are never part of the build's output, so
+    // they go away even under `-save-temps`.
+    let mut probe_temps = TempFiles::new(false);
+    // Default libraries of the probe image, built on the first round and reused
+    // by the final link.
+    let mut probe_libs: Option<ProbeLibs> = None;
 
     if opts.stage == Stage::Preprocess {
         for input in &opts.inputs {
@@ -476,7 +604,11 @@ fn run(mut opts: Options) -> Result<()> {
                 } else {
                     temps.temp_path(".shy")
                 };
-                run_compiler(&repo, &opts, input, Some(&asm), false, false)?;
+                if opts.probe {
+                    run_probe_unit(&repo, &opts, input, &asm, &mut probe_temps, &mut probe_libs)?;
+                } else {
+                    run_compiler(&repo, &opts, input, Some(&asm), false, false)?;
+                }
                 collect_debug_input(&opts, &mut temps, &mut debug_inputs, &asm)?;
                 if opts.stage == Stage::Asm {
                     continue;
@@ -546,8 +678,14 @@ fn run(mut opts: Options) -> Result<()> {
 
     for lib in &libraries {
         match lib.as_str() {
-            "libshy" => objects.extend(build_libshy(&repo, &opts, &mut temps)?),
-            "float" => objects.push(build_float_lib(&repo, &opts, &mut temps)?),
+            "libshy" => match &probe_libs {
+                Some(built) => objects.extend(built.libshy.iter().cloned()),
+                None => objects.extend(build_libshy(&repo, &opts, &mut temps)?),
+            },
+            "float" => match &probe_libs {
+                Some(built) => objects.push(built.float.clone()),
+                None => objects.push(build_float_lib(&repo, &opts, &mut temps)?),
+            },
             _ => bail!("unknown internal Shy library: -l{lib}"),
         }
     }
@@ -582,7 +720,7 @@ fn run_compiler(
 ) -> Result<()> {
     match opts.backend {
         Backend::Chibicc => run_chibicc(repo, opts, input, output, preprocess_only, link_runtime),
-        Backend::Shyc => run_shyc(repo, opts, input, output, preprocess_only),
+        Backend::Shyc => run_shyc(repo, opts, input, output, preprocess_only, None),
     }
 }
 
@@ -603,12 +741,22 @@ fn shylib() -> PathBuf {
 /// Drive the independent compiler. It has no equivalent of chibicc's extra
 /// flags: the runtime is linked as a normal object and source lines are not
 /// emitted yet.
+/// Files one probe round exchanges with `shyc`.
+struct ProbeArgs<'a> {
+    manifest: &'a Path,
+    answers: &'a Path,
+    /// Where a round with requests writes its probe unit. `None` keeps the
+    /// assembly as the main output, which is what `-S` expects.
+    object: Option<&'a Path>,
+}
+
 fn run_shyc(
     repo: &Path,
     opts: &Options,
     input: &str,
     output: Option<&Path>,
     preprocess_only: bool,
+    probe: Option<&ProbeArgs>,
 ) -> Result<()> {
     let mut cmd = shyc_command(repo, opts.print_only)?;
     cmd.arg(format!("--target={}", opts.target));
@@ -623,11 +771,144 @@ fn run_shyc(
             cmd.arg(arg);
         }
     }
+    if let Some(probe) = probe {
+        cmd.arg("--constfn-probe")
+            .arg("--probe-manifest")
+            .arg(probe.manifest)
+            .arg("--probe-answers")
+            .arg(probe.answers);
+        if let Some(object) = probe.object {
+            cmd.arg("--probe-object").arg(object);
+        }
+    }
     if let Some(output) = output {
         cmd.arg("-o").arg(output);
     }
     cmd.arg(input);
     run_command(opts, &mut cmd)
+}
+
+/// Drive one input unit through answer rounds until `shyc` asks for nothing.
+///
+/// A non-empty manifest means the assembly just written is a probe unit: it is
+/// assembled and linked with the default libshy and float objects (always, even
+/// under `-nostdlib`; built once and shared with the final link), run in the
+/// emulator, and its RESULT frames and committed token stream become the next
+/// answers. The probe unit brings its own `_start` trampoline and the driver
+/// never looks for a `main`; the linker's entry check is the only requirement.
+/// Only the round with an empty manifest leaves user assembly behind, and that
+/// is what `output` receives.
+#[cfg(feature = "constfn-probe")]
+fn run_probe_unit(
+    repo: &Path,
+    opts: &Options,
+    input: &str,
+    output: &Path,
+    temps: &mut TempFiles,
+    libs: &mut Option<ProbeLibs>,
+) -> Result<()> {
+    let answers = match &opts.probe_answers {
+        Some(path) => path.clone(),
+        None => temps.temp_path(".probe.answers"),
+    };
+    let mut answered: Vec<probe::Answer> = Vec::new();
+    probe::write_answers(&answers, &[])?;
+    for _ in 0..opts.constfn_rounds {
+        let manifest = temps.temp_path(".probe.manifest");
+        let asm = temps.temp_path(".probe.shy");
+        run_shyc(
+            repo,
+            opts,
+            input,
+            Some(&asm),
+            false,
+            Some(&ProbeArgs {
+                manifest: &manifest,
+                answers: &answers,
+                object: None,
+            }),
+        )?;
+
+        let requests = probe::read_manifest(&manifest)?;
+        if requests.is_empty() {
+            fs::copy(&asm, output).with_context(|| {
+                format!(
+                    "failed to write the assembly of `{input}` to {}",
+                    output.display()
+                )
+            })?;
+            return Ok(());
+        }
+
+        run_probe_image(
+            repo,
+            opts,
+            &asm,
+            &requests,
+            &answers,
+            &mut answered,
+            temps,
+            libs,
+        )?;
+    }
+    bail!(
+        "const-fn probe did not settle after {} rounds for `{input}`",
+        opts.constfn_rounds
+    )
+}
+
+/// Assemble one probe unit, link it into a temporary image, run it, and write
+/// the answers the next round reads.
+///
+/// The probe image is never the user's artifact: it links the default libshy
+/// and float objects, which are built once and reused, and it goes away with
+/// the temporary files.
+#[cfg(feature = "constfn-probe")]
+fn run_probe_image(
+    repo: &Path,
+    opts: &Options,
+    asm: &Path,
+    requests: &[probe::Request],
+    answers: &Path,
+    answered: &mut Vec<probe::Answer>,
+    temps: &mut TempFiles,
+    libs: &mut Option<ProbeLibs>,
+) -> Result<()> {
+    let obj = temps.temp_path(".probe.sobj");
+    run_asm(repo, opts, asm, &obj)?;
+    if libs.is_none() {
+        *libs = Some(ProbeLibs {
+            libshy: build_libshy(repo, opts, temps)?,
+            float: build_float_lib(repo, opts, temps)?,
+        });
+    }
+    let built = libs.as_ref().expect("probe libraries built above");
+    let mut objects = vec![obj];
+    objects.extend(built.libshy.iter().cloned());
+    objects.push(built.float.clone());
+    let image = temps.temp_path(".probe.sfs");
+    run_linker(repo, opts, &objects, &image, None)?;
+    let bytes = fs::read(&image)
+        .with_context(|| format!("failed to read probe image {}", image.display()))?;
+    // Answers accumulate: a later round may ask for something a generator only
+    // produced after an earlier answer, so a round that dropped the previous
+    // answers would ask for them again forever.
+    let options = probe::options(opts.constfn_steps, opts.constfn_timeout_ms);
+    answered.extend(probe::run_answers(&bytes, requests, options)?);
+    probe::write_answers(answers, answered)
+}
+
+/// Without the runner there is nothing to drive; the flag was refused earlier.
+#[cfg(not(feature = "constfn-probe"))]
+fn run_probe_unit(
+    _repo: &Path,
+    _opts: &Options,
+    _input: &str,
+    _output: &Path,
+    _temps: &mut TempFiles,
+    _libs: &mut Option<ProbeLibs>,
+) -> Result<()> {
+    probe::ensure_runner()
 }
 
 /// Print one of the compiler's text outputs instead of compiling.
@@ -641,6 +922,7 @@ fn run_emit(
     input: &str,
     output: Option<&Path>,
     emit: &str,
+    probe: Option<&ProbeArgs>,
 ) -> Result<()> {
     let mut cmd = shyc_command(repo, opts.print_only)?;
     cmd.arg(format!("--emit={emit}"));
@@ -652,11 +934,91 @@ fn run_emit(
             cmd.arg(arg);
         }
     }
+    if let Some(probe) = probe {
+        cmd.arg("--constfn-probe")
+            .arg("--probe-manifest")
+            .arg(probe.manifest)
+            .arg("--probe-answers")
+            .arg(probe.answers);
+        if let Some(object) = probe.object {
+            cmd.arg("--probe-object").arg(object);
+        }
+    }
     if let Some(output) = output {
         cmd.arg("-o").arg(output);
     }
     cmd.arg(input);
     run_command(opts, &mut cmd)
+}
+
+/// Drive one input through probe rounds for a C text output.
+///
+/// A round with requests writes its probe unit to a temporary file and no C
+/// text: the unit is assembled, linked with the cached probe libraries, and run
+/// in the emulator, and its answers go back into the next round. The first
+/// round with an empty manifest wrote the requested C text to the output, so
+/// that text is final and nothing else runs.
+#[cfg(feature = "constfn-probe")]
+fn run_emit_probe(
+    repo: &Path,
+    opts: &Options,
+    input: &str,
+    output: Option<&Path>,
+    emit: &str,
+    temps: &mut TempFiles,
+    libs: &mut Option<ProbeLibs>,
+) -> Result<()> {
+    let answers = temps.temp_path(".probe.answers");
+    let mut answered: Vec<probe::Answer> = Vec::new();
+    probe::write_answers(&answers, &[])?;
+    for _ in 0..opts.constfn_rounds {
+        let manifest = temps.temp_path(".probe.manifest");
+        let object = temps.temp_path(".probe.shy");
+        run_emit(
+            repo,
+            opts,
+            input,
+            output,
+            emit,
+            Some(&ProbeArgs {
+                manifest: &manifest,
+                answers: &answers,
+                object: Some(&object),
+            }),
+        )?;
+        let requests = probe::read_manifest(&manifest)?;
+        if requests.is_empty() {
+            return Ok(());
+        }
+        run_probe_image(
+            repo,
+            opts,
+            &object,
+            &requests,
+            &answers,
+            &mut answered,
+            temps,
+            libs,
+        )?;
+    }
+    bail!(
+        "const-fn probe did not settle after {} rounds for `{input}`",
+        opts.constfn_rounds
+    )
+}
+
+/// Without the runner there is nothing to drive; the flag was refused earlier.
+#[cfg(not(feature = "constfn-probe"))]
+fn run_emit_probe(
+    _repo: &Path,
+    _opts: &Options,
+    _input: &str,
+    _output: Option<&Path>,
+    _emit: &str,
+    _temps: &mut TempFiles,
+    _libs: &mut Option<ProbeLibs>,
+) -> Result<()> {
+    probe::ensure_runner()
 }
 
 fn shyc_command(repo: &Path, print_only: bool) -> Result<Command> {
@@ -1201,8 +1563,14 @@ fn print_usage() {
          outputs: -o <file>, --sym <file>, -save-temps, -###,
          \x20 --emit=c|c-header|c-wrapper|shy|llvm (print text instead of linking)\n\
          debug: --shy-emit-source-lines, --shy-emit-debug-info\n\
-         probe: --constfn-probe (alias --probe) runs const-fn probe rounds in the\n\
-         \x20 emulator for a shy final link; opt-in only, not wired up yet\n\
+         probe: const-fn calls run as probe rounds in the emulator for a shy final\n\
+         \x20 link and for --emit=c / --emit=c-header; on by default, --no-constfn-\n\
+         \x20 probe turns it off (needs the constfn-probe feature at build time)\n\
+         \x20 --constfn-steps <n>, --constfn-timeout-ms <n>, --constfn-rounds <n>\n\
+         \x20 set one round's instruction and wall-clock budgets and the round cap\n\
+         \x20 (default 32000000, 2000, 256)\n\
+         \x20 --probe-only <file> --probe-answers <file> runs just those rounds\n\
+         \x20 and writes the answers instead of linking\n\
          inputs: .shyc/.c, .shy, .sobj\n\
          backend: --backend shyc|chibicc (default shyc)\n\
          target: --target <name> (default shy); rv64/riscv64, rv32/riscv32, x64/x86_64,\n\

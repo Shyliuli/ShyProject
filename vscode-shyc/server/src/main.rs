@@ -6,19 +6,24 @@
 
 mod analysis;
 mod index;
+mod probe;
 mod text;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Deserialize;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
+use shyc::source::Span;
+
 use crate::analysis::{Analysis, Settings};
 use crate::index::SymKind;
+use crate::probe::Answers;
 use crate::text::LineIndex;
 
 // Semantic token type indexes. They must match `legend()`.
@@ -48,24 +53,45 @@ struct Document {
     path: PathBuf,
 }
 
+/// A probe run waits for the typing to pause before it starts.
+const DEBOUNCE: Duration = Duration::from_millis(300);
+
+#[derive(Default)]
+struct ProbeState {
+    /// The answers of the last finished probe. They stay in use while a probe
+    /// for newer text runs, so generated items do not flicker.
+    answers: Option<Arc<Answers>>,
+    /// Answers already produced for one buffer content.
+    done: HashMap<u64, Arc<Answers>>,
+    /// Bumped on every edit; a probe for older text must not publish.
+    generation: u64,
+    /// Content hash a probe is running for, so a save or a repeat edit does
+    /// not start a second one.
+    running: Option<u64>,
+    /// The last failure that named a source location, with its content hash.
+    failure: Option<(u64, usize, String)>,
+}
+
 struct Backend {
     client: Client,
-    documents: Mutex<HashMap<Url, Document>>,
-    cache: Mutex<HashMap<Url, Arc<Analysis>>>,
-    settings: Mutex<Settings>,
-    root: Mutex<Option<PathBuf>>,
-    published: Mutex<HashMap<Url, HashSet<Url>>>,
+    documents: Arc<Mutex<HashMap<Url, Document>>>,
+    cache: Arc<Mutex<HashMap<Url, Arc<Analysis>>>>,
+    settings: Arc<Mutex<Settings>>,
+    root: Arc<Mutex<Option<PathBuf>>>,
+    published: Arc<Mutex<HashMap<Url, HashSet<Url>>>>,
+    probes: Arc<Mutex<HashMap<Url, ProbeState>>>,
 }
 
 impl Backend {
     fn new(client: Client) -> Self {
         Backend {
             client,
-            documents: Mutex::new(HashMap::new()),
-            cache: Mutex::new(HashMap::new()),
-            settings: Mutex::new(Settings::default()),
-            root: Mutex::new(None),
-            published: Mutex::new(HashMap::new()),
+            documents: Arc::new(Mutex::new(HashMap::new())),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            settings: Arc::new(Mutex::new(Settings::default())),
+            root: Arc::new(Mutex::new(None)),
+            published: Arc::new(Mutex::new(HashMap::new())),
+            probes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -99,8 +125,12 @@ impl Backend {
 
     async fn analysis(&self, uri: &Url) -> Option<Arc<Analysis>> {
         let (text, version, path) = self.document(uri).await?;
+        let answers = self.answers_for(uri, content_hash(&text));
         if let Some(cached) = self.cache.lock().unwrap().get(uri) {
-            if cached.version == version && cached.text == text {
+            if cached.version == version
+                && cached.text == text
+                && same_answers(&cached.answers, &answers)
+            {
                 return Some(cached.clone());
             }
         }
@@ -109,7 +139,15 @@ impl Backend {
         let root = self.root.lock().unwrap().clone();
         let uri = uri.clone();
         let analysis = tokio::task::spawn_blocking(move || {
-            Analysis::build(uri, path, text, version, &settings, root.as_deref())
+            Analysis::build(
+                uri,
+                path,
+                text,
+                version,
+                &settings,
+                root.as_deref(),
+                answers,
+            )
         })
         .await
         .ok()?;
@@ -121,6 +159,32 @@ impl Backend {
         Some(analysis)
     }
 
+    fn answers_for(&self, uri: &Url, hash: u64) -> Option<Arc<Answers>> {
+        let probes = self.probes.lock().unwrap();
+        let state = probes.get(uri)?;
+        state
+            .done
+            .get(&hash)
+            .cloned()
+            .or_else(|| state.answers.clone())
+    }
+
+    fn probe_failure(&self, uri: &Url, analysis: &Analysis) -> Option<shyc::source::Diagnostic> {
+        let probes = self.probes.lock().unwrap();
+        let (hash, offset, message) = probes.get(uri)?.failure.as_ref()?;
+        if *hash != content_hash(&analysis.text) {
+            return None;
+        }
+        Some(shyc::source::Diagnostic::new(
+            Span {
+                file: analysis.root,
+                start: *offset,
+                end: *offset,
+            },
+            message.clone(),
+        ))
+    }
+
     async fn refresh_diagnostics(&self, uri: Url) {
         let enabled = self.settings.lock().unwrap().diagnostics;
         let Some(analysis) = self.analysis(&uri).await else {
@@ -128,49 +192,296 @@ impl Backend {
             return;
         };
 
-        let mut grouped: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
-        grouped.entry(uri.clone()).or_default();
-        if enabled {
-            for diagnostic in &analysis.diagnostics {
-                let target = analysis
-                    .uri_of(diagnostic.span.file)
-                    .unwrap_or_else(|| uri.clone());
-                grouped
-                    .entry(target)
-                    .or_default()
-                    .push(lsp_diagnostic(&analysis, diagnostic));
-            }
-        }
-
-        let current: HashSet<Url> = grouped.keys().cloned().collect();
-        let previous = self
-            .published
-            .lock()
-            .unwrap()
-            .insert(uri, current.clone())
-            .unwrap_or_default();
-
-        for (target, diagnostics) in grouped {
-            self.client
-                .publish_diagnostics(target, diagnostics, None)
-                .await;
-        }
-        for stale in previous.difference(&current) {
-            self.client
-                .publish_diagnostics(stale.clone(), Vec::new(), None)
-                .await;
-        }
+        let failure = self.probe_failure(&uri, &analysis);
+        let grouped = grouped_diagnostics(&analysis, &uri, enabled, failure.as_ref());
+        publish_grouped(&self.client, &self.published, uri, grouped).await;
     }
 
     async fn refresh_open_documents(&self) {
         let uris: Vec<Url> = self.documents.lock().unwrap().keys().cloned().collect();
         for uri in uris {
-            self.refresh_diagnostics(uri).await;
+            self.refresh_diagnostics(uri.clone()).await;
+            self.schedule_probe(uri, Some(DEBOUNCE)).await;
         }
+    }
+
+    /// Run the probe rounds for this buffer after the editor pauses, or now
+    /// when the file was just saved.
+    async fn schedule_probe(&self, uri: Url, delay: Option<Duration>) {
+        let Some((text, version, path)) = self.document(&uri).await else {
+            return;
+        };
+        let hash = content_hash(&text);
+        let generation = {
+            let mut probes = self.probes.lock().unwrap();
+            let state = probes.entry(uri.clone()).or_default();
+            if state.running == Some(hash) {
+                return;
+            }
+            // New text invalidates a probe for older text even when its own
+            // answers are already cached.
+            state.generation += 1;
+            if state.done.contains_key(&hash) {
+                return;
+            }
+            state.running = Some(hash);
+            state.generation
+        };
+
+        let settings = self.settings.lock().unwrap().clone();
+        let root = self.root.lock().unwrap().clone();
+        let include_dirs = analysis::search_dirs(&path, root.as_deref(), &settings);
+        let defines = settings.defines.clone();
+        let program = locate_shycc(
+            settings.shycc_path.as_deref(),
+            &path,
+            root.as_deref(),
+            settings.libshy_path.as_deref(),
+        );
+        let enabled = settings.diagnostics;
+        let client = self.client.clone();
+        let cache = self.cache.clone();
+        let published = self.published.clone();
+        let probes = self.probes.clone();
+        let documents = self.documents.clone();
+
+        tokio::spawn(async move {
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            let current = probes
+                .lock()
+                .unwrap()
+                .get(&uri)
+                .is_some_and(|state| state.generation == generation);
+            if !current {
+                release_probe(&probes, &uri, hash);
+                return;
+            }
+
+            let probe_path = path.clone();
+            let probe_text = text.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                probe::run(&program, &probe_path, &probe_text, &include_dirs, &defines)
+            })
+            .await;
+            let Ok(outcome) = outcome else {
+                release_probe(&probes, &uri, hash);
+                return;
+            };
+
+            let (current, answers) = {
+                let mut probes = probes.lock().unwrap();
+                let Some(state) = probes.get_mut(&uri) else {
+                    return;
+                };
+                if state.running == Some(hash) {
+                    state.running = None;
+                }
+                if outcome.success {
+                    if let Some(answers) = &outcome.answers {
+                        if state.done.len() >= 8 {
+                            state.done.clear();
+                        }
+                        state.done.insert(hash, answers.clone());
+                        if state.generation == generation {
+                            state.answers = Some(answers.clone());
+                            state.failure = None;
+                        }
+                    }
+                }
+                if state.generation == generation {
+                    if let Some((offset, message)) = &outcome.failure {
+                        state.failure = Some((hash, *offset, message.clone()));
+                    }
+                }
+                (
+                    state.generation == generation,
+                    state
+                        .done
+                        .get(&hash)
+                        .cloned()
+                        .or_else(|| state.answers.clone()),
+                )
+            };
+            if !current {
+                return;
+            }
+            if outcome.answers.is_none() && outcome.failure.is_none() {
+                return;
+            }
+            if !documents.lock().unwrap().contains_key(&uri) {
+                return;
+            }
+
+            let failure = {
+                let probes = probes.lock().unwrap();
+                probes
+                    .get(&uri)
+                    .and_then(|state| state.failure.as_ref())
+                    .map(|(_, offset, message)| (*offset, message.clone()))
+            };
+            let analysis_uri = uri.clone();
+            let analysis = tokio::task::spawn_blocking(move || {
+                Analysis::build(
+                    analysis_uri,
+                    path,
+                    text,
+                    version,
+                    &settings,
+                    root.as_deref(),
+                    answers,
+                )
+            })
+            .await;
+            let Ok(analysis) = analysis else {
+                return;
+            };
+            cache
+                .lock()
+                .unwrap()
+                .insert(analysis.uri.clone(), analysis.clone());
+            let failure = failure.map(|(offset, message)| {
+                shyc::source::Diagnostic::new(
+                    Span {
+                        file: analysis.root,
+                        start: offset,
+                        end: offset,
+                    },
+                    message,
+                )
+            });
+            let grouped = grouped_diagnostics(&analysis, &uri, enabled, failure.as_ref());
+            publish_grouped(&client, &published, uri, grouped).await;
+        });
     }
 
     fn clear_cache(&self, uri: &Url) {
         self.cache.lock().unwrap().remove(uri);
+    }
+
+    fn clear_probes(&self) {
+        self.probes.lock().unwrap().clear();
+    }
+}
+
+fn release_probe(probes: &Mutex<HashMap<Url, ProbeState>>, uri: &Url, hash: u64) {
+    if let Some(state) = probes.lock().unwrap().get_mut(uri) {
+        if state.running == Some(hash) {
+            state.running = None;
+        }
+    }
+}
+
+/// The `shycc` driver to run probe rounds with.
+fn locate_shycc(
+    configured: Option<&Path>,
+    document: &Path,
+    root: Option<&Path>,
+    libshy: Option<&Path>,
+) -> PathBuf {
+    if let Some(configured) = configured {
+        return configured.to_path_buf();
+    }
+    if let Some(configured) = std::env::var_os("SHYCC") {
+        return PathBuf::from(configured);
+    }
+    let name = format!("shycc{}", std::env::consts::EXE_SUFFIX);
+    let mut candidates = Vec::new();
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(directory) = current.parent() {
+            candidates.push(directory.join(&name));
+        }
+    }
+    if let Some(root) = root {
+        candidates.push(root.join("target/debug").join(&name));
+        candidates.push(root.join("target/release").join(&name));
+    }
+    // A configured libshy usually sits in the checkout that built the driver.
+    if let Some(libshy) = libshy {
+        let libshy = if libshy.join("libshy").is_dir() {
+            libshy.join("libshy")
+        } else {
+            libshy.to_path_buf()
+        };
+        for ancestor in libshy.ancestors() {
+            candidates.push(ancestor.join("target/debug").join(&name));
+            candidates.push(ancestor.join("target/release").join(&name));
+        }
+    }
+    for ancestor in document.ancestors().skip(1) {
+        candidates.push(ancestor.join("target/debug").join(&name));
+        candidates.push(ancestor.join("target/release").join(&name));
+    }
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+fn content_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn same_answers(left: &Option<Arc<Answers>>, right: &Option<Arc<Answers>>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+        _ => false,
+    }
+}
+
+fn grouped_diagnostics(
+    analysis: &Analysis,
+    uri: &Url,
+    enabled: bool,
+    failure: Option<&shyc::source::Diagnostic>,
+) -> HashMap<Url, Vec<Diagnostic>> {
+    let mut grouped: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
+    grouped.entry(uri.clone()).or_default();
+    if enabled {
+        for diagnostic in &analysis.diagnostics {
+            let target = analysis
+                .uri_of(diagnostic.span.file)
+                .unwrap_or_else(|| uri.clone());
+            grouped
+                .entry(target)
+                .or_default()
+                .push(lsp_diagnostic(analysis, diagnostic));
+        }
+        if let Some(failure) = failure {
+            grouped
+                .entry(uri.clone())
+                .or_default()
+                .push(lsp_diagnostic(analysis, failure));
+        }
+    }
+    grouped
+}
+
+async fn publish_grouped(
+    client: &Client,
+    published: &Mutex<HashMap<Url, HashSet<Url>>>,
+    uri: Url,
+    grouped: HashMap<Url, Vec<Diagnostic>>,
+) {
+    let current: HashSet<Url> = grouped.keys().cloned().collect();
+    let previous = published
+        .lock()
+        .unwrap()
+        .insert(uri, current.clone())
+        .unwrap_or_default();
+
+    for (target, diagnostics) in grouped {
+        client.publish_diagnostics(target, diagnostics, None).await;
+    }
+    for stale in previous.difference(&current) {
+        client
+            .publish_diagnostics(stale.clone(), Vec::new(), None)
+            .await;
     }
 }
 
@@ -271,7 +582,8 @@ impl LanguageServer for Backend {
             },
         );
         self.clear_cache(&document.uri);
-        self.refresh_diagnostics(document.uri).await;
+        self.refresh_diagnostics(document.uri.clone()).await;
+        self.schedule_probe(document.uri, None).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -284,18 +596,22 @@ impl LanguageServer for Backend {
             document.version = Some(params.text_document.version);
         }
         self.clear_cache(&uri);
-        self.refresh_diagnostics(uri).await;
+        self.refresh_diagnostics(uri.clone()).await;
+        self.schedule_probe(uri, Some(DEBOUNCE)).await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         self.clear_cache(&params.text_document.uri);
-        self.refresh_diagnostics(params.text_document.uri).await;
+        self.refresh_diagnostics(params.text_document.uri.clone())
+            .await;
+        self.schedule_probe(params.text_document.uri, None).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
         self.documents.lock().unwrap().remove(&uri);
         self.clear_cache(&uri);
+        self.probes.lock().unwrap().remove(&uri);
         let previously = self.published.lock().unwrap().remove(&uri);
         if let Some(previously) = previously {
             for target in previously {
@@ -310,6 +626,7 @@ impl LanguageServer for Backend {
         if let Some(settings) = parse_settings(&params.settings) {
             *self.settings.lock().unwrap() = settings;
             self.cache.lock().unwrap().clear();
+            self.clear_probes();
             self.refresh_open_documents().await;
         }
     }
@@ -321,6 +638,7 @@ impl LanguageServer for Backend {
                 || change.uri.path().ends_with(".shyc")
         }) {
             self.cache.lock().unwrap().clear();
+            self.clear_probes();
             self.refresh_open_documents().await;
         }
     }
@@ -433,6 +751,7 @@ impl LanguageServer for Backend {
 #[serde(rename_all = "camelCase")]
 struct InitOptions {
     libshy_path: Option<String>,
+    shycc_path: Option<String>,
     include_dirs: Option<Vec<String>>,
     defines: Option<Vec<String>>,
     diagnostics_enabled: Option<bool>,
@@ -448,6 +767,11 @@ impl InitOptions {
                 .map(PathBuf::from)
                 .filter(|path| !path.as_os_str().is_empty())
                 .or(base.libshy_path),
+            shycc_path: self
+                .shycc_path
+                .map(PathBuf::from)
+                .filter(|path| !path.as_os_str().is_empty())
+                .or(base.shycc_path),
             include_dirs: non_empty_paths(self.include_dirs).unwrap_or(base.include_dirs),
             defines: non_empty_defines(self.defines).unwrap_or(base.defines),
             diagnostics: self.diagnostics_enabled.unwrap_or(base.diagnostics),
@@ -491,6 +815,11 @@ fn file_settings() -> Settings {
     Settings {
         libshy_path: values
             .get("libshy_path")
+            .and_then(|values| values.first())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        shycc_path: values
+            .get("shycc_path")
             .and_then(|values| values.first())
             .filter(|value| !value.is_empty())
             .map(PathBuf::from),
@@ -561,6 +890,7 @@ fn unquote(value: &str) -> String {
 #[serde(rename_all = "camelCase")]
 struct SettingsPayload {
     libshy_path: Option<String>,
+    shycc_path: Option<String>,
     include_dirs: Option<Vec<String>>,
     defines: Option<Vec<String>>,
     diagnostics_enabled: Option<bool>,
@@ -586,6 +916,11 @@ fn parse_settings(value: &serde_json::Value) -> Option<Settings> {
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty())
             .or(base.libshy_path),
+        shycc_path: payload
+            .shycc_path
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .or(base.shycc_path),
         include_dirs: non_empty_paths(payload.include_dirs).unwrap_or(base.include_dirs),
         defines: non_empty_defines(payload.defines).unwrap_or(base.defines),
         diagnostics: payload.diagnostics_enabled.unwrap_or(base.diagnostics),
@@ -726,6 +1061,35 @@ fn token_type(kind: SymKind) -> u32 {
     }
 }
 
+/// Best-effort type of an identifier the symbol index does not know.
+///
+/// A buffer is highlighted while it is being typed, so a parse failure is
+/// normal, not exceptional. Without this the file would lose every
+/// identifier color until the next successful parse, because the index is
+/// empty then. The token stream still separates `.field`, `call(` and a
+/// plain name, which is enough to keep the file readable.
+fn guess_token_type(
+    word: &str,
+    previous: Option<&shyc::lexer::Token>,
+    next: Option<&shyc::lexer::Token>,
+) -> u32 {
+    fn punct(token: Option<&shyc::lexer::Token>) -> Option<&str> {
+        match token.map(|token| &token.kind) {
+            Some(shyc::lexer::TokenKind::Punct(punct)) => Some(punct),
+            _ => None,
+        }
+    }
+
+    let called = punct(next) == Some("(");
+    match punct(previous) {
+        Some("." | "->") if called => TOK_METHOD,
+        Some("." | "->") => TOK_PROPERTY,
+        _ if called => TOK_FUNCTION,
+        _ if word.chars().next().is_some_and(char::is_uppercase) => TOK_TYPE,
+        _ => TOK_VARIABLE,
+    }
+}
+
 fn keyword_token(word: &str) -> Option<u32> {
     if shyc::parser::builtin_type(word).is_some() {
         return Some(TOK_TYPE);
@@ -798,8 +1162,30 @@ fn semantic_tokens(analysis: &Analysis) -> Vec<SemanticToken> {
         })
         .collect();
 
+    // The fallback classifier below reads the neighbouring token, so the
+    // loop walks the significant ones in order instead of the raw stream.
+    let significant: Vec<usize> = analysis
+        .raw_tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| {
+            !matches!(
+                &token.kind,
+                shyc::lexer::TokenKind::Newline | shyc::lexer::TokenKind::Eof
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+
     let mut tokens: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
-    for token in &analysis.raw_tokens {
+    for (position, &index) in significant.iter().enumerate() {
+        let token = &analysis.raw_tokens[index];
+        let previous = position
+            .checked_sub(1)
+            .map(|earlier| &analysis.raw_tokens[significant[earlier]]);
+        let next = significant
+            .get(position + 1)
+            .map(|&later| &analysis.raw_tokens[later]);
         let span = token.span;
         if span.file != root || span.start >= span.end {
             continue;
@@ -852,20 +1238,17 @@ fn semantic_tokens(analysis: &Analysis) -> Vec<SemanticToken> {
 
         match &token.kind {
             shyc::lexer::TokenKind::Ident(word) => {
-                if let Some(&(token_type, modifiers)) = classes.get(&(span.start, span.end)) {
-                    emit(span.start, span.end, token_type, modifiers);
-                } else if let Some(token_type) = keyword_token(word) {
-                    emit(span.start, span.end, token_type, 0);
-                } else if let Some(ids) = analysis.index.by_name.get(word) {
-                    if let Some(id) = ids.first() {
-                        emit(
-                            span.start,
-                            span.end,
-                            token_type(analysis.index.symbol(*id).kind),
-                            0,
-                        );
-                    }
-                }
+                let (token_type, modifiers) =
+                    if let Some(&class) = classes.get(&(span.start, span.end)) {
+                        class
+                    } else if let Some(token_type) = keyword_token(word) {
+                        (token_type, 0)
+                    } else if let Some(id) = analysis.index.lookup(word).first() {
+                        (token_type(analysis.index.symbol(*id).kind), 0)
+                    } else {
+                        (guess_token_type(word, previous, next), 0)
+                    };
+                emit(span.start, span.end, token_type, modifiers);
             }
             shyc::lexer::TokenKind::Punct(punct) => {
                 let token_type = if punct == "asm!" {

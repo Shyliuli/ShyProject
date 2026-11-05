@@ -19,6 +19,7 @@ pub mod lower;
 pub mod parser;
 pub mod passes;
 pub mod preprocess;
+pub mod probe;
 pub mod sema;
 pub mod shy;
 pub mod source;

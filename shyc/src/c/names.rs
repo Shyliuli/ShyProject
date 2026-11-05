@@ -45,7 +45,8 @@ pub(crate) fn ident(text: &str) -> String {
 ///
 /// `unsigned long *` is `("unsigned long", 1)`; `struct Point` is
 /// `("Point", 0)`. Every caller here resolves methods and fields by the base
-/// name, so qualifiers and tag keywords carry no information.
+/// name, so qualifiers and tag keywords carry no information, and an array
+/// keeps the type of one element: `file [16]` is `("file", 0)`.
 pub(crate) fn split(text: &str) -> (String, usize) {
     let mut words = Vec::new();
     let mut pointers = 0;
@@ -55,6 +56,7 @@ pub(crate) fn split(text: &str) -> (String, usize) {
             _ => {
                 pointers += word.chars().filter(|character| *character == '*').count();
                 let word = word.trim_matches('*');
+                let word = word.split('[').next().unwrap_or(word);
                 if !word.is_empty() {
                     words.push(word);
                 }

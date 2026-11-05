@@ -61,10 +61,13 @@ pub struct Lowered {
     /// backend prints: the template, its concrete arguments spelled as C, and
     /// the type name or symbol the compiler gave it.
     pub instances: Vec<InstancePlan>,
-    /// The symbol every call expression resolved to, by span and receiver.
-    pub call_symbols: HashMap<(Span, Option<String>), String>,
     /// The symbol every function and method definition emits, by span.
     pub declaration_symbols: HashMap<Span, String>,
+    /// The symbol the compiler gave every name in its function table. One span
+    /// can cover several functions when a macro expansion or a generated
+    /// fragment produced them, so the C output names a function by this table
+    /// instead.
+    pub function_symbols: HashMap<String, String>,
     /// Externally visible file-scope functions by C name, in name order. The
     /// ordinary header drops a declaration whose type mentions a generic
     /// instance, and the instance section prints its prototype from here.
@@ -253,10 +256,22 @@ pub fn lower(unit: &ast::TranslationUnit, options: &Options) -> Result<Lowered, 
     let c_types = lowerer.c_type_names(&exports);
     let c_functions = lowerer.c_functions();
     let instances = instance_plans(&lowerer, &c_types);
+    // The name table is complete once every body is lowered: a call to a
+    // function declared nowhere else still registered it.
+    let function_symbols = lowerer
+        .globals
+        .iter()
+        .filter_map(|(name, entry)| match entry {
+            GlobalRef::Function(index) => {
+                Some((name.clone(), lowerer.functions[*index].symbol.clone()))
+            }
+            GlobalRef::Object(_) => None,
+        })
+        .collect();
     Ok(Lowered {
         instances,
-        call_symbols: std::mem::take(&mut lowerer.call_symbols),
         declaration_symbols: std::mem::take(&mut lowerer.declaration_symbols),
+        function_symbols,
         module: lowerer.module,
         types: lowerer.types,
         exports,
@@ -593,10 +608,6 @@ pub(super) struct Lowerer {
     /// Every generic method the compiler materialized: which template it came
     /// from and what it bound, so the C export can print the body.
     pub method_instances: Vec<MethodInstancePlan>,
-    /// The symbol every call expression resolved to, by span and the receiver
-    /// the body belongs to. One trait default or template method body is
-    /// lowered once per receiver, so the span alone does not identify a call.
-    pub call_symbols: HashMap<(Span, Option<String>), String>,
     /// The symbol every function and method definition emits, by span.
     pub declaration_symbols: HashMap<Span, String>,
     /// Every trait declaration, by name. Registered before any `impl` is
@@ -655,7 +666,6 @@ impl Lowerer {
             generic_records: HashMap::new(),
             type_names: HashMap::new(),
             method_instances: Vec::new(),
-            call_symbols: HashMap::new(),
             declaration_symbols: HashMap::new(),
             record_instances: HashMap::new(),
             generic_enums: HashMap::new(),

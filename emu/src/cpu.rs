@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 use shy_isa_lib::address::Address;
 use shy_isa_lib::op::OpType;
 
+use crate::probe;
+
 /// 默认内存大小：32MiB。
 pub const DEFAULT_MEM_SIZE: u32 = 0x0200_0000;
 /// 翻译缓存容量。直接映射，条目数保持 2 的幂，便于快速取模。
@@ -123,6 +125,51 @@ struct CachedInstr {
     arg2: u32,
 }
 
+/// Parent CPU state saved while a nested child runs.
+struct CpuSnapshot {
+    regs: [u32; 16],
+    pc: u32,
+    segs: u32,
+    sp: u32,
+    tm: u32,
+    status: u32,
+    trap: u32,
+    music: [u32; 4],
+    rs: u32,
+    epc: u32,
+    cause: u32,
+    ksp: u32,
+    sege: u32,
+    trap_stack: Vec<u32>,
+    timer_pending: bool,
+    last_tick: Instant,
+    exit_code: Option<u32>,
+    pending_watchpoint: Option<u32>,
+    debug: bool,
+}
+/// One old-memory snapshot taken before a child write.
+struct WriteEntry {
+    phys: usize,
+    start: usize,
+    len: usize,
+}
+
+/// Undo log for a nested child run. Normal Emu runs keep this as None.
+#[derive(Default)]
+struct WriteJournal {
+    old: Vec<u8>,
+    entries: Vec<WriteEntry>,
+}
+
+impl WriteJournal {
+    fn rollback(self, mem: &mut [u8]) {
+        for entry in self.entries.into_iter().rev() {
+            mem[entry.phys..entry.phys + entry.len]
+                .copy_from_slice(&self.old[entry.start..entry.start + entry.len]);
+        }
+    }
+}
+
 pub struct Emu {
     regs: [u32; 16],
     pc: u32,
@@ -149,6 +196,8 @@ pub struct Emu {
     output: Stdout,
     debug: bool,
     pending_watchpoint: Option<u32>,
+    probe: Option<probe::Probe>,
+    journal: Option<WriteJournal>,
 }
 
 impl Emu {
@@ -180,7 +229,573 @@ impl Emu {
             output: stdout(),
             debug,
             pending_watchpoint: None,
+            probe: None,
+            journal: None,
         }
+    }
+
+    /// Install the opt-in probe protocol. Until this is called the CPU has no
+    /// probe state at all, so syscall 999 follows the ordinary trap path.
+    pub fn attach_probe(&mut self, options: probe::ProbeOptions) -> anyhow::Result<()> {
+        options.validate()?;
+        self.probe = Some(probe::Probe::new(options));
+        Ok(())
+    }
+
+    /// Run a bounded probe until a structured stop is recorded.
+    ///
+    /// This is separate from run(): it never loops forever, and every
+    /// blocking/broken condition (trap, input, wait, fuel, timeout) becomes a
+    /// Stop value instead of a panic or a sleep.
+    pub fn run_probe(&mut self) -> probe::Stop {
+        self.run_probe_inner(true)
+    }
+
+    fn run_probe_inner(&mut self, reset_timeout: bool) -> probe::Stop {
+        let probe = self
+            .probe
+            .as_mut()
+            .expect("run_probe requires attach_probe first");
+        if reset_timeout {
+            probe.begin_run();
+        }
+        loop {
+            if let Some(stop) = self.probe_stop() {
+                return stop;
+            }
+            if let Some(stop) = self.probe_tick() {
+                return stop;
+            }
+            match self.step_one() {
+                StepOutcome::Continue => {}
+                StepOutcome::Exited(code) => {
+                    if let Some(probe) = &mut self.probe {
+                        probe.stop(probe::Stop::Exited(code));
+                    }
+                    return self.probe_stop().expect("probe stop was just recorded");
+                }
+                StepOutcome::Watchpoint(_) => {}
+            }
+        }
+    }
+
+    pub fn probe_stop(&self) -> Option<probe::Stop> {
+        self.probe.as_ref().and_then(probe::Probe::stop_reason)
+    }
+
+    pub fn probe_steps(&self) -> u64 {
+        self.probe.as_ref().map_or(0, probe::Probe::steps)
+    }
+
+    pub fn probe_exit(&self) -> u32 {
+        self.probe.as_ref().map_or(0, probe::Probe::exit)
+    }
+
+    pub fn take_probe_output(&mut self) -> Vec<u8> {
+        self.probe
+            .as_mut()
+            .map_or_else(Vec::new, probe::Probe::take_output)
+    }
+
+    pub fn probe_output_truncated(&self) -> bool {
+        self.probe
+            .as_ref()
+            .is_some_and(probe::Probe::output_truncated)
+    }
+
+    pub fn take_probe_results(&mut self) -> Vec<probe::ResultFrame> {
+        self.probe
+            .as_mut()
+            .map_or_else(Vec::new, probe::Probe::take_results)
+    }
+
+    /// Answer the current HOST_REQUEST and resume from the already-advanced PC.
+    ///
+    /// The response is written to the guest mailbox through the normal
+    /// translate_mem checks (user segment bounds included). A response larger
+    /// than response_cap is rejected without clearing the stop, so the caller
+    /// can retry with a smaller payload.
+    pub fn respond_probe(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        let Some(probe) = self.probe.as_ref() else {
+            anyhow::bail!("respond_probe requires attach_probe first");
+        };
+        let Some(request) = probe.request() else {
+            anyhow::bail!("respond_probe requires a pending Stop::Request");
+        };
+        let response_ptr = request.response_ptr;
+        let response_cap = request.response_cap;
+
+        if bytes.len() > response_cap as usize {
+            anyhow::bail!(
+                "probe response is {} bytes, guest mailbox capacity is {}",
+                bytes.len(),
+                response_cap
+            );
+        }
+        if bytes.len() > probe::MAX_PROBE_RESPONSE {
+            anyhow::bail!(
+                "probe response is {} bytes, limit is {}",
+                bytes.len(),
+                probe::MAX_PROBE_RESPONSE
+            );
+        }
+
+        self.debug_write_mem(response_ptr, bytes)?;
+        self.regs[0] = bytes.len() as u32;
+        if let Some(probe) = &mut self.probe {
+            probe.clear_request();
+        }
+        Ok(())
+    }
+
+    /// Run a compiler-generated child entry in a nested sandbox.
+    ///
+    /// This is [`Emu::run_child_with_host`] for a responder that needs only the
+    /// request and the nesting depth: the child emulator stays out of reach.
+    pub fn run_child_with<F>(
+        &mut self,
+        options: probe::ChildOptions,
+        mut respond: F,
+    ) -> anyhow::Result<probe::ChildResult>
+    where
+        F: FnMut(&probe::HostRequest, u32) -> anyhow::Result<Vec<u8>>,
+    {
+        self.run_child_with_host(options, |request, _child, depth| respond(request, depth))
+    }
+
+    /// Run a compiler-generated child entry in a nested sandbox, with the child
+    /// emulator in reach of the responder.
+    ///
+    /// The parent must be paused at Stop::Request. The child shares guest
+    /// memory, runs with a fresh register file and the caller-provided stack,
+    /// and answers its own HOST_REQUEST calls through respond, which receives
+    /// the request, this emulator (stepping the child), and the child nesting
+    /// depth. Child memory writes are journaled; on success they stay, on
+    /// failure they are rolled back and the parent CPU/probe state is restored.
+    ///
+    /// The child max_steps/timeout are capped by the parent's remaining budget,
+    /// and child steps are charged back to the parent Probe, so a child cannot
+    /// reset or escape the parent fuel.
+    pub fn run_child_with_host<F>(
+        &mut self,
+        options: probe::ChildOptions,
+        mut respond: F,
+    ) -> anyhow::Result<probe::ChildResult>
+    where
+        F: FnMut(&probe::HostRequest, &mut Emu, u32) -> anyhow::Result<Vec<u8>>,
+    {
+        self.validate_child(&options)?;
+        let depth = options.parent_depth.saturating_add(1);
+
+        let parent = self
+            .probe
+            .as_ref()
+            .expect("validate_child checked the parent probe");
+        let parent_steps = parent.steps();
+        let child_max_steps = options.max_steps.min(parent.remaining_steps());
+        let child_timeout = options.timeout.min(parent.remaining_timeout());
+        let parent_elapsed = parent.elapsed_millis();
+
+        if child_max_steps == 0 {
+            return Ok(Self::child_failure(
+                options.site,
+                depth,
+                probe::Stop::OutOfFuel {
+                    steps: parent_steps,
+                },
+            ));
+        }
+        if child_timeout.is_zero() {
+            return Ok(Self::child_failure(
+                options.site,
+                depth,
+                probe::Stop::Timeout {
+                    millis: parent_elapsed,
+                },
+            ));
+        }
+
+        let snapshot = self.snapshot_cpu();
+        let mut parent_probe = self.probe.take();
+        let child_probe = probe::Probe::new_child(probe::ProbeOptions {
+            mem_size: self.mem_size,
+            max_steps: child_max_steps,
+            timeout: child_timeout,
+            input: Vec::new(),
+            capture_output: true,
+            output_cap: options.output_cap,
+            debug: false,
+        });
+        self.install_child(&options, child_probe);
+
+        let stop = match self.run_child_loop(depth, &mut respond) {
+            Ok(stop) => stop,
+            Err(error) => {
+                let child_steps = self.probe_steps();
+                if let Some(parent) = parent_probe.as_mut() {
+                    parent.add_steps(child_steps);
+                }
+                self.restore_child(snapshot, parent_probe, false);
+                return Err(error);
+            }
+        };
+
+        let committed = matches!(&stop, probe::Stop::Done | probe::Stop::Exited(0));
+        let stdout = if committed {
+            self.take_probe_output()
+        } else {
+            Vec::new()
+        };
+        let results = if committed {
+            self.take_probe_results()
+        } else {
+            Vec::new()
+        };
+        let exit = self.probe_exit();
+        let steps = self.probe_steps();
+        if let Some(parent) = parent_probe.as_mut() {
+            parent.add_steps(steps);
+        }
+        self.restore_child(snapshot, parent_probe, committed);
+
+        Ok(probe::ChildResult {
+            site: options.site,
+            depth,
+            committed,
+            stop,
+            exit,
+            stdout,
+            results,
+            steps,
+        })
+    }
+
+    fn child_failure(site: u32, depth: u32, stop: probe::Stop) -> probe::ChildResult {
+        probe::ChildResult {
+            site,
+            depth,
+            committed: false,
+            stop,
+            exit: 0,
+            stdout: Vec::new(),
+            results: Vec::new(),
+            steps: 0,
+        }
+    }
+
+    fn validate_child(&self, options: &probe::ChildOptions) -> anyhow::Result<()> {
+        if self.probe.is_none() {
+            anyhow::bail!("run_child_with requires attach_probe first");
+        }
+        if !matches!(self.probe_stop(), Some(probe::Stop::Request(_))) {
+            anyhow::bail!("run_child_with requires the parent to be paused at Stop::Request");
+        }
+        if options.entry < SPECIAL_TOP
+            || !options.entry.is_multiple_of(4)
+            || options.entry >= self.mem_size
+        {
+            anyhow::bail!(
+                "child entry must be 4-aligned and inside memory: 0x{:08X}",
+                options.entry
+            );
+        }
+        if options.sp < SPECIAL_TOP || !options.sp.is_multiple_of(4) {
+            anyhow::bail!(
+                "child stack base must be 4-aligned and at least 0x{SPECIAL_TOP:08X}: 0x{:08X}",
+                options.sp
+            );
+        }
+        if options.stack_bytes < 4 || !options.stack_bytes.is_multiple_of(4) {
+            anyhow::bail!(
+                "child stack_bytes must be a positive multiple of 4, got {}",
+                options.stack_bytes
+            );
+        }
+        match options.sp.checked_add(options.stack_bytes) {
+            Some(end) if end <= self.mem_size => {}
+            _ => anyhow::bail!(
+                "child stack 0x{:08X}+{} exceeds memory size 0x{:08X}",
+                options.sp,
+                options.stack_bytes,
+                self.mem_size
+            ),
+        }
+        if options.max_steps == 0 || options.max_steps > probe::MAX_PROBE_STEPS {
+            anyhow::bail!(
+                "child max_steps must be in 1..={}, got {}",
+                probe::MAX_PROBE_STEPS,
+                options.max_steps
+            );
+        }
+        if options.timeout.is_zero() || options.timeout > probe::MAX_PROBE_TIMEOUT {
+            anyhow::bail!(
+                "child timeout must be greater than zero and at most {}s, got {:?}",
+                probe::MAX_PROBE_TIMEOUT.as_secs(),
+                options.timeout
+            );
+        }
+        if options.output_cap == 0 || options.output_cap > probe::MAX_PROBE_OUTPUT {
+            anyhow::bail!(
+                "child output_cap must be in 1..={}, got {}",
+                probe::MAX_PROBE_OUTPUT,
+                options.output_cap
+            );
+        }
+        Ok(())
+    }
+
+    fn run_child_loop<F>(&mut self, depth: u32, respond: &mut F) -> anyhow::Result<probe::Stop>
+    where
+        F: FnMut(&probe::HostRequest, &mut Emu, u32) -> anyhow::Result<Vec<u8>>,
+    {
+        loop {
+            let stop = self.run_probe_inner(false);
+            match stop {
+                probe::Stop::Request(request) => {
+                    let response = respond(&request, self, depth)?;
+                    self.respond_probe(&response)?;
+                }
+                other => return Ok(other),
+            }
+        }
+    }
+
+    fn snapshot_cpu(&self) -> CpuSnapshot {
+        CpuSnapshot {
+            regs: self.regs,
+            pc: self.pc,
+            segs: self.segs,
+            sp: self.sp,
+            tm: self.tm,
+            status: self.status,
+            trap: self.trap,
+            music: self.music,
+            rs: self.rs,
+            epc: self.epc,
+            cause: self.cause,
+            ksp: self.ksp,
+            sege: self.sege,
+            trap_stack: self.trap_stack.clone(),
+            timer_pending: self.timer_pending,
+            last_tick: self.last_tick,
+            exit_code: self.exit_code,
+            pending_watchpoint: self.pending_watchpoint,
+            debug: self.debug,
+        }
+    }
+
+    fn install_child(&mut self, options: &probe::ChildOptions, child_probe: probe::Probe) {
+        self.regs = [0; 16];
+        self.pc = options.entry;
+        self.segs = 0;
+        self.sp = options.sp;
+        self.tm = 0;
+        self.status = 0;
+        self.trap = 0;
+        self.music = [0; 4];
+        self.rs = 0;
+        self.epc = 0;
+        self.cause = 0;
+        self.ksp = 0;
+        self.sege = self.mem_size;
+        self.trap_stack.clear();
+        self.timer_pending = false;
+        self.last_tick = Instant::now();
+        self.exit_code = None;
+        self.pending_watchpoint = None;
+        self.debug = false;
+        self.probe = Some(child_probe);
+        self.journal = Some(WriteJournal::default());
+    }
+
+    fn restore_child(
+        &mut self,
+        snapshot: CpuSnapshot,
+        parent_probe: Option<probe::Probe>,
+        committed: bool,
+    ) {
+        let journal = self.journal.take();
+        if !committed && let Some(journal) = journal {
+            journal.rollback(&mut self.mem);
+        }
+        self.clear_instr_cache();
+        self.regs = snapshot.regs;
+        self.pc = snapshot.pc;
+        self.segs = snapshot.segs;
+        self.sp = snapshot.sp;
+        self.tm = snapshot.tm;
+        self.status = snapshot.status;
+        self.trap = snapshot.trap;
+        self.music = snapshot.music;
+        self.rs = snapshot.rs;
+        self.epc = snapshot.epc;
+        self.cause = snapshot.cause;
+        self.ksp = snapshot.ksp;
+        self.sege = snapshot.sege;
+        self.trap_stack = snapshot.trap_stack;
+        self.timer_pending = snapshot.timer_pending;
+        self.last_tick = snapshot.last_tick;
+        self.exit_code = snapshot.exit_code;
+        self.pending_watchpoint = snapshot.pending_watchpoint;
+        self.debug = snapshot.debug;
+        self.probe = parent_probe;
+    }
+    fn probe_tick(&mut self) -> Option<probe::Stop> {
+        self.probe.as_mut().and_then(probe::Probe::tick)
+    }
+
+    fn probe_read_line(&mut self, kind: &'static str) -> Option<String> {
+        let probe = self.probe.as_mut()?;
+        match probe.read_line() {
+            Some(line) => Some(line),
+            None => {
+                probe.stop(probe::Stop::BlockedIo(kind));
+                None
+            }
+        }
+    }
+
+    fn probe_read_char(&mut self, kind: &'static str) -> Option<char> {
+        let probe = self.probe.as_mut()?;
+        match probe.read_char() {
+            Some(ch) => Some(ch),
+            None => {
+                probe.stop(probe::Stop::BlockedIo(kind));
+                None
+            }
+        }
+    }
+
+    fn probe_syscall(&mut self, cur: u32) -> Flow {
+        let number = self.regs[0];
+        let service = self.regs[1];
+        let arg0 = self.regs[2];
+        let arg1 = self.regs[3];
+        let arg2 = self.regs[4];
+        let arg3 = self.regs[5];
+        let response_cap = self.regs[6];
+        let mut stop = None;
+        if number != probe::SYSCALL_NUMBER {
+            stop = Some(probe::Stop::ForeignSyscall(number));
+        } else if service == probe::SERVICE_COMMIT {
+            let handshake = self
+                .probe
+                .as_ref()
+                .is_some_and(probe::Probe::handshake_done);
+            if !handshake {
+                stop = Some(probe::Stop::BadHandshake(probe::HANDSHAKE_EXPECTED_HELLO));
+            } else if arg1 as usize > probe::MAX_PROBE_REQUEST {
+                stop = Some(probe::Stop::BadMailbox {
+                    service: probe::SERVICE_COMMIT,
+                    ptr: arg0,
+                    len: arg1,
+                });
+            } else {
+                match self.debug_read_mem(arg0, arg1 as usize) {
+                    Ok(bytes) => stop = Some(probe::Stop::Commit(bytes)),
+                    Err(_) => {
+                        stop = Some(probe::Stop::BadMailbox {
+                            service: probe::SERVICE_COMMIT,
+                            ptr: arg0,
+                            len: arg1,
+                        });
+                    }
+                }
+            }
+        } else if service == probe::SERVICE_HOST_REQUEST {
+            let handshake = self
+                .probe
+                .as_ref()
+                .is_some_and(probe::Probe::handshake_done);
+            if !handshake {
+                stop = Some(probe::Stop::BadHandshake(probe::HANDSHAKE_EXPECTED_HELLO));
+            } else if arg2 as usize > probe::MAX_PROBE_REQUEST {
+                stop = Some(probe::Stop::BadMailbox {
+                    service: arg0,
+                    ptr: arg1,
+                    len: arg2,
+                });
+            } else {
+                match self.debug_read_mem(arg1, arg2 as usize) {
+                    Ok(bytes) => {
+                        if let Some(probe) = &mut self.probe {
+                            probe.stop(probe::Stop::Request(probe::HostRequest {
+                                service: arg0,
+                                bytes,
+                                response_ptr: arg3,
+                                response_cap,
+                            }));
+                        }
+                    }
+                    Err(_) => {
+                        stop = Some(probe::Stop::BadMailbox {
+                            service: arg0,
+                            ptr: arg1,
+                            len: arg2,
+                        });
+                    }
+                }
+            }
+        } else if service == probe::SERVICE_SUSPEND {
+            let handshake = self
+                .probe
+                .as_ref()
+                .is_some_and(probe::Probe::handshake_done);
+            if !handshake {
+                stop = Some(probe::Stop::BadHandshake(probe::HANDSHAKE_EXPECTED_HELLO));
+            } else if !matches!(arg1, probe::SUSPEND_OFFER | probe::SUSPEND_NEED) {
+                stop = Some(probe::Stop::BadSuspension {
+                    request_id: arg0,
+                    kind: arg1,
+                    ptr: 0,
+                });
+            } else {
+                let owner = probe::read_c_string(arg2, probe::MAX_PROBE_STRING, |addr| {
+                    self.probe_read_byte(addr)
+                });
+                let trait_name = probe::read_c_string(arg3, probe::MAX_PROBE_STRING, |addr| {
+                    self.probe_read_byte(addr)
+                });
+                match (owner, trait_name) {
+                    (Some(owner), Some(trait_name)) => {
+                        if let Some(probe) = &mut self.probe {
+                            probe.stop(probe::Stop::Suspended {
+                                request_id: arg0,
+                                need: arg1 == probe::SUSPEND_NEED,
+                                owner,
+                                trait_name,
+                            });
+                        }
+                    }
+                    (None, _) => {
+                        stop = Some(probe::Stop::BadSuspension {
+                            request_id: arg0,
+                            kind: arg1,
+                            ptr: arg2,
+                        });
+                    }
+                    (_, None) => {
+                        stop = Some(probe::Stop::BadSuspension {
+                            request_id: arg0,
+                            kind: arg1,
+                            ptr: arg3,
+                        });
+                    }
+                }
+            }
+        } else if let Some(probe) = &mut self.probe {
+            match probe.handle_syscall(service, arg0, arg1, arg2, arg3) {
+                Ok(value) => self.regs[0] = value,
+                Err(reason) => stop = Some(reason),
+            }
+        }
+        if let Some(stop) = stop
+            && let Some(probe) = &mut self.probe
+        {
+            probe.stop(stop);
+        }
+        self.pc = cur.wrapping_add(12);
+        Flow::Continue
     }
 
     /// 加载 `.sfs` raw 内存镜像：字节偏移即地址。
@@ -229,6 +844,14 @@ impl Emu {
         Ok(())
     }
 
+    /// One guest byte under the same checks as an ordinary load, or None when
+    /// the address is outside the current segment. Probe string decoding uses
+    /// this so a bad pointer becomes a stop instead of a trap.
+    fn probe_read_byte(&self, addr: u32) -> Option<u8> {
+        let phys = self.translate_mem(addr, 1).ok()?;
+        Some(self.mem[phys])
+    }
+
     pub fn debug_read_mem(&self, addr: u32, len: usize) -> anyhow::Result<Vec<u8>> {
         if len == 0 {
             return Ok(Vec::new());
@@ -246,6 +869,7 @@ impl Emu {
         let phys = self
             .translate_mem(addr, data.len())
             .map_err(|cause| anyhow::anyhow!("debug memory write failed: {cause:?}"))?;
+        self.record_write(phys, data.len());
         self.mem[phys..phys + data.len()].copy_from_slice(data);
         self.clear_instr_cache();
         Ok(())
@@ -260,7 +884,13 @@ impl Emu {
     }
 
     /// 推进定时器：每 10ms 把 TM 减 1，减到 1 时清零并产生中断请求。
+    ///
+    /// Probe mode has no wall-clock semantics: TM never advances, so the
+    /// result cannot depend on how fast the host is.
     fn tick_timer(&mut self) {
+        if self.probe.is_some() {
+            return;
+        }
         if self.tm == 0 {
             return;
         }
@@ -289,7 +919,18 @@ impl Emu {
     }
 
     /// 进入统一 trap 流程。
+    ///
+    /// Probe mode reports the trap as a structured stop instead of entering
+    /// the guest handler; an image without TRAP must not panic the host.
     fn enter_trap(&mut self, cause: TrapCause, epc: u32) {
+        if let Some(probe) = &mut self.probe {
+            probe.stop(probe::Stop::Trap {
+                cause: cause as u32,
+                epc,
+                pc: self.pc,
+            });
+            return;
+        }
         if self.trap < SPECIAL_TOP {
             panic!(
                 "trap occurred with uninitialized TRAP register (TRAP=0x{:08X})",
@@ -315,6 +956,14 @@ impl Emu {
     /// `iret`：从 trap 返回。
     fn iret(&mut self) -> Flow {
         if self.trap_stack.is_empty() {
+            if let Some(probe) = &mut self.probe {
+                probe.stop(probe::Stop::Trap {
+                    cause: TrapCause::IllegalInstr as u32,
+                    epc: self.pc,
+                    pc: self.pc,
+                });
+                return Flow::Continue;
+            }
             panic!("iret with empty trap status stack");
         }
         let old_status = self.trap_stack.pop().unwrap();
@@ -355,6 +1004,15 @@ impl Emu {
             return Err(TrapCause::IllegalAddr);
         }
         self.translate_mem(addr, size)
+    }
+
+    /// Record old bytes before a child write. No-op for ordinary Emu runs.
+    fn record_write(&mut self, phys: usize, len: usize) {
+        if let Some(journal) = &mut self.journal {
+            let start = journal.old.len();
+            journal.old.extend_from_slice(&self.mem[phys..phys + len]);
+            journal.entries.push(WriteEntry { phys, start, len });
+        }
     }
 
     pub fn clear_instr_cache(&mut self) {
@@ -425,6 +1083,7 @@ impl Emu {
             self.pending_watchpoint.get_or_insert(hit);
         }
         let phys = self.check_mem(addr, true, 4)?;
+        self.record_write(phys, 4);
         self.mem[phys..phys + 4].copy_from_slice(&val.to_be_bytes());
         Ok(())
     }
@@ -452,6 +1111,7 @@ impl Emu {
             self.pending_watchpoint.get_or_insert(hit);
         }
         let phys = self.check_mem(addr, false, 2)?;
+        self.record_write(phys, 2);
         let bytes = val.to_be_bytes();
         self.mem[phys] = bytes[2];
         self.mem[phys + 1] = bytes[3];
@@ -480,6 +1140,7 @@ impl Emu {
             self.pending_watchpoint.get_or_insert(hit);
         }
         let phys = self.check_mem(addr, false, 1)?;
+        self.record_write(phys, 1);
         self.mem[phys] = val as u8;
         Ok(())
     }
@@ -576,6 +1237,15 @@ impl Emu {
     // ── UART / 宿主 I/O ───────────────────────────────────────────
 
     fn read_uart_data(&mut self) -> u32 {
+        if let Some(probe) = &mut self.probe {
+            return match probe.read_byte() {
+                Some(byte) => byte as u32,
+                None => {
+                    probe.stop(probe::Stop::BlockedIo("uart"));
+                    0
+                }
+            };
+        }
         // 从标准输入读取一个字节。
         let mut buf = [0u8; 1];
         match self.input.read(&mut buf) {
@@ -584,9 +1254,23 @@ impl Emu {
         }
     }
 
-    fn write_uart_data(&mut self, val: u32) {
-        let _ = self.output.write_all(&[val as u8]);
+    /// Probe mode captures output in a bounded buffer; normal mode keeps
+    /// writing to the inherited stdout exactly as before.
+    fn emit_bytes(&mut self, bytes: &[u8]) {
+        if let Some(probe) = &mut self.probe {
+            probe.push_output(bytes);
+            return;
+        }
+        let _ = self.output.write_all(bytes);
         let _ = self.output.flush();
+    }
+
+    fn emit_str(&mut self, text: &str) {
+        self.emit_bytes(text.as_bytes());
+    }
+
+    fn write_uart_data(&mut self, val: u32) {
+        self.emit_bytes(&[val as u8]);
     }
 
     fn uart_status(&self) -> u32 {
@@ -614,28 +1298,13 @@ impl Emu {
         }
     }
 
-    /// `ina`：从标准输入读取十六进制文本，解析为 u32。
-    fn op_ina(&mut self, addr: u32, cur: u32, watchpoints: &HashSet<Watchpoint>) -> Flow {
-        let Some(line) = self.read_input_line() else {
-            return Flow::Exit(0);
-        };
-        let trimmed = line.trim();
-        let hex = trimmed
-            .strip_prefix("0x")
-            .or_else(|| trimmed.strip_prefix("0X"))
-            .unwrap_or(trimmed);
-        let val = u32::from_str_radix(hex, 16).unwrap_or(0);
-        match self.w(addr, val, watchpoints) {
-            Ok(()) => Flow::Continue,
-            Err(MemAccessErr::Trap(cause)) => Flow::Trap { cause, epc: cur },
-            Err(MemAccessErr::Watchpoint(addr)) => Flow::Watchpoint(addr),
-        }
-    }
-
-    /// `inutfa`：从标准输入读取一个 UTF-8 字符，解码为 code point 写入地址。
-    /// 输入结束时写入 `0xFFFFFFFF`：它不是合法 code point，程序能据此判断 EOF。
-    fn op_inutfa(&mut self, addr: u32, cur: u32, watchpoints: &HashSet<Watchpoint>) -> Flow {
-        let value = self.read_input_char().map_or(u32::MAX, |ch| ch as u32);
+    fn write_value(
+        &mut self,
+        addr: u32,
+        value: u32,
+        cur: u32,
+        watchpoints: &HashSet<Watchpoint>,
+    ) -> Flow {
         match self.w(addr, value, watchpoints) {
             Ok(()) => Flow::Continue,
             Err(MemAccessErr::Trap(cause)) => Flow::Trap { cause, epc: cur },
@@ -643,11 +1312,48 @@ impl Emu {
         }
     }
 
+    fn parse_hex_line(line: &str) -> u32 {
+        let trimmed = line.trim();
+        let hex = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            .unwrap_or(trimmed);
+        u32::from_str_radix(hex, 16).unwrap_or(0)
+    }
+
+    /// `ina`：从标准输入读取十六进制文本，解析为 u32。
+    fn op_ina(&mut self, addr: u32, cur: u32, watchpoints: &HashSet<Watchpoint>) -> Flow {
+        if self.probe.is_some() {
+            let Some(line) = self.probe_read_line("ina") else {
+                return Flow::Continue;
+            };
+            let val = Self::parse_hex_line(&line);
+            return self.write_value(addr, val, cur, watchpoints);
+        }
+        let Some(line) = self.read_input_line() else {
+            return Flow::Exit(0);
+        };
+        let val = Self::parse_hex_line(&line);
+        self.write_value(addr, val, cur, watchpoints)
+    }
+
+    /// `inutfa`：从标准输入读取一个 UTF-8 字符，解码为 code point 写入地址。
+    /// 输入结束时写入 `0xFFFFFFFF`：它不是合法 code point，程序能据此判断 EOF。
+    fn op_inutfa(&mut self, addr: u32, cur: u32, watchpoints: &HashSet<Watchpoint>) -> Flow {
+        if self.probe.is_some() {
+            let Some(ch) = self.probe_read_char("inutfa") else {
+                return Flow::Continue;
+            };
+            return self.write_value(addr, ch as u32, cur, watchpoints);
+        }
+        let value = self.read_input_char().map_or(u32::MAX, |ch| ch as u32);
+        self.write_value(addr, value, cur, watchpoints)
+    }
+
     fn op_outa(&mut self, addr: u32, cur: u32, watchpoints: &HashSet<Watchpoint>) -> Flow {
         match self.r(addr, watchpoints) {
             Ok(val) => {
-                let _ = write!(self.output, "{:08X}", val);
-                let _ = self.output.flush();
+                self.emit_str(&format!("{:08X}", val));
                 Flow::Continue
             }
             Err(MemAccessErr::Trap(cause)) => Flow::Trap { cause, epc: cur },
@@ -656,8 +1362,7 @@ impl Emu {
     }
 
     fn op_outn(&mut self, n: u32) -> Flow {
-        let _ = write!(self.output, "{:08X}", n);
-        let _ = self.output.flush();
+        self.emit_str(&format!("{:08X}", n));
         Flow::Continue
     }
 
@@ -677,8 +1382,7 @@ impl Emu {
     fn emit_utf8(&mut self, cp: u32, cur: u32) -> Flow {
         match char::from_u32(cp) {
             Some(ch) => {
-                let _ = write!(self.output, "{ch}");
-                let _ = self.output.flush();
+                self.emit_str(&ch.to_string());
                 Flow::Continue
             }
             None => Flow::Trap {
@@ -1037,6 +1741,9 @@ impl Emu {
             },
             // ── Trap 指令 ──
             OpType::Syscall => {
+                if self.probe.is_some() {
+                    return self.probe_syscall(cur);
+                }
                 let epc = cur.wrapping_add(12);
                 return Flow::Trap {
                     cause: TrapCause::Syscall,
@@ -1118,6 +1825,11 @@ impl Emu {
 
     /// `wait`：仅内核态且中断使能时有效。唤醒时 EPC=PC+12。
     fn op_wait(&mut self, cur: u32) -> Flow {
+        if let Some(probe) = &mut self.probe {
+            probe.stop(probe::Stop::Wait);
+            self.pc = cur.wrapping_add(12);
+            return Flow::Continue;
+        }
         if self.is_user() || !self.interrupts_enabled() {
             return Flow::Trap {
                 cause: TrapCause::IllegalInstr,
@@ -1165,6 +1877,9 @@ impl Emu {
     }
 
     fn execute_one_prepared(&mut self, watchpoints: &HashSet<Watchpoint>) -> StepOutcome {
+        if let Some(probe) = &mut self.probe {
+            probe.bump_step();
+        }
         if self.debug {
             self.dump_state();
         }

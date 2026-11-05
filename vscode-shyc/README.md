@@ -3,16 +3,19 @@
 Editor support for ShyC and ShyISA:
 
 - `.shyc` and `.shyh` language mode, `.shy` assembly language mode.
-- A Rust language server that runs the real `shyc` frontend. Diagnostics,
-  completion, go-to-definition, hover, document symbols, and semantic tokens
-  therefore always agree with the compiler.
+- A Rust language server that runs the real `shyc` frontend and the real
+  `shycc` driver. Diagnostics, completion, go-to-definition, hover, document
+  symbols, and semantic tokens therefore always agree with the compiler, and
+  the items a `const fn` generates exist in the editor too.
 - TextMate highlighting only for the syntax the compiler's token stream does
   not carry: comments, preprocessing lines, and literals. Every keyword, type,
   function, variable, property and operator is classified by the server's
   lexer and symbol index.
 
 The server reuses `../shyc` as a library; it does not ship a second parser or a
-second list of language rules. The TextMate grammar is deliberately small for
+second list of language rules. Probe rounds are not reimplemented either: the
+server runs `../../shycc`, which owns the rounds, the emulator, and the answers
+file. The TextMate grammar is deliberately small for
 that reason: anything it also matched would be a second, hand-written ShyC
 grammar that can disagree with the compiler.
 
@@ -69,6 +72,36 @@ specific paths with `shyc.includeDirs`:
   "shyc.includeDirs": ["projects/os/user", "projects/os/kernel"]
 }
 ```
+
+## Compile-time calls
+
+A `const fn` call, including the generators at the end of `std/fmt.shyh`, is
+executed by `shycc` rather than guessed at. When the buffer pauses, the server
+writes it to a temporary file and runs
+
+```sh
+shycc --probe-only <buffer> --probe-answers <answers>
+```
+
+in the background. Answers are cached by buffer content, so returning to
+earlier text does not probe again, and the previous answers stay in use while a
+newer probe runs. Generated items then reach the index, which is what makes
+completion, hover, and go-to-definition work for names such as the `scanln*`
+wrappers. While a call is still unresolved its placeholder does not produce
+diagnostics; real errors appear once the probe has answered every call.
+
+The driver must be built with its default `constfn-probe` feature. Set
+`shyc.shyccPath` when it is not in the workspace `target/` directory, next to
+the server, or on `PATH`:
+
+```json
+{
+  "shyc.shyccPath": "/path/to/ShyProject/target/debug/shycc"
+}
+```
+
+The user-wide `~/.shycserver/config.toml` accepts the same path as
+`shycc_path = "/path/to/shycc"`.
 
 ## The standard library outside ShyProject
 

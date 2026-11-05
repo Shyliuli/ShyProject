@@ -45,8 +45,17 @@ impl Parser {
     /// Parses one file-scope item: a declaration, a function definition, an
     /// `impl` block, a `trait` declaration, or a `use` import.
     pub(crate) fn item(&mut self) -> Result<Item, Diagnostic> {
-        // 声明级属性 `#[result_niche]` 出现在条目之前：读进解析器状态，
-        // 由紧随其后的 `enum` 声明消费。
+        self.declaration_attributes()?;
+        let item = self.item_body()?;
+        self.record_token_builtin(&item)?;
+        Ok(item)
+    }
+
+    /// Reads the declaration attributes in front of an item.
+    ///
+    /// `result_niche` and `option_niche` are consumed by the `enum` behind
+    /// them; `const_fn_token_builtin` marks the function declaration behind it.
+    fn declaration_attributes(&mut self) -> Result<(), Diagnostic> {
         while self.at_punct("#") {
             self.bump();
             self.expect_punct("[")?;
@@ -55,6 +64,7 @@ impl Parser {
             match name.text.as_str() {
                 "result_niche" => self.pending_enum_niche = true,
                 "option_niche" => self.pending_option_niche = true,
+                "const_fn_token_builtin" => self.pending_token_builtin = Some(name.span),
                 other => {
                     return Err(Diagnostic::new(
                         name.span,
@@ -63,6 +73,53 @@ impl Parser {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Records the function `#[const_fn_token_builtin]` marked.
+    ///
+    /// The attribute only names a compile-time builtin: it changes nothing
+    /// about the declaration, so a normal parse keeps the item exactly as it
+    /// was and probe mode reads the name and declaration span as metadata.
+    fn record_token_builtin(&mut self, item: &Item) -> Result<(), Diagnostic> {
+        let Some(attribute) = self.pending_token_builtin.take() else {
+            return Ok(());
+        };
+        let mut marked = false;
+        match item {
+            Item::Function(function) => {
+                if let Some(name) = &function.declarator.name {
+                    self.token_builtins.insert(name.text.clone(), function.span);
+                    marked = true;
+                }
+            }
+            Item::Decl(declaration) if declaration.specs.storage != Some(StorageClass::Typedef) => {
+                for declarator in &declaration.declarators {
+                    // A function pointer variable is not a function: only a
+                    // declarator that is a function itself names one.
+                    let function = matches!(
+                        declarator.declarator.derived.first(),
+                        Some(DerivedDeclarator::Function(_))
+                    );
+                    if function && let Some(name) = &declarator.declarator.name {
+                        self.token_builtins
+                            .insert(name.text.clone(), declarator.span);
+                        marked = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        if marked {
+            return Ok(());
+        }
+        Err(Diagnostic::new(
+            attribute,
+            "`#[const_fn_token_builtin]` applies to a function declaration",
+        ))
+    }
+
+    fn item_body(&mut self) -> Result<Item, Diagnostic> {
         if self.at_use_declaration() {
             return Ok(Item::Use(self.use_declaration()?));
         }
@@ -136,8 +193,9 @@ impl Parser {
 
     /// Parses `const fn name(params) -> T { body }` and records it.
     ///
-    /// The body is kept as syntax: it runs only when a call to the function is
-    /// evaluated at compile time.
+    /// The declaration is kept whole, so a probe emitter can rebuild an
+    /// ordinary function from it; the summary fields the evaluator reads are
+    /// derived from that declaration and never written separately.
     pub(crate) fn const_fn_declaration(&mut self) -> Result<(), Diagnostic> {
         let declaration_start = self.here();
         self.bump();
@@ -145,36 +203,30 @@ impl Parser {
         let Some(name) = declarator.name.clone() else {
             return Err(Diagnostic::new(start, "a const fn needs a name"));
         };
-        let body = self.block_with_params(Some(&declarator))?;
-        let mut params = Vec::new();
-        if let Some(ast::DerivedDeclarator::Function(function)) = declarator.derived.first() {
-            for parameter in &function.params {
-                let Some(param_declarator) = &parameter.declarator else {
-                    continue;
-                };
-                let Some(param_name) = &param_declarator.name else {
-                    continue;
-                };
-                params.push((
-                    param_name.text.clone(),
-                    param_kind(&parameter.specs, param_declarator),
-                ));
-            }
-        }
-        let returns_tokens = returns_tokens_type(&specs);
+        // Calls inside this body are left for the evaluator: their arguments
+        // are locals that only exist while the body runs.
+        self.in_const_body = true;
+        let body = self.block_with_params(Some(&declarator));
+        self.in_const_body = false;
+        let body = body?;
         let signature = Span {
             start: declaration_start.start,
             end: body.span.start,
             ..declaration_start
         };
         self.record_const_fn_declaration(&name.text, name.span, signature);
-        self.const_fns.push(ConstFn {
+        let mut function = ConstFn {
             name: name.text,
             span: name.span,
-            params,
-            returns_tokens,
+            params: Vec::new(),
+            returns_tokens: false,
+            specs,
+            declarator,
             body,
-        });
+        };
+        function.params = const_params(&function.declarator);
+        function.returns_tokens = returns_tokens_type(&function.specs);
+        self.const_fns.push(function);
         Ok(())
     }
 
@@ -302,6 +354,7 @@ impl Parser {
         Ok(declarators)
     }
 
+    /// Records a function body so `try_run` can interpret it on request.
     fn function_definition(
         &mut self,
         specs: DeclSpecs,
@@ -760,6 +813,13 @@ impl Parser {
     }
 
     fn prescan_item(&mut self) -> Result<(), Diagnostic> {
+        // Declaration attributes are metadata; the pre-scan only needs the
+        // declaration behind them.
+        while self.at_punct("#") {
+            self.bump();
+            self.expect_punct("[")?;
+            self.skip_balanced_group("[", "]")?;
+        }
         if self.at_use_declaration() {
             // An import declares no type, tag, or trait, so the pre-scan only
             // has to step over it.
@@ -1008,6 +1068,26 @@ fn method_generics(declarator: &Declarator) -> Vec<GenericParam> {
         })
         .unwrap_or_default()
 }
+/// The parameters of a function, as the evaluator binds them.
+///
+/// A parameter without a declarator or a name carries no value of its own, so
+/// it is left out: the evaluator compares the count it sees here with the
+/// arguments of a call.
+fn const_params(declarator: &Declarator) -> Vec<(String, ParamKind)> {
+    let Some(DerivedDeclarator::Function(function)) = declarator.derived.first() else {
+        return Vec::new();
+    };
+    function
+        .params
+        .iter()
+        .filter_map(|parameter| {
+            let declarator = parameter.declarator.as_ref()?;
+            let name = declarator.name.as_ref()?;
+            Some((name.text.clone(), param_kind(&parameter.specs, declarator)))
+        })
+        .collect()
+}
+
 /// How one `const fn` parameter is passed: an integer or a string.
 fn param_kind(specs: &DeclSpecs, declarator: &Declarator) -> ParamKind {
     if declarator

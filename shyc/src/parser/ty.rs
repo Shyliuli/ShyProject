@@ -16,6 +16,7 @@ use crate::source::Diagnostic;
 
 use super::Parser;
 use super::cursor::unsupported_message;
+use super::probe::{Answer, Arguments, Place};
 
 impl Parser {
     // -- declaration specifiers ------------------------------------------
@@ -45,14 +46,51 @@ impl Parser {
         let name = self.const_fns[index].name.clone();
         self.record_const_call(index, span);
         self.bump();
-        let (tokens, close) = self.capture_tokens()?;
+        let (tokens, close) = self.capture_token_argument()?;
         let span = span.join(close);
-        let value = self.call_const(index, vec![super::comptime::Value::Tokens(tokens)], span)?;
-        let super::comptime::Value::Tokens(tokens) = value else {
-            return Err(Diagnostic::new(
-                span,
-                format!("const fn '{name}' does not produce a type"),
-            ));
+        // Probe mode has no way to parse this declaration without the type, so
+        // an unanswered call is reported, never guessed.
+        let arguments = Arguments::Tokens(tokens);
+        let key = self.probe_key(
+            index,
+            Place::Type,
+            span,
+            super::probe::fingerprint(&arguments),
+        );
+        let tokens = match self.probe_answer(&key) {
+            Some(Answer::Tokens(tokens)) => tokens,
+            Some(Answer::Failed { message, span: at }) => {
+                return Err(Diagnostic::new(at.unwrap_or(span), message));
+            }
+            _ => {
+                // The type decides how the rest of this declaration parses, so
+                // the call cannot be filled in later in the same pass. The
+                // request is recorded and the declaration falls back to `int`:
+                // a round with requests emits nothing, and the next one parses
+                // the file again with the type in hand.
+                self.probe_record(super::probe::ProbeRequest {
+                    key,
+                    function: index,
+                    name: name.clone(),
+                    place: Place::Type,
+                    site: span,
+                    arguments,
+                });
+                return Ok(Some(TypeName {
+                    span,
+                    specs: DeclSpecs {
+                        span,
+                        storage: None,
+                        is_inline: false,
+                        is_noreturn: false,
+                        is_pub: false,
+                        is_shy_fn: false,
+                        qualifiers: Vec::new(),
+                        type_specs: vec![TypeSpecifier::Builtin(BuiltinType::Int)],
+                    },
+                    declarator: None,
+                }));
+            }
         };
         parse_type_fragment(tokens, span, self)
             .map(Some)
@@ -376,14 +414,36 @@ impl Parser {
         let start = self.here();
         self.record_const_call(index, start);
         self.bump();
-        let (tokens, close) = self.capture_tokens()?;
+        let (tokens, close) = self.capture_token_argument()?;
         let span = start.join(close);
-        let value = self.call_const(index, vec![super::comptime::Value::Tokens(tokens)], span)?;
-        let super::comptime::Value::Tokens(returned) = value else {
-            return Err(Diagnostic::new(
-                span,
-                "a member const fn must produce tokens",
-            ));
+        let name = self.const_fns[index].name.clone();
+        let arguments = Arguments::Tokens(tokens);
+        let key = self.probe_key(
+            index,
+            Place::Member,
+            span,
+            super::probe::fingerprint(&arguments),
+        );
+        let returned = match self.probe_answer(&key) {
+            Some(Answer::Tokens(tokens)) => tokens,
+            Some(Answer::Failed { message, span: at }) => {
+                return Err(Diagnostic::new(at.unwrap_or(span), message));
+            }
+            _ => {
+                // The members a call would add are unknown this round, so the
+                // request is recorded and the aggregate keeps the members it
+                // has written out. A round with requests emits nothing, and
+                // the next one parses the file again with them in hand.
+                self.probe_record(super::probe::ProbeRequest {
+                    key,
+                    function: index,
+                    name: name.clone(),
+                    place: Place::Member,
+                    site: span,
+                    arguments,
+                });
+                return Ok(Some(Vec::new()));
+            }
         };
         if returned.is_empty() {
             return Ok(Some(Vec::new()));
@@ -395,7 +455,7 @@ impl Parser {
 
     /// Parses a token sequence as aggregate members.
     fn parse_member_fragment(
-        &self,
+        &mut self,
         mut tokens: Vec<crate::lexer::Token>,
         span: crate::source::Span,
     ) -> Result<Vec<MemberDecl>, Diagnostic> {
@@ -419,6 +479,10 @@ impl Parser {
         });
         let mut parser = Parser::new(tokens, false);
         parser.scopes = self.scopes.clone();
+        parser.probe = self.probe.clone();
+        parser.defer_body_calls = self.defer_body_calls;
+        parser.body_stack = self.body_stack.clone();
+        parser.function_body_names = self.function_body_names.clone();
         let mut members = Vec::new();
         while !parser.at_eof() {
             if parser.eat_punct(";") {
@@ -426,6 +490,9 @@ impl Parser {
             }
             members.push(parser.member_decl()?);
         }
+        self.bodies_deferred |= parser.bodies_deferred;
+        self.deferred_body_functions
+            .extend(parser.deferred_body_functions.iter().cloned());
         Ok(members)
     }
 
@@ -961,6 +1028,7 @@ fn parse_type_fragment(
     parser.scopes[0].typedefs = parent.scopes[0].typedefs.clone();
     parser.scopes[0].tags = parent.scopes[0].tags.clone();
     parser.scopes[0].traits = parent.scopes[0].traits.clone();
+    parser.probe = parent.probe.clone();
     let type_name = parser.type_name()?;
     if !parser.at_eof() {
         return Err(Diagnostic::new(

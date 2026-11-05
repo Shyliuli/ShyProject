@@ -31,7 +31,7 @@ pub(crate) fn argument_register(index: u16) -> Option<&'static str> {
 }
 
 /// Map a return register slot index to its Shy register name.
-fn return_register(index: u16) -> Option<&'static str> {
+pub(crate) fn return_register(index: u16) -> Option<&'static str> {
     match index {
         1 => Some("1x"),
         2 => Some("2x"),

@@ -406,7 +406,7 @@ fn specifier_text(specifier: &TypeSpecifier, spelling: Spelling) -> String {
 /// A generic use prints as the instance name C can spell: Vec<int> is
 /// Vec_int. The instance itself is a separate declaration, so this is a name,
 /// not a definition.
-fn generic_spec_text(generic: &GenericSpec, spelling: Spelling) -> String {
+pub(crate) fn generic_spec_text(generic: &GenericSpec, spelling: Spelling) -> String {
     let args = generic
         .args
         .iter()

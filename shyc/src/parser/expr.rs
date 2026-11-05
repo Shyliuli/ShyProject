@@ -6,12 +6,12 @@
 //! semantic work.
 
 use crate::ast::{
-    AssignOp, BinaryOp, CharLit, Expr, GenericArg, MemberOp, Name, NumberLit, PostfixOp, StringLit,
-    StringLitGroup, UnaryOp,
+    AssignOp, BinaryOp, Block, CharLit, Expr, GenericArg, LetDecl, MemberOp, Name, NumberLit,
+    PostfixOp, Stmt, StringLit, StringLitGroup, UnaryOp,
 };
 use crate::lexer::{Token, TokenKind};
 
-use super::comptime::{Evaluator, ParamKind, Value};
+use super::probe::{self, Answer, Place, ProbeRequest};
 use crate::source::{Diagnostic, Span};
 
 use super::Parser;
@@ -315,63 +315,249 @@ impl Parser {
     /// generic bounds of that wrapper type-check every argument. A later
     /// user-defined macro facility replaces this fixed table.
 
-    /// Parses one const fn call site and replaces it with the call's result.
+    /// Answers one const fn call in an expression from the probe cache.
     ///
-    /// A function with a single `Tokens` parameter captures everything inside
-    /// the parentheses as written; every other signature parses ordinary
-    /// expressions. A result that is a token sequence is parsed back into the
-    /// expression the call stands for.
-    fn const_call_site(&mut self, index: usize, start: Span) -> Result<Expr, Diagnostic> {
+    /// Unanswered calls become requests when the trampoline can carry the
+    /// signature. A body call it cannot carry stays an ordinary call, and
+    /// other unresolved calls keep a guarded placeholder. Returned tokens are
+    /// parsed back into the expression they replace.
+    fn probe_expr_call(&mut self, index: usize, start: Span) -> Result<Expr, Diagnostic> {
         self.record_const_call(index, start);
-        let params = self.const_fns[index].params.clone();
-        let tokens_parameter = params.len() == 1 && params[0].1 == ParamKind::Tokens;
-        if tokens_parameter {
-            let (tokens, close) = self.capture_tokens()?;
-            let span = start.join(close);
-            let value = self.call_const(index, vec![Value::Tokens(tokens)], span)?;
-            return self.constant_expression(value, span, index);
-        }
-        let (args, close) = self.call_arguments()?;
+        let (arguments, close) = self.const_arguments(index)?;
         let span = start.join(close);
-        let value = self.const_call(index, args, span)?;
-        self.constant_expression(value, span, index)
-    }
-
-    /// Wraps an expression result, parsing a token result as an expression.
-    ///
-    /// A parse failure names the const fn that produced the tokens, since the
-    /// error points into generated text the programmer never wrote.
-    fn constant_expression(
-        &self,
-        value: Value,
-        span: Span,
-        index: usize,
-    ) -> Result<Expr, Diagnostic> {
-        match value {
-            Value::Tokens(tokens) => parse_fragment(tokens, span, self)
+        // The declaration pass leaves a body call for the second pass, which
+        // runs against the settled world: what a body sees must not depend on
+        // how far the generators had expanded when the call was asked.
+        if self.defer_body_calls && !self.body_stack.is_empty() {
+            self.bodies_deferred = true;
+            if let Some(call) = self.native_probe_value_call(index, &arguments, start, span) {
+                return Ok(call);
+            }
+            // Syntax-producing calls still need a parsed expansion. Keep them
+            // marked as unresolved so probe safety checks can reject them, and
+            // keep the call itself so the placeholder has the result's type.
+            self.defer_body_call();
+            return Ok(self.placeholder_call(index, &arguments, span));
+        }
+        let name = self.const_fns[index].name.clone();
+        let key = self.probe_key(index, Place::Expr, span, probe::fingerprint(&arguments));
+        match self.probe_answer(&key) {
+            Some(Answer::Int(value)) => Ok(number(value, span)),
+            Some(Answer::Str(text)) => Ok(string_literal(&text, span)),
+            Some(Answer::Tokens(tokens)) => parse_fragment(tokens, span, self)
                 .map_err(|error| self.fragment_error(error, index)),
-            other => constant(other, span),
+            Some(Answer::Suspended { .. }) => Err(Diagnostic::new(
+                span,
+                format!(
+                    "probe answered a suspension for '{name}', which stands in an expression and cannot block"
+                ),
+            )),
+            Some(Answer::Failed { message, span: at }) => {
+                Err(Diagnostic::new(at.unwrap_or(span), message))
+            }
+            None => {
+                let native_call = if self.body_stack.is_empty() {
+                    None
+                } else {
+                    self.native_probe_value_call(index, &arguments, start, span)
+                };
+                let placeholder = self.placeholder_call(index, &arguments, span);
+                // A call the trampoline cannot carry is not asked: the name
+                // stays in the tree and the final unit emits the function.
+                let asked = native_call.is_none()
+                    || crate::probe::result_kind(&self.const_fns[index]).is_ok();
+                if asked {
+                    self.probe_record(ProbeRequest {
+                        key,
+                        function: index,
+                        name,
+                        place: Place::Expr,
+                        site: span,
+                        arguments,
+                    });
+                }
+                if let Some(call) = native_call {
+                    return Ok(call);
+                }
+                if !self.body_stack.is_empty() {
+                    self.defer_body_call();
+                }
+                // Categorized placeholder: the call the answer will replace,
+                // so the rest of the expression still parses and type-checks.
+                // A round that has requests produces no code.
+                Ok(placeholder)
+            }
         }
     }
 
-    /// Runs one const fn with already prepared argument values.
-    pub(crate) fn call_const(
+    /// A const fn that is a plain function can be a real function: inside a
+    /// probe image, and in the final unit when the trampoline cannot carry the
+    /// call. This representation is used only while a body call is unresolved;
+    /// a call the probe answers is still replaced by that answer.
+    fn native_probe_value_call(
         &self,
         index: usize,
-        values: Vec<Value>,
+        arguments: &probe::Arguments,
+        start: Span,
         span: Span,
-    ) -> Result<Value, Diagnostic> {
-        let function = &self.const_fns[index];
-        let mut evaluator = Evaluator::new(&self.const_fns);
-        evaluator.call(index, &values, span).map_err(|error| {
-            Diagnostic::new(
+    ) -> Option<Expr> {
+        let probe::Arguments::Expressions(args) = arguments else {
+            return None;
+        };
+        if !crate::probe::native_callable(&self.const_fns[index]) {
+            return None;
+        }
+        Some(Expr::Call {
+            callee: Box::new(Expr::Name(Name::new(
+                self.const_fns[index].name.clone(),
+                start,
+            ))),
+            type_args: Vec::new(),
+            args: args.clone(),
+            span,
+        })
+    }
+
+    /// The expression an unanswered call leaves in the tree.
+    ///
+    /// A call whose answer is syntax keeps its own expression: the const fn is
+    /// declared with its real signature and the probe image carries a clone
+    /// under its declared name, so the placeholder has the type the slot
+    /// expects. A body that would run it is trapped by the probe image's
+    /// unresolved-body guard.
+    fn placeholder_call(&self, index: usize, arguments: &probe::Arguments, span: Span) -> Expr {
+        let probe::Arguments::Expressions(args) = arguments else {
+            return self.placeholder_value(index, span);
+        };
+        Expr::Call {
+            callee: Box::new(Expr::Name(Name::new(
+                self.const_fns[index].name.clone(),
                 span,
-                format!("in const fn '{}': {}", function.name, error.message),
-            )
+            ))),
+            type_args: Vec::new(),
+            args: args.clone(),
+            span,
+        }
+    }
+
+    /// A zero value for a call whose syntax argument leaves no expression to
+    /// keep.
+    ///
+    /// A Tokens result is a struct, so it takes a zero compound literal of its
+    /// declared type; every other result type is a scalar or a pointer, where
+    /// `0` is the zero value.
+    fn placeholder_value(&self, index: usize, span: Span) -> Expr {
+        let function = &self.const_fns[index];
+        if !function.returns_tokens {
+            return Expr::Number(NumberLit {
+                text: "0".to_string(),
+                span,
+            });
+        }
+        Expr::CompoundLiteral {
+            type_name: crate::ast::TypeName {
+                span,
+                specs: function.specs.clone(),
+                declarator: None,
+            },
+            init: Box::new(crate::ast::Initializer {
+                span,
+                kind: crate::ast::InitializerKind::List(Vec::new()),
+            }),
+            span,
+        }
+    }
+
+    /// Rewrites `try_run(f, args..., &result)` into a call to the helper the
+    /// probe image generates for this site.
+    ///
+    /// The function name is removed from the argument list: the helper calls it
+    /// from the probe image, where the arguments travel through static storage.
+    /// Everything else (the call's arguments and the out parameter) stays, so
+    /// the compiler type-checks the same expressions it would have passed to
+    /// `f`.
+    fn try_run_call(&mut self, name: Name) -> Result<Expr, Diagnostic> {
+        let (mut arguments, close) = self.call_arguments()?;
+        let span = name.span.join(close);
+        if arguments.len() < 2 {
+            return Err(Diagnostic::new(
+                span,
+                "try_run needs a function name and the address of the local that                  receives the result, as in try_run(f, arg, &result)",
+            ));
+        }
+        let function = match &arguments[0] {
+            Expr::Name(function) => function.clone(),
+            other => {
+                return Err(Diagnostic::new(
+                    other.span(),
+                    "the first argument of try_run must name a function declared in                      this translation unit",
+                ));
+            }
+        };
+        if self.local_visible(&function.text) {
+            return Err(Diagnostic::new(
+                function.span,
+                format!(
+                    "try_run names '{}', which is a local variable here, not a function",
+                    function.text
+                ),
+            ));
+        }
+        let out = arguments.last().expect("checked two arguments");
+        let Expr::Unary {
+            op: UnaryOp::AddressOf,
+            operand,
+            ..
+        } = out
+        else {
+            return Err(Diagnostic::new(
+                out.span(),
+                "the last argument of try_run must be the address of a local variable,                  as in &result",
+            ));
+        };
+        let Expr::Name(local) = operand.as_ref() else {
+            return Err(Diagnostic::new(
+                operand.span(),
+                "the last argument of try_run must be the address of a local variable,                  as in &result",
+            ));
+        };
+        if !self.local_visible(&local.text) {
+            return Err(Diagnostic::new(
+                local.span,
+                format!(
+                    "'{}' is not a local variable of this function, so try_run cannot                      write the result through &{}",
+                    local.text, local.text
+                ),
+            ));
+        }
+        let arity = arguments.len() - 2;
+        let id = self.record_try_site(function.text.clone(), arity, span);
+        arguments.remove(0);
+        let callee = Name::new(format!("__shy_try_{id}"), name.span);
+        Ok(Expr::Call {
+            callee: Box::new(Expr::Name(callee)),
+            type_args: Vec::new(),
+            args: arguments,
+            span,
         })
     }
 
     /// Captures the tokens between a pair of parentheses, brackets, or braces.
+    /// Captures a token argument, dropping the `;` that closes it.
+    ///
+    /// A `;` written last closes the argument the way it closes a statement,
+    /// so it is not one of the tokens the const fn receives.
+    pub(crate) fn capture_token_argument(&mut self) -> Result<(Vec<Token>, Span), Diagnostic> {
+        let (mut tokens, close) = self.capture_tokens()?;
+        if matches!(
+            tokens.last().map(|token| &token.kind),
+            Some(TokenKind::Punct(punct)) if punct == ";"
+        ) {
+            tokens.pop();
+        }
+        Ok((tokens, close))
+    }
+
     pub(crate) fn capture_tokens(&mut self) -> Result<(Vec<Token>, Span), Diagnostic> {
         let open = self.expect_punct("(")?;
         let mut depth = 1usize;
@@ -398,138 +584,125 @@ impl Parser {
         }
     }
 
-    /// Evaluates a call to `const fn` and turns the result into a value.
-    fn const_call(&self, index: usize, args: Vec<Expr>, span: Span) -> Result<Value, Diagnostic> {
-        let function = &self.const_fns[index];
-        // A body call is recorded so only the bodies that depend on the settled
-        // declarations are re-parsed.
-        self.saw_body_call.set(true);
-        if self.body_world.is_none()
-            && let Some(span) = self.function_bodies.last().copied()
-        {
-            let mut calls = self.body_calls.borrow_mut();
-            if !calls.iter().any(|recorded| recorded.start == span.start) {
-                calls.push(span);
-            }
-        }
-        let mut evaluator = match &self.body_world {
-            Some(world) => Evaluator::with_world(&self.const_fns, world),
-            None => Evaluator::new(&self.const_fns),
-        };
-        let mut values = Vec::new();
-        for argument in &args {
-            let value = evaluator.eval(argument).map_err(|error| {
-                Diagnostic::new(
-                    argument.span(),
-                    format!(
-                        "argument of const fn '{}' is not a compile-time constant: {}",
-                        function.name, error.message
-                    ),
-                )
-            })?;
-            values.push(value);
-        }
-        evaluator.call(index, &values, span)
-    }
-
+    /// keeps its wrapper call, because \`sscanf\` reads the C conversions itself.
     fn expand_format_macro(
         &mut self,
         name: Name,
         args: Vec<Expr>,
         span: Span,
     ) -> Result<Expr, Diagnostic> {
-        let prefix = match name.text.as_str() {
-            "println" => "println",
-            "format" => "format",
-            "scanln" => "scanln",
-            other => {
-                return Err(Diagnostic::new(
-                    name.span,
-                    format!("unknown macro '{other}!'"),
-                ));
-            }
-        };
-        if args.is_empty() || args.len() - 1 > 8 {
+        let Some(format) = args.first() else {
             return Err(Diagnostic::new(
                 span,
-                format!(
-                    "macro '{}!' takes a format string and at most 8 arguments",
-                    name.text
-                ),
+                format!("macro '{}!' takes a format string", name.text),
             ));
-        }
-        let mut format = args[0].clone();
-        let mut values = args[1..].to_vec();
-        if let Some(text) = literal_text(&format) {
-            if name.text == "scanln" {
-                // `scanln!` hands its string to `sscanf`, so it counts C
-                // conversions instead of `{}` placeholders.
-                let placeholders = scan_placeholders(&text);
-                if placeholders != values.len() {
-                    return Err(placeholder_mismatch(placeholders, values.len(), name.span));
-                }
-            } else {
-                let (rewritten, specs) = parse_format(&text, name.span)?;
-                if specs.len() > 8 {
+        };
+        let literal = match format {
+            Expr::String(group) => Some(string_value(group)?),
+            _ => None,
+        };
+        match name.text.as_str() {
+            "println" | "format" => {
+                let Some(text) = literal else {
+                    return Err(Diagnostic::new(
+                        name.span,
+                        format!("the format string of '{}!' must be a literal", name.text),
+                    ));
+                };
+                let parts = split_format(&text, args.len() - 1, name.span)?;
+                let actions = format_actions(parts, args[1..].to_vec(), name.span)?;
+                // The macro keeps a definition to jump to: the library call its
+                // expansion starts with.
+                let entry = if name.text == "println" {
+                    "fmt_line"
+                } else {
+                    "fmt_begin"
+                };
+                self.record_macro_site(&name.text.clone(), name.span, entry);
+                Ok(self.format_statement(&name, actions, span))
+            }
+            "scanln" => {
+                if args.len() - 1 > 8 {
                     return Err(Diagnostic::new(
                         span,
-                        format!(
-                            "macro '{}!' takes a format string and at most 8 arguments",
-                            name.text
-                        ),
+                        "macro 'scanln!' takes a format string and at most 8 arguments",
                     ));
                 }
-                let mut given = values.into_iter();
-                let mut bound = Vec::with_capacity(specs.len());
-                for spec in &specs {
-                    match &spec.name {
-                        // `{name}` inserts the variable of that name, so no
-                        // argument was written for it.
-                        Some(variable) => {
-                            bound.push(Expr::Name(Name::new(variable.clone(), name.span)))
-                        }
-                        None => match given.next() {
-                            Some(argument) => bound.push(argument),
-                            None => {
-                                return Err(placeholder_mismatch(
-                                    specs.len(),
-                                    args.len() - 1,
-                                    name.span,
-                                ));
-                            }
-                        },
+                if let Some(text) = &literal {
+                    // \`scanln!\` hands its string to \`sscanf\`, so it counts C
+                    // conversions instead of \`{}\` placeholders.
+                    let placeholders = scan_placeholders(text);
+                    if placeholders != args.len() - 1 {
+                        return Err(placeholder_mismatch(
+                            placeholders,
+                            args.len() - 1,
+                            name.span,
+                        ));
                     }
                 }
-                if given.next().is_some() {
-                    return Err(placeholder_mismatch(specs.len(), args.len() - 1, name.span));
-                }
-                if specs.iter().any(|spec| spec.name.is_some()) {
-                    // The runtime formatter only understands positional
-                    // placeholders, so the named ones become `{}` or `{:?}`.
-                    format = Expr::String(StringLitGroup {
-                        parts: vec![StringLit {
-                            prefix: String::new(),
-                            raw: rewritten,
-                            span: name.span,
-                        }],
-                        span: name.span,
+                let callee = Name::new(format!("scanln{}", args.len() - 1), name.span);
+                self.record_macro_site(&name.text.clone(), name.span, &callee.text.clone());
+                Ok(Expr::Call {
+                    callee: Box::new(Expr::Name(callee)),
+                    type_args: Vec::new(),
+                    args,
+                    span,
+                })
+            }
+            other => Err(Diagnostic::new(
+                name.span,
+                format!("unknown macro '{other}!'"),
+            )),
+        }
+    }
+
+    /// The statement expression a \`println!\` or \`format!\` call stands for.
+    fn format_statement(&mut self, name: &Name, actions: Vec<FormatAction>, span: Span) -> Expr {
+        self.macro_index += 1;
+        let out = Name::new(format!("__fmt_out_{}", self.macro_index), span);
+        let mut stmts = Vec::with_capacity(actions.len() + 2);
+        stmts.push(Stmt::Let(LetDecl {
+            span,
+            is_mut: true,
+            name: out.clone(),
+            init: plain_call("fmt_begin", Vec::new(), span),
+        }));
+        for action in actions {
+            match action {
+                FormatAction::Text(text) => {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    stmts.push(Stmt::Expr {
+                        expr: method_call(
+                            &out,
+                            "push_cstr",
+                            vec![string_literal(&text, span)],
+                            span,
+                        ),
+                        span,
                     });
                 }
-                values = bound;
+                FormatAction::Argument { debug, value } => {
+                    let slot = value.span();
+                    let render = if debug { "fmt_debug" } else { "fmt_display" };
+                    stmts.push(Stmt::Expr {
+                        expr: plain_call(render, vec![value, address_of(&out, span)], slot),
+                        span: slot,
+                    });
+                }
             }
         }
-        let callee = Name::new(format!("{prefix}{}", values.len()), name.span);
-        let expansion = callee.text.clone();
-        self.record_macro_site(&name.text, name.span, &expansion);
-        let mut arguments = Vec::with_capacity(values.len() + 1);
-        arguments.push(format);
-        arguments.extend(values);
-        Ok(Expr::Call {
-            callee: Box::new(Expr::Name(callee)),
-            type_args: Vec::new(),
-            args: arguments,
+        let tail = if name.text == "println" {
+            plain_call("fmt_line", vec![address_of(&out, span)], span)
+        } else {
+            Expr::Name(out)
+        };
+        stmts.push(Stmt::Expr { expr: tail, span });
+        Expr::StatementExpr {
+            block: Block { span, stmts },
             span,
-        })
+        }
     }
 
     fn postfix(&mut self) -> Result<Expr, Diagnostic> {
@@ -594,15 +767,43 @@ impl Parser {
                 expr = self.expand_format_macro(name, args, span)?;
                 fresh_try = false;
             } else if self.at_punct("(") {
+                // `try_run(f, args..., &result)` asks the probe to run an
+                // ordinary function. Rewrite it into the helper the probe image
+                // generates for this site; the helper keeps the arguments and
+                // the address of the local that receives the result.
+                if let Expr::Name(name) = &expr
+                    && name.text == "try_run"
+                {
+                    if !self.in_const_body {
+                        return Err(Diagnostic::new(
+                            name.span,
+                            "try_run is only available inside a const fn body",
+                        ));
+                    }
+                    let name = name.clone();
+                    expr = self.try_run_call(name)?;
+                    fresh_try = false;
+                    continue;
+                }
                 // A call to a const fn is evaluated here, at compile time, and
-                // the call site becomes the constant it produced.
+                // the call site becomes the constant it produced. Inside a
+                // const fn body the call stays: its arguments are that body's
+                // locals, so only the evaluator can run it.
                 if let Expr::Name(name) = &expr
                     && let Some(index) = self.const_fns.iter().position(|f| f.name == name.text)
                 {
                     let span = expr.span();
-                    expr = self.const_call_site(index, span)?;
-                    fresh_try = false;
-                    continue;
+                    if self.in_const_body {
+                        self.record_const_call(index, span);
+                    } else if self.probe_active() {
+                        expr = self.probe_expr_call(index, span)?;
+                        fresh_try = false;
+                        continue;
+                    } else {
+                        expr = self.probe_expr_call(index, span)?;
+                        fresh_try = false;
+                        continue;
+                    }
                 }
                 let (args, close) = self.call_arguments()?;
                 let span = expr.span().join(close);
@@ -697,7 +898,7 @@ impl Parser {
 
     /// Parses `( expression, ... )` after a callee and returns its arguments
     /// plus the closing parenthesis span.
-    fn call_arguments(&mut self) -> Result<(Vec<Expr>, Span), Diagnostic> {
+    pub(crate) fn call_arguments(&mut self) -> Result<(Vec<Expr>, Span), Diagnostic> {
         self.expect_punct("(")?;
         let mut args = Vec::new();
         if !self.at_punct(")") {
@@ -857,78 +1058,185 @@ impl Parser {
         Ok(parts)
     }
 }
-/// The text of a string literal expression, with escapes left as written.
-///
-/// Escapes never produce a brace, so scanning the raw text is enough for
-/// counting placeholders.
-fn literal_text(expr: &Expr) -> Option<String> {
-    let Expr::String(group) = expr else {
-        return None;
-    };
-    Some(group.parts.iter().map(|part| part.raw.as_str()).collect())
+/// One piece of a compiled format string.
+enum FormatPart {
+    /// Literal text, escapes decoded and braces resolved.
+    Text(String),
+    /// A placeholder, rendered with Display or Debug.
+    Slot {
+        debug: bool,
+        /// The variable a \`{name}\` placeholder inserts, if it names one.
+        name: Option<String>,
+    },
 }
 
-/// One placeholder of a literal format string.
-struct FormatSpec {
-    /// The variable a `{name}` placeholder inserts, if it names one.
-    name: Option<String>,
+/// One step of the statement expression a format macro compiles to.
+enum FormatAction {
+    Text(String),
+    Argument { debug: bool, value: Expr },
 }
 
-/// Reads a literal format string, rewriting named placeholders.
-///
-/// Returns the string the runtime formatter should see (every placeholder
-/// positional) and one entry per placeholder. `{{name}}` is not a placeholder:
-/// escaped braces stay literal.
-fn parse_format(text: &str, span: Span) -> Result<(String, Vec<FormatSpec>), Diagnostic> {
-    let characters: Vec<char> = text.chars().collect();
-    let mut rewritten = String::new();
-    let mut specs = Vec::new();
-    let mut index = 0;
-    while index < characters.len() {
-        let character = characters[index];
-        if character == '{' && characters.get(index + 1) == Some(&'{') {
-            rewritten.push_str("{{");
-            index += 2;
-            continue;
-        }
-        if character == '}' && characters.get(index + 1) == Some(&'}') {
-            rewritten.push_str("}}");
-            index += 2;
-            continue;
-        }
-        if character != '{' {
-            rewritten.push(character);
-            index += 1;
-            continue;
-        }
-        let Some(offset) = characters[index + 1..].iter().position(|c| *c == '}') else {
-            return Err(Diagnostic::new(span, "format string has an unclosed '{'"));
-        };
-        let inner: String = characters[index + 1..index + 1 + offset].iter().collect();
-        let (name, debug) = match inner.as_str() {
-            "" => (None, false),
-            ":?" => (None, true),
-            other => {
-                let (name, debug) = match other.strip_suffix(":?") {
-                    Some(name) => (name, true),
-                    None => (other, false),
-                };
-                let valid =
-                    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_');
-                if !valid {
-                    return Err(Diagnostic::new(
-                        span,
-                        format!("unknown format specifier '{{{inner}}}'"),
-                    ));
-                }
-                (Some(name.to_string()), debug)
-            }
-        };
-        rewritten.push_str(if debug { "{:?}" } else { "{}" });
-        specs.push(FormatSpec { name });
-        index = index + 1 + offset + 1;
+/// The text a string literal stands for, escapes decoded.
+fn string_value(group: &StringLitGroup) -> Result<String, Diagnostic> {
+    let mut text = String::new();
+    for part in &group.parts {
+        let value = crate::literal::string(&part.prefix, &part.raw, part.span)?;
+        text.push_str(&String::from_utf8_lossy(&value.bytes));
     }
-    Ok((rewritten, specs))
+    Ok(text)
+}
+
+/// Splits a literal format string into text and placeholders.
+///
+/// \`{{\`/\`}}\` are resolved here, so nothing downstream looks for a brace, and
+/// the placeholder count is checked against the arguments the call supplied.
+fn split_format(text: &str, arguments: usize, span: Span) -> Result<Vec<FormatPart>, Diagnostic> {
+    let mut parts: Vec<FormatPart> = Vec::new();
+    let mut pending = String::new();
+    let mut placeholders = 0;
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '{' if characters.peek() == Some(&'{') => {
+                characters.next();
+                pending.push('{');
+            }
+            '}' if characters.peek() == Some(&'}') => {
+                characters.next();
+                pending.push('}');
+            }
+            '{' => {
+                let mut inner = String::new();
+                loop {
+                    match characters.next() {
+                        Some('}') => break,
+                        Some(character) => inner.push(character),
+                        None => {
+                            return Err(Diagnostic::new(span, "format string has an unclosed '{'"));
+                        }
+                    }
+                }
+                let (name, debug) = format_spec(&inner, span)?;
+                if !pending.is_empty() {
+                    parts.push(FormatPart::Text(std::mem::take(&mut pending)));
+                }
+                // A `{name}` placeholder inserts a variable that is already in
+                // scope, so only the positional ones take an argument.
+                if name.is_none() {
+                    placeholders += 1;
+                }
+                parts.push(FormatPart::Slot { debug, name });
+            }
+            character => pending.push(character),
+        }
+    }
+    if !pending.is_empty() {
+        parts.push(FormatPart::Text(pending));
+    }
+    if placeholders != arguments {
+        return Err(placeholder_mismatch(placeholders, arguments, span));
+    }
+    Ok(parts)
+}
+
+/// The variable and Debug flag of one \`{...}\` placeholder.
+fn format_spec(inner: &str, span: Span) -> Result<(Option<String>, bool), Diagnostic> {
+    match inner {
+        "" => return Ok((None, false)),
+        ":?" => return Ok((None, true)),
+        _ => {}
+    }
+    let (name, debug) = match inner.strip_suffix(":?") {
+        Some(name) => (name, true),
+        None => (inner, false),
+    };
+    let valid = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+    if !valid {
+        return Err(Diagnostic::new(
+            span,
+            format!("unknown format specifier '{{{inner}}}'"),
+        ));
+    }
+    Ok((Some(name.to_string()), debug))
+}
+
+/// Pairs each placeholder with its argument, in order.
+fn format_actions(
+    parts: Vec<FormatPart>,
+    values: Vec<Expr>,
+    span: Span,
+) -> Result<Vec<FormatAction>, Diagnostic> {
+    let mut values = values.into_iter();
+    let mut actions = Vec::with_capacity(parts.len());
+    for part in parts {
+        match part {
+            FormatPart::Text(text) => actions.push(FormatAction::Text(text)),
+            FormatPart::Slot { debug, name } => {
+                let value = match name {
+                    // \`{name}\` inserts the variable of that name, so no
+                    // argument was written for it.
+                    Some(variable) => Expr::Name(Name::new(variable, span)),
+                    None => match values.next() {
+                        Some(value) => value,
+                        None => {
+                            return Err(Diagnostic::new(
+                                span,
+                                "format string has more placeholders than arguments",
+                            ));
+                        }
+                    },
+                };
+                actions.push(FormatAction::Argument { debug, value });
+            }
+        }
+    }
+    Ok(actions)
+}
+
+/// A call to a plain function name.
+fn plain_call(name: &str, args: Vec<Expr>, span: Span) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::Name(Name::new(name.to_string(), span))),
+        type_args: Vec::new(),
+        args,
+        span,
+    }
+}
+
+/// \`object.method(args)\` on a local name.
+fn method_call(object: &Name, method: &str, args: Vec<Expr>, span: Span) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::Member {
+            object: Box::new(Expr::Name(object.clone())),
+            name: Name::new(method.to_string(), span),
+            op: MemberOp::Dot,
+            span,
+        }),
+        type_args: Vec::new(),
+        args,
+        span,
+    }
+}
+
+/// \`&name\`.
+fn address_of(name: &Name, span: Span) -> Expr {
+    Expr::Unary {
+        op: UnaryOp::AddressOf,
+        operand: Box::new(Expr::Name(name.clone())),
+        span,
+    }
+}
+
+/// One string literal expression, escapes re-applied.
+fn string_literal(text: &str, span: Span) -> Expr {
+    Expr::String(StringLitGroup {
+        parts: vec![StringLit {
+            prefix: String::new(),
+            raw: escape_literal(text),
+            span,
+        }],
+        span,
+    })
 }
 
 /// Counts the C conversions a `scanf` format performs.
@@ -969,29 +1277,24 @@ fn placeholder_mismatch(placeholders: usize, arguments: usize, span: Span) -> Di
     )
 }
 
-/// Turns a compile-time value back into a literal expression.
-fn constant(value: Value, span: Span) -> Result<Expr, Diagnostic> {
-    match value {
-        Value::Int(int) => Ok(Expr::Number(NumberLit {
-            text: int.to_string(),
+/// A literal expression for `value`.
+///
+/// The lexer only spells unsigned literals, so a negative value is a minus
+/// applied to its magnitude: `NumberLit { text: "-1" }` has no digits for the
+/// literal parser and would be rejected.
+fn number(value: i64, span: Span) -> Expr {
+    let literal = Expr::Number(NumberLit {
+        text: value.unsigned_abs().to_string(),
+        span,
+    });
+    if value < 0 {
+        Expr::Unary {
+            op: UnaryOp::Minus,
+            operand: Box::new(literal),
             span,
-        })),
-        Value::Str(text) => Ok(Expr::String(StringLitGroup {
-            parts: vec![StringLit {
-                prefix: String::new(),
-                raw: escape_literal(&text),
-                span,
-            }],
-            span,
-        })),
-        Value::Tokens(_) => Err(Diagnostic::new(
-            span,
-            "a token sequence can only be used where an expression is expected",
-        )),
-        Value::Unit => Err(Diagnostic::new(
-            span,
-            "a const fn used as a value must return a value",
-        )),
+        }
+    } else {
+        literal
     }
 }
 
@@ -1017,7 +1320,7 @@ fn escape_literal(text: &str) -> String {
 /// The result must be a complete expression: a fragment that leaves trailing
 /// tokens behind would silently swallow the surrounding operator, so it is
 /// rejected instead.
-fn parse_fragment(tokens: Vec<Token>, span: Span, parent: &Parser) -> Result<Expr, Diagnostic> {
+fn parse_fragment(tokens: Vec<Token>, span: Span, parent: &mut Parser) -> Result<Expr, Diagnostic> {
     if tokens.is_empty() {
         return Err(Diagnostic::new(span, "a const fn returned no tokens"));
     }
@@ -1032,6 +1335,10 @@ fn parse_fragment(tokens: Vec<Token>, span: Span, parent: &Parser) -> Result<Exp
     parser.scopes[0].typedefs = parent.scopes[0].typedefs.clone();
     parser.scopes[0].tags = parent.scopes[0].tags.clone();
     parser.scopes[0].traits = parent.scopes[0].traits.clone();
+    parser.probe = parent.probe.clone();
+    parser.defer_body_calls = parent.defer_body_calls;
+    parser.body_stack = parent.body_stack.clone();
+    parser.function_body_names = parent.function_body_names.clone();
     let expr = parser.expression()?;
     if !parser.at_eof() {
         return Err(Diagnostic::new(
@@ -1039,5 +1346,9 @@ fn parse_fragment(tokens: Vec<Token>, span: Span, parent: &Parser) -> Result<Exp
             "tokens returned by a const fn do not form one expression",
         ));
     }
+    parent.bodies_deferred |= parser.bodies_deferred;
+    parent
+        .deferred_body_functions
+        .extend(parser.deferred_body_functions.iter().cloned());
     Ok(expr)
 }

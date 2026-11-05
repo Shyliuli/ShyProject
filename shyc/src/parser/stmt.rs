@@ -1,11 +1,14 @@
 //! Statements, blocks, labels, and inline assembly.
 
-use crate::ast::{AsmStmt, Block, Declarator, DerivedDeclarator, ForInit, LetDecl, Stmt};
+use crate::ast::{
+    AsmStmt, Block, Declarator, DerivedDeclarator, Expr, ForInit, LetDecl, Name, Stmt,
+};
 use crate::lexer::TokenKind;
 use crate::source::{Diagnostic, Span};
 
 use super::Parser;
 use super::cursor::is_keyword;
+use super::probe::{Answer, Place, ProbeRequest};
 
 impl Parser {
     /// One statement, including a declaration used as a statement.
@@ -94,7 +97,10 @@ impl Parser {
             });
         }
 
-        if self.starts_type_name(0) {
+        // `Type::method(...)` is a call whose callee happens to be a type
+        // name, not a declaration: a declaration never has `::` after its
+        // specifiers.
+        if self.starts_type_name(0) && !self.at_punct_ahead(1, "::") {
             return Ok(Stmt::Decl(self.declaration()?));
         }
 
@@ -165,6 +171,11 @@ impl Parser {
         let is_function_body = params.is_some();
         if is_function_body {
             self.function_bodies.push(open);
+            self.function_body_names.push(
+                params
+                    .and_then(|declarator| declarator.name.as_ref())
+                    .map(|name| name.text.clone()),
+            );
         }
         self.push_scope();
         if let Some(declarator) = params
@@ -195,6 +206,7 @@ impl Parser {
         self.body_stack.pop();
         if is_function_body {
             self.function_bodies.pop();
+            self.function_body_names.pop();
         }
         Ok(Block {
             span: open.join(close),
@@ -438,7 +450,8 @@ impl Parser {
     ///
     /// The returned tokens must form complete statements; a trailing expression
     /// without its semicolon is accepted by supplying the one the call site
-    /// left behind.
+    /// left behind. A `const fn` body expands such a call the same way: the
+    /// call is syntax, not a value the body could compute.
     pub(crate) fn expand_statement_list(&mut self) -> Result<Option<Vec<Stmt>>, Diagnostic> {
         let Some(index) = self.const_fn_generator_ahead() else {
             return Ok(None);
@@ -446,42 +459,103 @@ impl Parser {
         let start = self.here();
         self.record_const_call(index, start);
         self.bump();
-        let (tokens, close) = self.capture_tokens()?;
+        let name = self.const_fns[index].name.clone();
+        let (arguments, close) = self.const_arguments(index)?;
         let span = start.join(close);
-        let value = self.call_const(index, vec![super::comptime::Value::Tokens(tokens)], span)?;
-        let super::comptime::Value::Tokens(returned) = value else {
-            return Err(Diagnostic::new(
-                span,
-                "a statement const fn must produce tokens",
-            ));
+        if self.defer_body_calls && !self.body_stack.is_empty() {
+            self.defer_body_call();
+            return Ok(Some(vec![
+                self.placeholder_statement(index, &arguments, span),
+            ]));
+        }
+        let key = self.probe_key(
+            index,
+            Place::Statement,
+            span,
+            super::probe::fingerprint(&arguments),
+        );
+        let returned = match self.probe_answer(&key) {
+            Some(Answer::Tokens(tokens)) => tokens,
+            Some(Answer::Failed { message, span: at }) => {
+                return Err(Diagnostic::new(at.unwrap_or(span), message));
+            }
+            Some(Answer::Int(_)) | Some(Answer::Str(_)) | Some(Answer::Suspended { .. }) => {
+                return Err(Diagnostic::new(
+                    span,
+                    "a statement const fn must produce tokens",
+                ));
+            }
+            // Categorized placeholder: the call the answer will replace, so
+            // the block still parses and type-checks. A round that has
+            // requests produces no code.
+            None => {
+                let placeholder = self.placeholder_statement(index, &arguments, span);
+                self.probe_record(ProbeRequest {
+                    key,
+                    function: index,
+                    name,
+                    place: Place::Statement,
+                    site: span,
+                    arguments,
+                });
+                return Ok(Some(vec![placeholder]));
+            }
         };
         if returned.is_empty() {
             return Ok(Some(Vec::new()));
         }
-        match self.parse_statement_fragment(returned.clone(), span) {
-            Ok(statements) => Ok(Some(statements)),
-            Err(error) => {
-                // A macro that produces declarations belongs at file scope.
-                if self
-                    .parse_item_fragment(returned, span, None)
-                    .is_ok_and(|(items, _, _)| !items.is_empty())
-                {
-                    let name = self.const_fns[index].name.clone();
-                    return Err(Diagnostic::new(
-                        span,
+        let name = self.const_fns[index].name.clone();
+        return self
+            .parse_statement_fragment(returned, span)
+            .map(Some)
+            .map_err(|error| {
+                // A declaration cannot stand inside a block, and the fragment
+                // parser rejects a function definition there. Name the const fn
+                // and the place it belongs in instead of that parse detail.
+                if error.message.starts_with("nested function definitions") {
+                    Diagnostic::new(
+                        error.span,
                         format!(
                             "const fn '{name}' produced declarations, which cannot stand inside a function; call it at file scope"
                         ),
-                    ));
+                    )
+                } else {
+                    self.fragment_error(error, index)
                 }
-                Err(self.fragment_error(error, index))
-            }
-        }
+            });
+    }
+
+    /// The statement an unanswered generator call leaves in the tree.
+    ///
+    /// A call with expression arguments keeps its own expression, so the
+    /// placeholder has the type the expansion will fill. A body that would run
+    /// it is trapped by the probe image's unresolved-body guard. A `Tokens`
+    /// argument has no expression to keep, so one empty statement stands in
+    /// there.
+    fn placeholder_statement(
+        &self,
+        index: usize,
+        arguments: &super::probe::Arguments,
+        span: Span,
+    ) -> Stmt {
+        let super::probe::Arguments::Expressions(args) = arguments else {
+            return Stmt::Empty(span);
+        };
+        let expr = Expr::Call {
+            callee: Box::new(Expr::Name(Name::new(
+                self.const_fns[index].name.clone(),
+                span,
+            ))),
+            type_args: Vec::new(),
+            args: args.clone(),
+            span,
+        };
+        Stmt::Expr { expr, span }
     }
 
     /// Parses a token sequence as statements.
     pub(crate) fn parse_statement_fragment(
-        &self,
+        &mut self,
         mut tokens: Vec<crate::lexer::Token>,
         span: crate::source::Span,
     ) -> Result<Vec<Stmt>, Diagnostic> {
@@ -506,11 +580,18 @@ impl Parser {
         let mut parser = Parser::new(tokens, false);
         parser.scopes = self.scopes.clone();
         parser.const_fns = self.const_fns.clone();
+        parser.probe = self.probe.clone();
         parser.body_world = self.body_world.clone();
+        parser.defer_body_calls = self.defer_body_calls;
+        parser.body_stack = self.body_stack.clone();
+        parser.function_body_names = self.function_body_names.clone();
         let mut statements = Vec::new();
         while !parser.at_eof() {
             statements.push(parser.statement()?);
         }
+        self.bodies_deferred |= parser.bodies_deferred;
+        self.deferred_body_functions
+            .extend(parser.deferred_body_functions.iter().cloned());
         Ok(statements)
     }
 }

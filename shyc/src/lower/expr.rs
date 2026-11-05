@@ -1934,6 +1934,12 @@ pub(super) fn assign_binary(op: ast::AssignOp) -> Option<ast::BinaryOp> {
 
 /// The macro a generated wrapper name came from, as in `println3`.
 fn format_macro_wrapper(name: &str) -> Option<&'static str> {
+    // The statement expression a `println!` or `format!` expands to lands on
+    // these, so a missing header is reported the same way.
+    match name {
+        "fmt_begin" | "fmt_display" | "fmt_debug" | "fmt_line" => return Some("println"),
+        _ => {}
+    }
     for prefix in ["println", "format", "scanln"] {
         let Some(rest) = name.strip_prefix(prefix) else {
             continue;

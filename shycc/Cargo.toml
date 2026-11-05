@@ -7,8 +7,16 @@ edition = "2024"
 name = "shycc"
 path = "src/main.rs"
 
+[features]
+default = ["constfn-probe"]
+# Compile the probe runner in. `const fn` runs in the emulator, so an ordinary
+# build needs it; `--no-default-features` builds a driver that refuses probe
+# rounds and leaves `const fn` unexecuted.
+constfn-probe = ["dep:emu"]
+
 [dependencies]
 anyhow = "1.0.103"
+emu = { path = "../emu", optional = true }
 # The driver shares the compiler's configuration: one file tells both where the
 # project's C library lives.
 shyc = { path = "../shyc" }

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::cpu::{Emu, StepOutcome, StopReason, Watchpoint, WatchpointKind};
+use emu::cpu::{Emu, StepOutcome, StopReason, Watchpoint, WatchpointKind};
 
 const DEFAULT_SIGNAL: &str = "S05";
 const SHYISA_ENTRY: u32 = 0x0000_0100;

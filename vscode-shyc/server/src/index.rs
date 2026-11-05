@@ -151,9 +151,11 @@ pub fn build(
     sources: &SourceMap,
     unit: &ast::TranslationUnit,
     sites: &[shyc::parser::ComptimeSite],
+    generated: &[Span],
 ) -> Index {
     let mut collector = Collector {
         sources,
+        generated,
         index: Index::default(),
         frames: Vec::new(),
         container: None,
@@ -172,6 +174,9 @@ struct Frame {
 
 struct Collector<'a> {
     sources: &'a SourceMap,
+    /// Spans of the items a probe answer generated: every token of such an
+    /// item carries its generator call site instead of real source text.
+    generated: &'a [Span],
     index: Index,
     frames: Vec<Frame>,
     container: Option<String>,
@@ -180,6 +185,10 @@ struct Collector<'a> {
 impl Collector<'_> {
     fn text(&self, span: Span) -> String {
         self.sources.text(span).trim().to_string()
+    }
+
+    fn is_generated(&self, span: Span) -> bool {
+        self.generated.iter().any(|generated| *generated == span)
     }
 
     // -- scopes ---------------------------------------------------------
@@ -471,7 +480,11 @@ impl Collector<'_> {
                 self.collect_specs(&parameter.specs, None);
             }
         }
-        let (return_type, params) = self.signature(specs, declarator);
+        let (return_type, params) = if self.is_generated(span) {
+            self.signature_from_tree(specs, declarator)
+        } else {
+            self.signature(specs, declarator)
+        };
         let detail = format!("{} {}({})", return_type, name.text, params);
         self.index.push(Sym {
             name: name.text.clone(),
@@ -1322,6 +1335,74 @@ impl Collector<'_> {
             params
         };
         (return_type, params)
+    }
+
+    /// The signature of an item whose tokens came from a probe answer.
+    ///
+    /// Every token of such an item carries the generator call site, so slicing
+    /// source text would print the call instead of the declaration. The tree
+    /// still has the real types, names, and declarators.
+    fn signature_from_tree(
+        &self,
+        specs: &ast::DeclSpecs,
+        declarator: &ast::Declarator,
+    ) -> (String, String) {
+        let return_type = self.return_type(specs, declarator);
+        let Some(ast::DerivedDeclarator::Function(function)) = declarator.derived.first() else {
+            return (return_type, String::new());
+        };
+        let mut params: Vec<String> = function
+            .params
+            .iter()
+            .map(|parameter| self.parameter_text(parameter))
+            .collect();
+        if function.variadic {
+            params.push("...".to_string());
+        }
+        let params = if params.as_slice() == ["void"] {
+            String::new()
+        } else {
+            params.join(", ")
+        };
+        (return_type, params)
+    }
+
+    fn parameter_text(&self, parameter: &ast::ParamDecl) -> String {
+        let Some(declarator) = &parameter.declarator else {
+            return self.specs_text(&parameter.specs);
+        };
+        if declarator
+            .derived
+            .iter()
+            .any(|derived| matches!(derived, ast::DerivedDeclarator::Function(_)))
+        {
+            return self.type_of(&parameter.specs, declarator);
+        }
+        let mut text = self.specs_text(&parameter.specs);
+        let pointers = declarator
+            .derived
+            .iter()
+            .filter(|derived| matches!(derived, ast::DerivedDeclarator::Pointer(_)))
+            .count();
+        for _ in 0..pointers {
+            text.push_str(" *");
+        }
+        if let Some(name) = &declarator.name {
+            if pointers == 0 {
+                text.push(' ');
+            }
+            text.push_str(&name.text);
+        }
+        for derived in &declarator.derived {
+            if let ast::DerivedDeclarator::Array(array) = derived {
+                match &array.length {
+                    ast::ArrayLength::Unspecified => text.push_str("[]"),
+                    ast::ArrayLength::Star => text.push_str("[*]"),
+                    ast::ArrayLength::Expr(_) => text.push_str(&self.text(array.span)),
+                }
+            }
+        }
+        text
     }
 
     fn specs_text(&self, specs: &ast::DeclSpecs) -> String {

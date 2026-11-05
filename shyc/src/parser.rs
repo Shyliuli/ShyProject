@@ -36,13 +36,20 @@ mod cursor;
 mod decl;
 mod expr;
 mod init;
+mod probe;
 mod stmt;
 mod ty;
 
+pub(crate) use comptime::token_text;
+pub use comptime::{ConstFn, ParamKind};
 pub use cursor::is_keyword;
+pub use probe::{
+    Answer, Answers, Arguments, GenericImplSnapshot, ImplPair, ParseOutput, Place, ProbeRequest,
+    RequestKey, TrySite, WorldSnapshot, parse_for_probe, token_from_probe, token_kind_number,
+};
 pub use ty::builtin_type;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast;
 use crate::lexer::{Token, TokenKind};
@@ -86,39 +93,25 @@ pub fn parse(tokens: &[Token]) -> Result<ast::TranslationUnit, Diagnostic> {
 }
 
 /// Parses a unit and reports the compile-time sites it expanded.
+///
+/// A `const fn` call runs in a probe round, so a parse without answers cannot
+/// finish one: the call is recorded as a request and leaves a placeholder. A
+/// program the round has not answered is reported here instead of being
+/// compiled from that placeholder.
 pub fn parse_with_sites(
     tokens: &[Token],
 ) -> Result<(ast::TranslationUnit, Vec<ComptimeSite>), Diagnostic> {
-    // First pass: collect declarations, run the generators, and learn the
-    // final world. A function body may query that world, so when generators
-    // exist the unit is parsed a second time with the world in hand.
-    let global = decl::prescan(tokens);
-    let mut first = Parser::new(tokens.to_vec(), false);
-    first.scopes[0].typedefs = global.typedefs.clone();
-    first.scopes[0].tags = global.tags.clone();
-    first.scopes[0].traits = global.traits.clone();
-    let mut unit = first.translation_unit()?;
-    let sites = first.comptime_sites.clone();
-    let Some(world) = first.final_world.take() else {
-        return Ok((unit, sites));
-    };
-    // Nothing in a body asked a compile-time question, so the second pass would
-    // produce the same unit.
-    if !first.saw_body_call.get() {
-        return Ok((unit, sites));
+    let parsed = parse_for_probe(tokens, Answers::default())?;
+    if let Some(request) = parsed.requests.first() {
+        return Err(Diagnostic::new(
+            request.site,
+            format!(
+                "const fn '{}' runs in a probe round, and this compile did not run one; drop --no-constfn-probe to run one",
+                request.name
+            ),
+        ));
     }
-    // Re-parse only the bodies that asked such a question; when that cannot be
-    // done safely, fall back to parsing the whole unit again.
-    if !first.needs_full_pass && first.reparse_bodies(tokens, &world, &mut unit) {
-        return Ok((unit, sites));
-    }
-    let mut second = Parser::new(tokens.to_vec(), false);
-    second.scopes[0].typedefs = global.typedefs;
-    second.scopes[0].tags = global.tags;
-    second.scopes[0].traits = global.traits;
-    second.body_world = Some(world);
-    let unit = second.translation_unit()?;
-    Ok((unit, second.comptime_sites))
+    Ok((parsed.unit, parsed.sites))
 }
 
 /// File-scope type names of an already parsed unit.
@@ -273,27 +266,52 @@ pub(crate) struct Parser {
     /// generators settled. Absent during the first pass, which computes it.
     pub(crate) body_world: Option<World>,
     /// The world this pass produced, kept so a second pass can use it.
-    pub(crate) final_world: Option<World>,
     /// Set when a function body evaluated a const fn during this pass, which is
     /// the only case that needs a second look.
     pub(crate) saw_body_call: std::cell::Cell<bool>,
     /// Set when re-parsing a fragment changed its shape, so the whole unit must
     /// be parsed again instead.
-    pub(crate) needs_full_pass: bool,
     /// Compile-time sites seen so far, for tools that need the syntax the
     /// expansion removed.
     pub(crate) comptime_sites: Vec<ComptimeSite>,
     /// Span of the body being parsed, innermost last.
     pub(crate) body_stack: Vec<Span>,
+    /// Declaration pass: body calls are left for the final body pass. Scalar
+    /// calls remain executable in a probe-only tree; syntax-producing calls
+    /// remain unresolved and cannot be executed by the probe.
+    pub(crate) defer_body_calls: bool,
+    /// Whether that pass left a body call unasked.
+    pub(crate) bodies_deferred: bool,
     /// Span of the function body being parsed, innermost last. A call inside a
     /// nested block still belongs to this body for re-parsing.
     pub(crate) function_bodies: Vec<Span>,
+    /// Function names whose bodies were left with const fn placeholders in the
+    /// declaration pass.
+    pub(crate) function_body_names: Vec<Option<String>>,
+    /// Names of those functions, for probe safety checks.
+    pub(crate) deferred_body_functions: Vec<String>,
     /// Bodies that contain a const fn call: only these need re-parsing once the
     /// declaration world is settled.
-    pub(crate) body_calls: std::cell::RefCell<Vec<Span>>,
     /// Declarator produced by a type-position expansion, waiting to be joined
     /// with the declarator the declaration writes after it.
     pub(crate) pending_declarator: Option<ast::Declarator>,
+    /// Set while a `const fn` body is parsed. Calls there remain ordinary
+    /// function calls whose arguments are evaluated by the compiled probe.
+    pub(crate) in_const_body: bool,
+    /// Names one expanded format macro already used, so its locals cannot
+    /// capture an identifier the arguments mention.
+    pub(crate) macro_index: usize,
+    /// Ordinary function bodies the evaluator may interpret for `try_run`.
+    /// Probe mode: answers from an earlier round and the requests this parse
+    /// collects. Absent in a normal parse, which evaluates instead.
+    pub(crate) probe: Option<std::rc::Rc<std::cell::RefCell<probe::ProbeContext>>>,
+    /// `try_run` calls this parse rewrote, in source order.
+    pub(crate) try_sites: Vec<TrySite>,
+    /// Span of a `#[const_fn_token_builtin]` waiting for its declaration.
+    pub(crate) pending_token_builtin: Option<Span>,
+    /// Functions declared with `#[const_fn_token_builtin]`, by name, with the
+    /// span of the declaration that named them.
+    pub(crate) token_builtins: HashMap<String, Span>,
 }
 
 /// Records the type names a specifier list mentions, so a later generator can
@@ -366,7 +384,7 @@ fn impl_declaration(block: &ast::ImplBlock) -> Option<ImplDecl> {
             parameter
                 .bounds
                 .iter()
-                .map(|bound| bound.name.text.clone())
+                .map(|bound| trait_key(&bound.name, &bound.args))
                 .collect()
         })
         .collect();
@@ -378,30 +396,6 @@ fn impl_declaration(block: &ast::ImplBlock) -> Option<ImplDecl> {
     })
 }
 
-/// Normalizes a trait name written as a query string.
-///
-/// Spaces are removed and numeric arguments are canonicalized, so
-/// `implements("Table", "At<0x10>")` asks about the same instantiation as
-/// `At<16>`.
-fn normalize_trait_query(text: &str) -> String {
-    let text = text.replace(' ', "");
-    let Some(open) = text.find('<') else {
-        return text;
-    };
-    let Some(close) = text.rfind('>') else {
-        return text;
-    };
-    let base = &text[..open];
-    let inner = &text[open + 1..close];
-    let args = inner
-        .split(',')
-        .map(|argument| {
-            integer_value(argument).map_or_else(|| argument.to_string(), |value| value.to_string())
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("{base}<{args}>")
-}
 /// Canonical text of a trait name with its arguments, spaces removed.
 ///
 /// `impl Show<int> for X` and `implements("X", "Show<int>")` must agree, so both
@@ -501,7 +495,7 @@ fn type_name_text(name: &ast::TypeName) -> String {
             _ => String::new(),
         });
     }
-    let mut text = parts.join(" ").replace(' ', "");
+    let mut text = crate::probe::canonical_type_name(&parts.join(" "));
     if let Some(declarator) = &name.declarator {
         for derived in &declarator.derived {
             if matches!(derived, ast::DerivedDeclarator::Pointer(_)) {
@@ -615,174 +609,15 @@ impl BuiltinName {
     }
 }
 
-/// Canonical spelling of a type name written as a string.
-///
-/// A query such as `implements("int unsigned", "Show")` is normalized with the
-/// same rules the declarations use.
-fn normalize_type_name(text: &str) -> String {
-    let text = text.trim();
-    if text.contains('<') {
-        return text.to_string();
-    }
-    let mut builtin = BuiltinName::default();
+/// Canonicalizes a sequence of builtin type keywords using declaration rules.
+pub(crate) fn canonical_builtin_name(text: &str) -> Option<String> {
+    let mut name = BuiltinName::default();
     for word in text.split_whitespace() {
-        match word {
-            "void" => builtin.add(ast::BuiltinType::Void),
-            "bool" | "_Bool" => builtin.add(ast::BuiltinType::Bool),
-            "char" => builtin.add(ast::BuiltinType::Char),
-            "short" => builtin.add(ast::BuiltinType::Short),
-            "int" => builtin.add(ast::BuiltinType::Int),
-            "long" => builtin.add(ast::BuiltinType::Long),
-            "float" => builtin.add(ast::BuiltinType::Float),
-            "double" => builtin.add(ast::BuiltinType::Double),
-            "signed" => builtin.add(ast::BuiltinType::Signed),
-            "unsigned" => builtin.add(ast::BuiltinType::Unsigned),
-            _ => return text.to_string(),
-        }
+        name.add(builtin_type(word)?);
     }
-    builtin.spelling().unwrap_or_else(|| text.to_string())
-}
-/// Splits `Vec<int, char>` into its base name and top-level arguments.
-fn split_type_name(text: &str) -> (String, Vec<String>) {
-    let text = text.trim();
-    let Some(open) = text.find('<') else {
-        return (text.to_string(), Vec::new());
-    };
-    let base = text[..open].trim().to_string();
-    let inner = text[open + 1..].trim_end_matches('>');
-    let mut args = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    for (index, character) in inner.char_indices() {
-        match character {
-            '<' | '(' | '[' => depth += 1,
-            '>' | ')' | ']' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                args.push(inner[start..index].trim().to_string());
-                start = index + 1;
-            }
-            _ => {}
-        }
-    }
-    let last = inner[start..].trim();
-    if !last.is_empty() {
-        args.push(last.to_string());
-    }
-    (base, args)
+    name.spelling()
 }
 
-/// One generator's output, kept so a fragment whose bodies query the world can
-/// be parsed again once the world settles.
-struct Fragment {
-    tokens: Vec<Token>,
-    span: Span,
-    /// Where its items start in the generated list, and how many there are.
-    start: usize,
-    count: usize,
-    /// Set when a body inside the fragment evaluated a const fn.
-    needs_world: bool,
-}
-/// One deferred item generator.
-#[derive(Clone)]
-struct Generator {
-    index: usize,
-    tokens: Vec<Token>,
-    span: Span,
-    /// Where the generator stands in the schedule.
-    state: GeneratorState,
-    /// The impl this generator was granted permission to provide.
-    grant: Option<(String, String)>,
-    /// What it was waiting for when it stopped.
-    suspend: Option<comptime::Suspend>,
-    /// The impl this generator once offered, kept after it is granted so a
-    /// cycle can still be traced through it.
-    offers: Option<(String, String)>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GeneratorState {
-    /// Ready to run.
-    Ready,
-    /// Queue 1: waiting for an impl.
-    Waiting,
-    /// Queue 2: ready to provide an impl.
-    Offering,
-    /// Finished.
-    Done,
-}
-
-/// How one generator run ended.
-enum Outcome {
-    /// It produced these tokens.
-    Produced(Vec<Token>),
-    /// It stopped and must be rescheduled.
-    Suspended(comptime::Suspend),
-}
-
-/// Round limit, so a generator cycle becomes a diagnostic instead of a hang.
-const MAX_GENERATOR_ROUNDS: usize = 256;
-
-fn empty_span() -> Span {
-    Span {
-        file: FileId(0),
-        start: 0,
-        end: 0,
-    }
-}
-
-fn item_span(item: &ast::Item) -> Span {
-    match item {
-        ast::Item::Function(function) => function.span,
-        ast::Item::Decl(declaration) => declaration.span,
-        ast::Item::Trait(declaration) => declaration.span,
-        ast::Item::Impl(block) => block.span,
-        ast::Item::Use(import) => import.span,
-    }
-}
-
-/// The declarator of the function whose body starts at `start`.
-fn find_body_declarator(items: &[ast::Item], start: usize) -> Option<ast::Declarator> {
-    for item in items {
-        match item {
-            ast::Item::Function(function) if function.body.span.start == start => {
-                return Some(function.declarator.clone());
-            }
-            ast::Item::Impl(block) => {
-                for method in &block.methods {
-                    if method.body.span.start == start {
-                        return Some(method.declarator.clone());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Replaces the body that starts at `start` with `block`.
-fn patch_body(items: &mut [ast::Item], start: usize, block: ast::Block) -> bool {
-    for item in items.iter_mut() {
-        match item {
-            ast::Item::Function(function) if function.body.span.start == start => {
-                function.span = function.span.join(block.span);
-                function.body = block;
-                return true;
-            }
-            ast::Item::Impl(impl_block) => {
-                for method in &mut impl_block.methods {
-                    if method.body.span.start == start {
-                        method.span = method.span.join(block.span);
-                        method.body = block;
-                        return true;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
 /// The declarations a generator can see.
 ///
 /// It is a snapshot, not a live view: every call of one stage reads the same
@@ -808,49 +643,6 @@ pub(crate) struct GenericImpl {
 }
 
 impl World {
-    /// Whether `trait_name` is implemented for `owner` here.
-    ///
-    /// An exact implementation answers directly; otherwise a generic one covers
-    /// the instantiation, so `Vec<int>` is answered by `impl<T> Trait for
-    /// Vec<T>`.
-    pub(crate) fn implements(&self, owner: &str, trait_name: &str) -> bool {
-        self.implements_within(
-            &normalize_type_name(owner),
-            &normalize_trait_query(trait_name),
-            0,
-        )
-    }
-
-    fn implements_within(&self, owner: &str, trait_name: &str, depth: usize) -> bool {
-        if depth > 8 {
-            return false;
-        }
-        if self
-            .impls
-            .contains(&(trait_name.to_string(), owner.to_string()))
-        {
-            return true;
-        }
-        let (base, args) = split_type_name(owner);
-        for generic in &self.generic_impls {
-            if generic.trait_name != trait_name
-                || generic.base != base
-                || generic.bounds.len() != args.len()
-            {
-                continue;
-            }
-            let satisfied = generic.bounds.iter().zip(&args).all(|(bounds, argument)| {
-                bounds
-                    .iter()
-                    .all(|bound| self.implements_within(argument, bound, depth + 1))
-            });
-            if satisfied {
-                return true;
-            }
-        }
-        false
-    }
-
     fn collect(&mut self, items: &[ast::Item]) {
         for item in items {
             match item {
@@ -932,591 +724,90 @@ impl Parser {
             prescan,
             const_fns: Vec::new(),
             body_world: None,
-            final_world: None,
             saw_body_call: std::cell::Cell::new(false),
-            needs_full_pass: false,
             comptime_sites: Vec::new(),
             body_stack: Vec::new(),
+            defer_body_calls: false,
+            bodies_deferred: false,
             function_bodies: Vec::new(),
-            body_calls: std::cell::RefCell::new(Vec::new()),
+            function_body_names: Vec::new(),
+            deferred_body_functions: Vec::new(),
             pending_declarator: None,
+            in_const_body: false,
+            macro_index: 0,
+            probe: None,
+            try_sites: Vec::new(),
+            pending_token_builtin: None,
+            token_builtins: HashMap::new(),
         }
     }
 
-    fn translation_unit(&mut self) -> Result<ast::TranslationUnit, Diagnostic> {
-        let mut items = Vec::new();
-        let mut generators: Vec<Generator> = Vec::new();
-        self.parse_unit_items(&mut items, &mut generators)?;
-        let (generated, world) = self.run_generators(&items, generators)?;
-        items.extend(generated);
-        self.final_world = Some(world);
-        Ok(ast::TranslationUnit { items })
+    pub(crate) fn push_scope(&mut self) {
+        self.scopes.push(Scope::default());
     }
 
-    /// Parses items until the end of the stream, collecting the generators.
+    pub(crate) fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    pub(crate) fn declare_typedef(&mut self, name: &str) {
+        let innermost = self.scopes.len() - 1;
+        self.scopes[innermost].typedefs.insert(name.to_string());
+    }
+
+    pub(crate) fn declare_value(&mut self, name: &str) {
+        let innermost = self.scopes.len() - 1;
+        self.scopes[innermost].values.insert(name.to_string());
+    }
+
+    pub(crate) fn declare_tag(&mut self, name: &str) {
+        let innermost = self.scopes.len() - 1;
+        self.scopes[innermost].tags.insert(name.to_string());
+    }
+
+    pub(crate) fn declare_trait(&mut self, name: &str) {
+        let innermost = self.scopes.len() - 1;
+        self.scopes[innermost].traits.insert(name.to_string());
+    }
+
+    /// Whether `name` currently spells a type (typedef name, trait, or Shy
+    /// tag).
     ///
-    /// The same routine runs for the main file and for a fragment a generator
-    /// produced, so generated source may contain generator calls of its own;
-    /// they join the queue instead of being parsed as ordinary declarations.
-    fn parse_unit_items(
-        &mut self,
-        items: &mut Vec<ast::Item>,
-        generators: &mut Vec<Generator>,
-    ) -> Result<(), Diagnostic> {
-        while !self.at_eof() {
-            if let Some(index) = self.const_fn_generator_ahead() {
-                let start = self.here();
-                self.record_const_call(index, start);
-                self.bump();
-                let (tokens, close) = self.capture_tokens()?;
-                generators.push(Generator {
-                    index,
-                    tokens,
-                    span: start.join(close),
-                    state: GeneratorState::Ready,
-                    grant: None,
-                    suspend: None,
-                    offers: None,
-                });
-                continue;
-            }
-            // `pub` says nothing about a compile-time function: it is visible
-            // wherever the header is included, so the marker is accepted and
-            // ignored rather than rejected.
-            if self.at_ident("pub")
-                && self.at_ident_ahead(1, "const")
-                && self.at_ident_ahead(2, "fn")
-            {
-                self.bump();
-            }
-            // A `const fn` produces no item of its own; its body only runs at
-            // compile time, so nothing is emitted for it.
-            if self.at_ident("const") && self.at_ident_ahead(1, "fn") {
-                self.const_fn_declaration()?;
-                continue;
-            }
-            items.push(self.item()?);
-        }
-        Ok(())
-    }
-
-    /// Runs the item generators to a fixpoint.
-    ///
-    /// A generator that needs an impl waits in queue 1; one that can provide an
-    /// impl waits in queue 2. When nothing else can run, providers are granted
-    /// one at a time, which wakes whoever was waiting for that impl. If queue 1
-    /// still has sleepers at the end, no one provides what they need.
-    fn run_generators(
-        &mut self,
-        items: &[ast::Item],
-        mut generators: Vec<Generator>,
-    ) -> Result<(Vec<ast::Item>, World), Diagnostic> {
-        let mut world = World::default();
-        world.names.extend(self.scopes[0].typedefs.iter().cloned());
-        world.names.extend(self.scopes[0].tags.iter().cloned());
-        world.names.extend(self.scopes[0].traits.iter().cloned());
-        world.collect(items);
-
-        let mut generated = Vec::new();
-        let mut fragments: Vec<Fragment> = Vec::new();
-        // Impls that were granted to a provider, so a provider that never
-        // actually emits one gets a precise diagnostic.
-        let mut granted_impls: Vec<((String, String), Span)> = Vec::new();
-        let mut rounds = 0usize;
-        loop {
-            rounds += 1;
-            if rounds > MAX_GENERATOR_ROUNDS {
-                return Err(Diagnostic::new(
-                    generators
-                        .first()
-                        .map_or(items.first().map_or_else(empty_span, item_span), |g| g.span),
-                    "item generation did not settle: too many rounds",
-                ));
-            }
-            let mut progress = false;
-            // Run everything that is ready.
-            for position in 0..generators.len() {
-                if !matches!(generators[position].state, GeneratorState::Ready) {
-                    continue;
-                }
-                let grant = generators[position].grant.clone();
-                let generator = generators[position].clone();
-                match self.run_generator(&generator, &world, grant)? {
-                    Outcome::Produced(tokens) => {
-                        generators[position].state = GeneratorState::Done;
-                        progress = true;
-                        if tokens.is_empty() {
-                            continue;
-                        }
-                        let span = generators[position].span;
-                        let name = self.const_fns[generator.index].name.clone();
-                        let (stage_items, more_generators, saw_call) = match self
-                            .parse_item_fragment(tokens.clone(), span, None)
-                        {
-                            Ok(result) => result,
-                            Err(error) => {
-                                // A macro that produces statements belongs in
-                                // a function body, not at file scope.
-                                if self.parse_statement_fragment(tokens.clone(), span).is_ok() {
-                                    return Err(Diagnostic::new(
-                                        span,
-                                        format!(
-                                            "const fn '{name}' produced statements, which cannot stand at file scope; call it inside a function"
-                                        ),
-                                    ));
-                                }
-                                return Err(self.fragment_error(error, generator.index));
-                            }
-                        };
-                        // A generated impl may not collide with one that already
-                        // exists, no matter which generator produced it.
-                        for item in &stage_items {
-                            let ast::Item::Impl(block) = item else {
-                                continue;
-                            };
-                            let Some(declared) = impl_declaration(block) else {
-                                continue;
-                            };
-                            let already = if declared.is_generic() {
-                                world.generic_impls.iter().any(|existing| {
-                                    existing.trait_name == declared.trait_name
-                                        && existing.base == declared.owner
-                                        && existing.bounds.len() == declared.bounds.len()
-                                })
-                            } else {
-                                world.impls.contains(&(
-                                    declared.trait_name.clone(),
-                                    declared.owner.clone(),
-                                ))
-                            };
-                            if already {
-                                return Err(Diagnostic::new(
-                                    block.span,
-                                    format!(
-                                        "duplicate implementation of '{}' for '{}'",
-                                        declared.trait_name, declared.owner
-                                    ),
-                                ));
-                            }
-                        }
-                        world.collect(&stage_items);
-                        let start = generated.len();
-                        generated.extend(stage_items);
-                        fragments.push(Fragment {
-                            tokens,
-                            span,
-                            start,
-                            count: generated.len() - start,
-                            needs_world: saw_call,
-                        });
-                        // Generated source may generate more: those calls join
-                        // the same queue and are scheduled by their needs.
-                        generators.extend(more_generators);
-                    }
-                    Outcome::Suspended(suspend) => {
-                        generators[position].suspend = Some(suspend.clone());
-                        generators[position].state = match suspend {
-                            comptime::Suspend::Needs { .. } => GeneratorState::Waiting,
-                            comptime::Suspend::Offers { owner, trait_name } => {
-                                generators[position].offers = Some((owner, trait_name));
-                                GeneratorState::Offering
-                            }
-                        };
-                        progress = true;
-                    }
-                }
-            }
-            // Wake the waiters whose impl has just appeared (queue 1).
-            for position in 0..generators.len() {
-                if !matches!(generators[position].state, GeneratorState::Waiting) {
-                    continue;
-                }
-                let Some(comptime::Suspend::Needs { owner, trait_name }) =
-                    generators[position].suspend.clone()
-                else {
-                    continue;
-                };
-                if world.impls.contains(&(trait_name, owner)) {
-                    generators[position].state = GeneratorState::Ready;
-                    progress = true;
-                }
-            }
-            // Wake one provider of an impl nobody has provided (queue 2).
-            let mut granted = false;
-            for position in 0..generators.len() {
-                if !matches!(generators[position].state, GeneratorState::Offering) {
-                    continue;
-                }
-                let Some(comptime::Suspend::Offers { owner, trait_name }) =
-                    generators[position].suspend.clone()
-                else {
-                    continue;
-                };
-                if world.impls.contains(&(trait_name.clone(), owner.clone())) {
-                    // Somebody else provided it; this offer simply ends.
-                    generators[position].state = GeneratorState::Done;
-                    progress = true;
-                    continue;
-                }
-                // An impl already granted to a generator that is still waiting
-                // stays reserved, so two providers never both get permission.
-                let reserved = generators.iter().enumerate().any(|(other, generator)| {
-                    other != position
-                        && !matches!(generator.state, GeneratorState::Done)
-                        && generator.grant.as_ref() == Some(&(owner.clone(), trait_name.clone()))
-                });
-                if reserved {
-                    continue;
-                }
-                granted_impls.push((
-                    (owner.clone(), trait_name.clone()),
-                    generators[position].span,
-                ));
-                generators[position].grant = Some((owner, trait_name));
-                generators[position].state = GeneratorState::Ready;
-                granted = true;
-                progress = true;
-                break;
-            }
-            if !progress {
-                let _ = granted;
-                break;
-            }
-        }
-
-        // A fragment whose bodies asked about the world is parsed again now that
-        // the world is settled, so only generated source is re-read.
-        if fragments.iter().any(|fragment| fragment.needs_world) {
-            let mut rebuilt = Vec::new();
-            let mut cursor = 0usize;
-            for fragment in &fragments {
-                if !fragment.needs_world {
-                    continue;
-                }
-                rebuilt.extend(generated[cursor..fragment.start].iter().cloned());
-                let (items, _, _) =
-                    self.parse_item_fragment(fragment.tokens.clone(), fragment.span, Some(&world))?;
-                // The fragment must keep its shape; otherwise the unit is
-                // parsed again as a whole.
-                if items.len() != fragment.count {
-                    self.needs_full_pass = true;
-                    return Ok((generated, world));
-                }
-                rebuilt.extend(items);
-                cursor = fragment.start + fragment.count;
-            }
-            rebuilt.extend(generated[cursor..].iter().cloned());
-            generated = rebuilt;
-        }
-
-        // A cycle of "provide X, need Y" is reported as the chain it is.
-        if let Some(cycle) = self.dependency_cycle(&generators) {
-            return Err(Diagnostic::new(cycle.0, cycle.1));
-        }
-
-        // A granted provider must actually provide the impl it claimed, so a
-        // typo cannot silently starve its waiters. A provider that emitted it
-        // through a nested generator still counts: the world is what matters.
-        for ((owner, trait_name), span) in &granted_impls {
-            if world.implements(owner, trait_name) {
-                continue;
-            }
-            let stuck = generators.iter().any(|generator| {
-                matches!(generator.state, GeneratorState::Waiting)
-                    && generator.grant.as_ref() == Some(&(owner.clone(), trait_name.clone()))
-            });
-            if stuck {
-                // The queue-1 report below explains a stuck provider better.
-                continue;
-            }
-            return Err(Diagnostic::new(
-                *span,
-                format!(
-                    "generator granted to provide '{trait_name}' for '{owner}' produced no such implementation"
-                ),
-            ));
-        }
-
-        // Queue 1 still has sleepers: nothing provides what they need.
-        for generator in &generators {
-            if let GeneratorState::Waiting = generator.state
-                && let Some(comptime::Suspend::Needs { owner, trait_name }) = &generator.suspend
-            {
-                let name = self
-                    .const_fns
-                    .get(generator.index)
-                    .map_or("a generator", |function| function.name.as_str());
-                // A granted provider that is still asleep names the real
-                // blocker, which is more useful than "emitted nothing".
-                let blocked_by = self.blocking_chain(&generators, owner, trait_name);
-                let base = match blocked_by {
-                    Some(blocked) => {
-                        format!("type '{owner}' needs trait '{trait_name}', but {blocked}")
-                    }
-                    None => format!(
-                        "type '{owner}' needs trait '{trait_name}', but nothing provides it"
-                    ),
-                };
-                let message = format!("{base} (in const fn '{name}')");
-                return Err(Diagnostic::new(generator.span, message));
-            }
-        }
-        Ok((generated, world))
-    }
-
-    /// Follows a granted impl from holder to holder, so a stuck waiter reports
-    /// the whole chain instead of one link.
-    fn blocking_chain(
-        &self,
-        generators: &[Generator],
-        owner: &str,
-        trait_name: &str,
-    ) -> Option<String> {
-        let mut segments = Vec::new();
-        let mut current = (owner.to_string(), trait_name.to_string());
-        let mut seen: Vec<(String, String)> = Vec::new();
-        loop {
-            if seen.len() >= 8 || seen.contains(&current) {
-                break;
-            }
-            seen.push(current.clone());
-            let holder = generators.iter().find(|generator| {
-                !matches!(generator.state, GeneratorState::Done)
-                    && generator.grant.as_ref() == Some(&current)
-            });
-            let Some(holder) = holder else {
-                if segments.is_empty() {
-                    return None;
-                }
-                segments.push("nothing provides it".to_string());
-                break;
-            };
-            let name = self
-                .const_fns
-                .get(holder.index)
-                .map_or("a generator", |function| function.name.as_str());
-            match &holder.suspend {
-                Some(comptime::Suspend::Needs { owner, trait_name }) => {
-                    segments.push(format!(
-                        "its provider '{name}' is still waiting for '{owner}' to implement '{trait_name}'"
-                    ));
-                    current = (owner.clone(), trait_name.clone());
-                }
-                _ => {
-                    segments.push(format!("its provider '{name}' has not run yet"));
-                    break;
-                }
-            }
-        }
-        Some(segments.join(", "))
-    }
-
-    /// Finds a cycle among the generators that are still waiting.
-    ///
-    /// A generator offers an impl but needs another; following "who offers what
-    /// I need" from each waiting generator either ends at an impl nobody offers
-    /// or comes back to where it started, which is the cycle worth reporting.
-    fn dependency_cycle(&self, generators: &[Generator]) -> Option<(Span, String)> {
-        use std::collections::HashMap;
-        let mut offered: HashMap<(String, String), usize> = HashMap::new();
-        for (position, generator) in generators.iter().enumerate() {
-            if matches!(generator.state, GeneratorState::Done) {
-                continue;
-            }
-            if let Some((owner, trait_name)) = &generator.offers {
-                offered
-                    .entry((owner.clone(), trait_name.clone()))
-                    .or_insert(position);
-            }
-        }
-        for generator in generators {
-            let GeneratorState::Waiting = generator.state else {
-                continue;
-            };
-            let Some(comptime::Suspend::Needs { owner, trait_name }) = &generator.suspend else {
-                continue;
-            };
-            let mut chain = vec![format!("'{owner}' needs '{trait_name}'")];
-            let mut seen: Vec<(String, String)> = Vec::new();
-            let mut current = (owner.clone(), trait_name.clone());
-            while seen.len() < 16 {
-                if seen.contains(&current) {
-                    // The last entry repeats the start; show it once, as the
-                    // closing arrow of the cycle.
-                    chain.pop();
-                    let closing = format!("'{}' needs '{}'", current.0, current.1);
-                    return Some((
-                        generator.span,
-                        format!(
-                            "dependency cycle between generators: {} -> {closing} (cycle)",
-                            chain.join(" -> ")
-                        ),
-                    ));
-                }
-                seen.push(current.clone());
-                let Some(&provider) = offered.get(&current) else {
-                    break;
-                };
-                let Some(comptime::Suspend::Needs { owner, trait_name }) =
-                    &generators[provider].suspend
-                else {
-                    break;
-                };
-                chain.push(format!("'{}' needs '{trait_name}'", owner));
-                current = (owner.clone(), trait_name.clone());
-            }
-        }
-        None
-    }
-    /// Runs one generator, returning its tokens or the reason it stopped.
-    fn run_generator(
-        &self,
-        generator: &Generator,
-        world: &World,
-        grant: Option<(String, String)>,
-    ) -> Result<Outcome, Diagnostic> {
-        let mut evaluator = comptime::Evaluator::with_world(&self.const_fns, world);
-        evaluator.scheduling();
-        if let Some((owner, trait_name)) = grant {
-            evaluator.grant(owner, trait_name);
-        }
-        let value = evaluator.call(
-            generator.index,
-            &[comptime::Value::Tokens(generator.tokens.clone())],
-            generator.span,
-        );
-        if let Some(suspend) = evaluator.take_suspend() {
-            return Ok(Outcome::Suspended(suspend));
-        }
-        let value = value?;
-        let comptime::Value::Tokens(tokens) = value else {
-            return Err(Diagnostic::new(
-                generator.span,
-                "an item const fn must produce tokens",
-            ));
-        };
-        Ok(Outcome::Produced(tokens))
-    }
-
-    /// Re-parses only the function bodies that evaluated a const fn.
-    ///
-    /// Returns false when the attempt was not safe (a call inside a nested
-    /// block, or a body that cannot be located), and the caller then falls back
-    /// to parsing the whole unit again.
-    fn reparse_bodies(
-        &self,
-        tokens: &[Token],
-        world: &World,
-        unit: &mut ast::TranslationUnit,
-    ) -> bool {
-        let bodies = self.body_calls.borrow().clone();
-        if bodies.is_empty() {
-            return false;
-        }
-        for open in bodies {
-            let Some(declarator) = find_body_declarator(&unit.items, open.start) else {
-                return false;
-            };
-            let Some(block) = self.reparse_body(tokens, open, world, &declarator) else {
-                return false;
-            };
-            if !patch_body(&mut unit.items, open.start, block) {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Parses one recorded body again with the settled world in scope.
-    fn reparse_body(
-        &self,
-        tokens: &[Token],
-        open: Span,
-        world: &World,
-        declarator: &ast::Declarator,
-    ) -> Option<ast::Block> {
-        let start = tokens
+    /// Typedefs and ordinary identifiers share one namespace in C, so the
+    /// innermost ordinary declaration of a name shadows an outer typedef: that
+    /// is what makes a parameter or block local named `T` turn `T *p;` back
+    /// into an expression. Tags have their own namespace, so a variable with
+    /// the same spelling does not hide `struct T` used as Shy's `T` type name.
+    /// A trait is a compile-time name, but it is parsed like a typedef so its
+    /// misuse reaches semantic analysis with a precise message.
+    pub(crate) fn is_type_name(&self, name: &str) -> bool {
+        // A const fn that returns tokens can stand where a type is written, so
+        // a cast or a sizeof must parse it as a type and expand it.
+        if self
+            .const_fns
             .iter()
-            .position(|token| token.span.file == open.file && token.span.start == open.start)?;
-        let mut depth = 0usize;
-        let mut end = None;
-        for (offset, token) in tokens[start..].iter().enumerate() {
-            match &token.kind {
-                TokenKind::Punct(punct) if punct == "{" => depth += 1,
-                TokenKind::Punct(punct) if punct == "}" => {
-                    depth = depth.checked_sub(1)?;
-                    if depth == 0 {
-                        end = Some(start + offset);
-                        break;
-                    }
-                }
-                _ => {}
+            .any(|function| function.returns_tokens && function.name == name)
+        {
+            return true;
+        }
+        for scope in self.scopes.iter().rev() {
+            if scope.typedefs.contains(name) || scope.traits.contains(name) {
+                return true;
+            }
+            if scope.values.contains(name) {
+                break;
             }
         }
-        let end = end?;
-        let mut stream: Vec<Token> = tokens[start..=end].to_vec();
-        stream.push(Token {
-            kind: TokenKind::Eof,
-            span: open,
-            at_line_start: false,
-            leading_space: false,
-        });
-        let mut parser = Parser::new(stream, false);
-        parser.scopes = self.scopes.clone();
-        parser.const_fns = self.const_fns.clone();
-        parser.body_world = Some(world.clone());
-        parser.block_with_params(Some(declarator)).ok()
+        self.scopes.iter().any(|scope| scope.tags.contains(name))
     }
 
-    /// Parses a token sequence as file-scope items and generators.
-    ///
-    /// Generated source is parsed by the same routine as the main file, so it
-    /// may contain generator calls; those join the schedule instead of being
-    /// mistaken for declarations.
-    fn parse_item_fragment(
-        &mut self,
-        mut tokens: Vec<Token>,
-        span: Span,
-        world: Option<&World>,
-    ) -> Result<(Vec<ast::Item>, Vec<Generator>, bool), Diagnostic> {
-        let needs_semicolon = !matches!(
-            tokens.last().map(|token| &token.kind),
-            Some(TokenKind::Punct(punct)) if punct == ";" || punct == "}"
-        );
-        if needs_semicolon {
-            tokens.push(Token {
-                kind: TokenKind::Punct(";".to_string()),
-                span,
-                at_line_start: false,
-                leading_space: false,
-            });
-        }
-        tokens.push(Token {
-            kind: TokenKind::Eof,
-            span,
-            at_line_start: false,
-            leading_space: false,
-        });
-        let mut parser = Parser::new(tokens, false);
-        parser.scopes = self.scopes.clone();
-        parser.const_fns = self.const_fns.clone();
-        // Generated bodies query the settled world when it is known; a fragment
-        // that needs it is parsed again once the world settles.
-        parser.body_world = world.cloned().or_else(|| self.body_world.clone());
-        let mut items = Vec::new();
-        let mut generators = Vec::new();
-        parser.parse_unit_items(&mut items, &mut generators)?;
-        // A fragment may declare const fns of its own. They are appended, so the        // A fragment may declare const fns of its own. They are appended, so the
-        // generator indices collected above stay valid in the parent table.
-        let declared_from = self.const_fns.len();
-        if parser.const_fns.len() > declared_from {
-            self.const_fns
-                .extend(parser.const_fns.into_iter().skip(declared_from));
-        }
-        // A body call inside the fragment also needs the settled world, so the
-        // parent must know one happened.
-        let saw_call = parser.saw_body_call.get();
-        Ok((items, generators, saw_call))
+    /// Whether `name` currently spells a value, which is what makes a bare name
+    /// a const generic argument rather than a new type parameter.
+    pub(crate) fn is_value_name(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.values.contains(name))
     }
 
     /// Records one compile-time site for the index.
@@ -1537,14 +828,6 @@ impl Parser {
         });
     }
 
-    /// Records a const fn declaration with the text of its signature.
-    pub(crate) fn record_const_fn_declaration(&mut self, name: &str, span: Span, signature: Span) {
-        self.record_comptime_site(ComptimeSiteKind::Declaration, name, span, None);
-        if let Some(site) = self.comptime_sites.last_mut() {
-            site.signature = Some(signature);
-        }
-    }
-
     /// Records a macro invocation and the wrapper its expansion calls.
     pub(crate) fn record_macro_site(&mut self, name: &str, span: Span, expansion: &str) {
         self.comptime_sites.push(ComptimeSite {
@@ -1557,23 +840,12 @@ impl Parser {
         });
     }
 
-    /// Records a call to the const fn at index, whose name starts at span.
-    pub(crate) fn record_const_call(&mut self, index: usize, span: Span) {
-        let function = &self.const_fns[index];
-        let (name, declaration) = (function.name.clone(), function.span);
-        self.record_comptime_site(ComptimeSiteKind::Call, &name, span, Some(declaration));
-    }
-
-    /// Adds the producing const fn to a diagnostic from generated tokens.
-    pub(crate) fn fragment_error(&self, error: Diagnostic, index: usize) -> Diagnostic {
-        let name = self
-            .const_fns
-            .get(index)
-            .map_or("a const fn", |function| function.name.as_str());
-        Diagnostic::new(
-            error.span,
-            format!("{} (from const fn '{name}')", error.message),
-        )
+    /// Records a const fn declaration with the text of its signature.
+    pub(crate) fn record_const_fn_declaration(&mut self, name: &str, span: Span, signature: Span) {
+        self.record_comptime_site(ComptimeSiteKind::Declaration, name, span, None);
+        if let Some(site) = self.comptime_sites.last_mut() {
+            site.signature = Some(signature);
+        }
     }
 
     /// The index of the const fn called at the cursor, when the next tokens are
@@ -1622,71 +894,126 @@ impl Parser {
         terminates.then_some(index)
     }
 
-    /// Whether `name` currently spells a type (typedef name, trait, or Shy
-    /// tag).
-    ///
-    /// Typedefs and ordinary identifiers share one namespace in C, so the
-    /// innermost ordinary declaration of a name shadows an outer typedef: that
-    /// is what makes a parameter or block local named `T` turn `T *p;` back
-    /// into an expression. Tags have their own namespace, so a variable with
-    /// the same spelling does not hide `struct T` used as Shy's `T` type name.
-    /// A trait is a compile-time name, but it is parsed like a typedef so its
-    /// misuse reaches semantic analysis with a precise message.
-    pub(crate) fn is_type_name(&self, name: &str) -> bool {
-        // A const fn that returns tokens can stand where a type is written, so
-        // a cast or a sizeof must parse it as a type and expand it.
-        if self
+    /// Records a call to the const fn at index, whose name starts at span.
+    pub(crate) fn record_const_call(&mut self, index: usize, span: Span) {
+        let function = &self.const_fns[index];
+        let (name, declaration) = (function.name.clone(), function.span);
+        self.record_comptime_site(ComptimeSiteKind::Call, &name, span, Some(declaration));
+    }
+
+    /// Adds the producing const fn to a diagnostic from generated tokens.
+    pub(crate) fn fragment_error(&self, error: Diagnostic, index: usize) -> Diagnostic {
+        let name = self
             .const_fns
-            .iter()
-            .any(|function| function.returns_tokens && function.name == name)
-        {
-            return true;
+            .get(index)
+            .map_or("a const fn", |function| function.name.as_str());
+        Diagnostic::new(
+            error.span,
+            format!("{} (from const fn '{name}')", error.message),
+        )
+    }
+
+    /// The arguments of a const fn call, read the way its parameter list says.
+    ///
+    /// A single Tokens parameter receives everything inside the parentheses as
+    /// written; every other signature parses ordinary expressions.
+    pub(crate) fn const_arguments(
+        &mut self,
+        index: usize,
+    ) -> Result<(Arguments, Span), Diagnostic> {
+        let takes_tokens = {
+            let params = &self.const_fns[index].params;
+            params.len() == 1 && params[0].1 == ParamKind::Tokens
+        };
+        if takes_tokens {
+            let (tokens, close) = self.capture_token_argument()?;
+            return Ok((Arguments::Tokens(tokens), close));
         }
-        for scope in self.scopes.iter().rev() {
-            if scope.typedefs.contains(name) || scope.traits.contains(name) {
-                return true;
-            }
-            if scope.values.contains(name) {
-                break;
-            }
+        let (expressions, close) = self.call_arguments()?;
+        Ok((Arguments::Expressions(expressions), close))
+    }
+
+    /// Parses a token sequence as file-scope items.
+    ///
+    /// Generated source is parsed by the same routine as the main file, so it
+    /// may contain const fn calls of its own; those are answered from the
+    /// cache or recorded as requests.
+    fn parse_item_fragment(
+        &mut self,
+        mut tokens: Vec<Token>,
+        span: Span,
+        world: Option<&World>,
+    ) -> Result<(Vec<ast::Item>, bool), Diagnostic> {
+        let needs_semicolon = !matches!(
+            tokens.last().map(|token| &token.kind),
+            Some(TokenKind::Punct(punct)) if punct == ";"
+        );
+        if needs_semicolon {
+            tokens.push(Token {
+                kind: TokenKind::Punct(";".to_string()),
+                span,
+                at_line_start: false,
+                leading_space: false,
+            });
         }
-        self.scopes.iter().any(|scope| scope.tags.contains(name))
+        tokens.push(Token {
+            kind: TokenKind::Eof,
+            span,
+            at_line_start: false,
+            leading_space: false,
+        });
+        let mut parser = Parser::new(tokens, false);
+        parser.scopes = self.scopes.clone();
+        parser.const_fns = self.const_fns.clone();
+        parser.probe = self.probe.clone();
+        parser.body_world = world.cloned().or_else(|| self.body_world.clone());
+        parser.defer_body_calls = self.defer_body_calls;
+        let mut items = Vec::new();
+        parser.parse_unit_items(&mut items)?;
+        self.bodies_deferred |= parser.bodies_deferred;
+        self.deferred_body_functions
+            .extend(parser.deferred_body_functions.iter().cloned());
+        let declared_from = self.const_fns.len();
+        if parser.const_fns.len() > declared_from {
+            self.const_fns
+                .extend(parser.const_fns.into_iter().skip(declared_from));
+        }
+        let saw_call = parser.saw_body_call.get();
+        Ok((items, saw_call))
     }
 
-    pub(crate) fn declare_typedef(&mut self, name: &str) {
-        let innermost = self.scopes.len() - 1;
-        self.scopes[innermost].typedefs.insert(name.to_string());
-    }
-
-    /// Whether `name` currently spells a value, which is what makes a bare name
-    /// a const generic argument rather than a new type parameter.
-    pub(crate) fn is_value_name(&self, name: &str) -> bool {
-        self.scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.values.contains(name))
-    }
-
-    pub(crate) fn declare_value(&mut self, name: &str) {
-        let innermost = self.scopes.len() - 1;
-        self.scopes[innermost].values.insert(name.to_string());
-    }
-
-    pub(crate) fn declare_tag(&mut self, name: &str) {
-        let innermost = self.scopes.len() - 1;
-        self.scopes[innermost].tags.insert(name.to_string());
-    }
-
-    pub(crate) fn declare_trait(&mut self, name: &str) {
-        let innermost = self.scopes.len() - 1;
-        self.scopes[innermost].traits.insert(name.to_string());
-    }
-
-    pub(crate) fn push_scope(&mut self) {
-        self.scopes.push(Scope::default());
-    }
-
-    pub(crate) fn pop_scope(&mut self) {
-        self.scopes.pop();
+    /// Parses items until the end of the stream.
+    ///
+    /// A const fn call at file scope is answered from the probe cache or
+    /// recorded as a request; it never runs here.
+    fn parse_unit_items(&mut self, items: &mut Vec<ast::Item>) -> Result<(), Diagnostic> {
+        while !self.at_eof() {
+            // A generator call or an expanded function can leave a standalone
+            // semicolon. It is not an implicit-int declaration in the output.
+            if self.eat_punct(";") {
+                continue;
+            }
+            if let Some(index) = self.const_fn_generator_ahead() {
+                let start = self.here();
+                self.record_const_call(index, start);
+                self.bump();
+                let (arguments, close) = self.const_arguments(index)?;
+                let span = start.join(close);
+                self.probe_item(index, span, arguments, items)?;
+                continue;
+            }
+            if self.at_ident("pub")
+                && self.at_ident_ahead(1, "const")
+                && self.at_ident_ahead(2, "fn")
+            {
+                self.bump();
+            }
+            if self.at_ident("const") && self.at_ident_ahead(1, "fn") {
+                self.const_fn_declaration()?;
+                continue;
+            }
+            items.push(self.item()?);
+        }
+        Ok(())
     }
 }

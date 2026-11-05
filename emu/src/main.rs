@@ -1,13 +1,12 @@
-mod cpu;
 mod gdb;
 
 use std::env;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use emu::cpu::{DEFAULT_MEM_SIZE, Emu};
+use emu::probe::ProbeOptions;
 use shy_isa_lib::file::shyfile::File;
-
-use crate::cpu::{DEFAULT_MEM_SIZE, Emu};
 
 /// 解析内存大小，支持 K/M 后缀，如 "32M"、"128K"、"512M"。
 fn parse_mem_size(s: &str) -> Result<u32> {
@@ -39,9 +38,10 @@ fn parse_mem_size(s: &str) -> Result<u32> {
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    // usage: emu <input.sfs> [--debug] [--mem <size>] [--gdb [PORT]] [--gdb-wait] [--debug-info <path>]
+    // usage: emu <input.sfs> [--debug] [--mem <size>] [--gdb [PORT]] [--gdb-wait] [--debug-info <path>] [--probe]
     let mut input: Option<String> = None;
     let mut debug = false;
+    let mut probe_mode = false;
     let mut mem_size: u32 = DEFAULT_MEM_SIZE;
     let mut gdb_port: Option<u16> = None;
     let mut gdb_wait = false;
@@ -51,6 +51,7 @@ fn main() -> Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "--debug" => debug = true,
+            "--probe" => probe_mode = true,
             "--gdb" => {
                 gdb_port = Some(1234);
                 if i + 1 < args.len()
@@ -89,13 +90,17 @@ fn main() -> Result<()> {
 
     let Some(input) = input else {
         bail!(
-            "usage:{} <input.sfs> [--debug] [--mem <size>] [--gdb [PORT]] [--gdb-wait] [--debug-info <path>]",
+            "usage:{} <input.sfs> [--debug] [--mem <size>] [--gdb [PORT]] [--gdb-wait] [--debug-info <path>] [--probe]",
             args[0]
         );
     };
 
     if gdb_wait && gdb_port.is_none() {
         bail!("--gdb-wait requires --gdb");
+    }
+
+    if probe_mode && gdb_port.is_some() {
+        bail!("--probe cannot be combined with --gdb");
     }
 
     if !Path::new(&input).exists() {
@@ -107,6 +112,34 @@ fn main() -> Result<()> {
         bail!("failed to open input file: {input}");
     };
     let image = file.as_slice().to_vec();
+
+    if probe_mode {
+        let options = ProbeOptions {
+            mem_size,
+            debug,
+            ..Default::default()
+        };
+        let outcome = emu::probe::run(&image, options)?;
+        if !outcome.stdout.is_empty() {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            out.write_all(&outcome.stdout)?;
+            out.flush()?;
+        }
+        if outcome.output_truncated {
+            eprintln!("probe: stdout truncated at {} bytes", outcome.stdout.len());
+        }
+        eprintln!(
+            "probe stop: {:?}, exit: 0x{:08X}, steps: {}",
+            outcome.stop, outcome.exit, outcome.steps
+        );
+        let code = match outcome.stop {
+            emu::probe::Stop::Done => 0,
+            emu::probe::Stop::Exited(code) => code,
+            _ => 1,
+        };
+        std::process::exit((code & 0xFF) as i32);
+    }
 
     let mut emu = Emu::new(debug, mem_size);
     emu.load_image(&image)

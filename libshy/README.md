@@ -76,9 +76,12 @@ into a `String`; both are traits, so a struct opts in with `impl Debug for T`.
 Traits can be implemented for scalars and enums too, so `impl Display for int`
 is a normal declaration.
 
-`std/fmt.shyh` formats with `{}` (Display), `{:?}` (Debug), and literal
-`{{`/`}}`. `println!`, `format!`, and `scanln!` are the compile-time
-spellings: the compiler turns a call into the wrapper for its argument count.
+`std/fmt.shyh` formats with `{}` (Display), `{:?}` (Debug), `{name}`, and
+literal `{{`/`}}`. `println!` and `format!` are compiled away: the compiler
+checks the literal format string and expands the call into a `String` filled
+with the literal pieces plus one statically dispatched Display/Debug call per
+argument, so nothing is parsed at run time. `scanln!` keeps a wrapper per
+argument count, because `sscanf` reads the C conversions itself.
 
 ```c
 #include <std/fmt.shyh>

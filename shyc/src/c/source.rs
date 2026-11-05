@@ -27,7 +27,7 @@ use crate::ast::{
 };
 use crate::c::names;
 use crate::c::types::{
-    Mention, Spelling, declarator_text_in, record_instance_text, specs_text_in,
+    Mention, Spelling, declarator_text_in, generic_spec_text, record_instance_text, specs_text_in,
     trait_value_possible, trait_value_text, type_name_text, type_name_text_with,
 };
 use crate::lower::{InstancePlan, Lowered};
@@ -270,7 +270,7 @@ impl<'a> Backend<'a> {
         for method in &block.methods {
             if let Some(name) = &method.declarator.name {
                 let ty = self.ty_of(&method.specs, &method.declarator);
-                let symbol = self.symbol(&receiver, &name.text, method.span);
+                let symbol = self.symbol(&receiver, &name.text, trait_of(block), method.span);
                 self.functions.insert(symbol, ty);
             }
         }
@@ -340,21 +340,48 @@ impl<'a> Backend<'a> {
             .map(|(_, ty)| ty.clone())
     }
 
-    /// The C symbol of one method of one receiver, from the compiler's plans.
+    /// Whether one plan describes the method of this receiver.
+    fn names_receiver(plan: &InstancePlan, receiver: &str) -> bool {
+        plan.impl_name.as_deref() == Some(receiver) || plan.receiver.as_deref() == Some(receiver)
+    }
+
+    /// The compiler's plan for one method of one receiver.
     ///
-    /// A call the compiler recorded for this exact body is found by span; when
-    /// one template body was lowered for several receivers, the receiver's own
-    /// plan answers instead.
+    /// A receiver may have an inherent method and a trait method of one name. A
+    /// call reaches the inherent one, so it asks without a trait first; a
+    /// definition names the trait it belongs to instead.
+    fn method_plan(
+        &self,
+        receiver: &str,
+        name: &str,
+        trait_name: Option<&str>,
+    ) -> Option<&'a InstancePlan> {
+        self.lowered.instances.iter().find(|plan| {
+            plan.name == name
+                && plan.trait_name.as_deref() == trait_name
+                && Self::names_receiver(plan, receiver)
+        })
+    }
+
+    /// The C symbol of one method, as a call reaches it: the receiver's type and
+    /// the method's name, which one span cannot tell apart when a macro
+    /// expansion or a generated fragment made several calls.
     fn method(&self, receiver: &str, name: &str) -> Option<String> {
-        let plan = self.method_plan(receiver, name)?;
+        let plan = self.method_plan(receiver, name, None).or_else(|| {
+            self.lowered.instances.iter().find(|plan| {
+                plan.name == name
+                    && plan.trait_name.is_some()
+                    && Self::names_receiver(plan, receiver)
+            })
+        })?;
         Some(names::symbol(plan.symbol.as_ref()?))
     }
 
-    /// The C symbol of one method: the compiler's answer, whether the method is
-    /// a specialization or an ordinary definition.
-    fn symbol(&self, receiver: &str, name: &str, span: Span) -> String {
+    /// The C symbol of one method definition: the compiler's answer for this
+    /// receiver, trait, and name.
+    fn symbol(&self, receiver: &str, name: &str, trait_name: Option<&str>, span: Span) -> String {
         if let Some(symbol) = self
-            .method_plan(receiver, name)
+            .method_plan(receiver, name, trait_name)
             .and_then(|plan| plan.symbol.clone())
         {
             return names::symbol(&symbol);
@@ -364,42 +391,26 @@ impl<'a> Backend<'a> {
         }
         // Neither: a method the compiler never lowered, which only happens for a
         // construct it rejected, so the plain name is enough to report it in C.
-        let _ = receiver;
         name.to_string()
     }
 
-    /// The C name of one function definition: the compiler's symbol for it.
-    fn definition(&self, span: Span, fallback: &str) -> String {
-        match self.lowered.declaration_symbols.get(&span) {
-            Some(symbol) => names::symbol(symbol),
-            None => fallback.to_string(),
-        }
-    }
-
-    /// The symbol of one call inside the body that spells self as self_name.
+    /// The C name of one file-scope function: the compiler's symbol for it.
     ///
-    /// One template body is lowered once per receiver, so the span alone may
-    /// name several calls; the receiver's type picks the one this body means.
-    fn call_symbol(&self, span: Span, context: Option<&str>) -> Option<String> {
-        if let Some(context) = context
-            && let Some(symbol) = self
-                .lowered
-                .call_symbols
-                .get(&(span, Some(context.to_string())))
-        {
-            return Some(symbol.clone());
-        }
-        // A body that is not an impl block resolves against the span alone.
-        self.lowered.call_symbols.get(&(span, None)).cloned()
+    /// A function is looked up by its C name, not by a span: one span may cover
+    /// several functions when a macro expansion or a generated fragment produced
+    /// them, and a name always has exactly one symbol.
+    fn function_symbol(&self, name: &str) -> Option<String> {
+        self.lowered
+            .function_symbols
+            .get(name)
+            .map(|symbol| names::symbol(symbol))
     }
 
-    /// The compiler's plan for one method of one concrete receiver.
-    fn method_plan(&self, receiver: &str, name: &str) -> Option<&'a InstancePlan> {
-        self.lowered.instances.iter().find(|plan| {
-            plan.name == name
-                && (plan.impl_name.as_deref() == Some(receiver)
-                    || plan.receiver.as_deref() == Some(receiver))
-        })
+    /// The C name of one file-scope function, or the name itself when the name
+    /// is not one (a local, a file-scope object, or an enumerator).
+    fn symbol_of(&self, name: &str) -> String {
+        self.function_symbol(name)
+            .unwrap_or_else(|| name.to_string())
     }
 
     /// The methods to print for one block: the ones it defines, then the trait
@@ -562,12 +573,36 @@ impl<'a> Backend<'a> {
             output.push_str(&instances);
             output.push('\n');
         }
+        // A prototype has to name its types in C, so the type declarations the
+        // unit writes anywhere come before the prototypes, in source order.
+        let mut types = String::new();
+        for item in &unit.items {
+            let Item::Decl(declaration) = item else {
+                continue;
+            };
+            if !is_type_declaration(declaration) {
+                continue;
+            }
+            let text = self.item_declaration(declaration)?;
+            if !text.is_empty() {
+                types.push_str(&text);
+                types.push_str("\n\n");
+            }
+        }
+        if !types.is_empty() {
+            output.push_str(&types);
+            output.push('\n');
+        }
         // Methods and trait constructors are defined wherever their impl block
         // appears, but a body before it calls them, so they are declared first.
+        // A file-scope function needs the same: C has no implicit declaration,
+        // and a function defined later is called before its definition.
         let mut prototypes = String::new();
         for item in &unit.items {
-            if let Item::Impl(block) = item {
-                prototypes.push_str(&self.impl_prototypes(block)?);
+            match item {
+                Item::Function(function) => prototypes.push_str(&self.function_prototype(function)),
+                Item::Impl(block) => prototypes.push_str(&self.impl_prototypes(block)?),
+                _ => {}
             }
         }
         if !prototypes.is_empty() {
@@ -576,6 +611,8 @@ impl<'a> Backend<'a> {
         }
         for item in &unit.items {
             let text = match item {
+                // A type declaration was printed above, with the other types.
+                Item::Decl(declaration) if is_type_declaration(declaration) => String::new(),
                 Item::Decl(declaration) => self.item_declaration(declaration)?,
                 Item::Function(function) => self.function(function)?,
                 Item::Impl(block) => self.impl_text(block)?,
@@ -616,7 +653,12 @@ impl<'a> Backend<'a> {
         let mut globals = Body::new(self, None);
         let mut declarators = Vec::new();
         for declarator in &declaration.declarators {
-            let mut text = declarator_text_in(&declarator.declarator, spelling);
+            // A function reference in C names the symbol its definition does.
+            let printed = match &declarator.declarator.name {
+                Some(name) => renamed(&declarator.declarator, &self.symbol_of(&name.text)),
+                None => declarator.declarator.clone(),
+            };
+            let mut text = declarator_text_in(&printed, spelling);
             if let Some(initializer) = &declarator.init {
                 text.push_str(" = ");
                 text.push_str(&globals.initializer(initializer)?);
@@ -624,6 +666,26 @@ impl<'a> Backend<'a> {
             declarators.push(text);
         }
         Ok(format!("{specs} {};", declarators.join(", ")))
+    }
+
+    /// The name a function is written under: the compiler's symbol for it.
+    fn function_declarator(&self, function: &FunctionDecl) -> Declarator {
+        match &function.declarator.name {
+            Some(name) => renamed(&function.declarator, &self.symbol_of(&name.text)),
+            None => function.declarator.clone(),
+        }
+    }
+
+    /// The prototype a later definition needs, or nothing for a template.
+    fn function_prototype(&self, function: &FunctionDecl) -> String {
+        if is_template(&function.declarator) || function.declarator.name.is_none() {
+            return String::new();
+        }
+        format!(
+            "{} {};\n",
+            specs_text_in(&function.specs, self.spelling("void")),
+            declarator_text_in(&self.function_declarator(function), self.spelling("void"))
+        )
     }
 
     fn function(&self, function: &FunctionDecl) -> Result<String, Diagnostic> {
@@ -635,13 +697,7 @@ impl<'a> Backend<'a> {
         let spelling = self.spelling("void");
         // The definition carries the symbol the compiler gave it, which is what
         // a call site prints.
-        let declarator = match &function.declarator.name {
-            Some(name) => renamed(
-                &function.declarator,
-                &self.definition(function.span, &name.text),
-            ),
-            None => function.declarator.clone(),
-        };
+        let declarator = self.function_declarator(function);
         let signature = format!(
             "{} {}",
             specs_text_in(&function.specs, spelling),
@@ -667,7 +723,7 @@ impl<'a> Backend<'a> {
             let Some(name) = &method.declarator.name else {
                 continue;
             };
-            let symbol = self.symbol(&receiver, &name.text, method.span);
+            let symbol = self.symbol(&receiver, &name.text, trait_of(block), method.span);
             let declarator = renamed(method.declarator, &symbol);
             let linkage = if method.specs.is_pub { "" } else { "static " };
             output.push_str(&format!(
@@ -680,7 +736,7 @@ impl<'a> Backend<'a> {
             let Some(name) = &prototype.declarator.name else {
                 continue;
             };
-            let symbol = self.symbol(&receiver, &name.text, prototype.span);
+            let symbol = self.symbol(&receiver, &name.text, trait_of(block), prototype.span);
             let declarator = renamed(&prototype.declarator, &symbol);
             let linkage = if prototype.specs.is_pub {
                 ""
@@ -725,7 +781,7 @@ impl<'a> Backend<'a> {
             let Some(name) = &method.declarator.name else {
                 continue;
             };
-            let symbol = self.symbol(&receiver, &name.text, method.span);
+            let symbol = self.symbol(&receiver, &name.text, trait_of(block), method.span);
             let declarator = renamed(method.declarator, &symbol);
             let linkage = if method.specs.is_pub { "" } else { "static " };
             let signature = format!(
@@ -780,7 +836,9 @@ impl<'a> Backend<'a> {
                     .as_ref()
                     .is_some_and(|method| method.text == name.text)
             }) {
-                Some(implementation) => self.symbol(receiver, &name.text, implementation.span),
+                Some(implementation) => {
+                    self.symbol(receiver, &name.text, Some(trait_name), implementation.span)
+                }
                 None => {
                     return Err(Diagnostic::new(
                         method.span,
@@ -825,6 +883,29 @@ fn is_template_declaration(declaration: &Declaration) -> bool {
         .declarators
         .iter()
         .any(|declarator| is_template(&declarator.declarator))
+}
+
+/// Whether a declaration only names types: a typedef, or a tag definition with
+/// no initializer of its own.
+///
+/// C wants to see a type before a prototype that mentions it, so these are
+/// printed before the prototypes however late they stand in the source.
+fn is_type_declaration(declaration: &Declaration) -> bool {
+    let names_types = declaration.specs.storage == Some(ast::StorageClass::Typedef)
+        || declaration
+            .specs
+            .type_specs
+            .iter()
+            .any(|specifier| match specifier {
+                TypeSpecifier::Record(record) => record.members.is_some(),
+                TypeSpecifier::Enum(enumeration) => enumeration.enumerators.is_some(),
+                _ => false,
+            });
+    names_types
+        && declaration
+            .declarators
+            .iter()
+            .all(|declarator| declarator.init.is_none())
 }
 
 /// The forward typedef of a record definition, if the specifier list is one.
@@ -985,7 +1066,7 @@ impl<'a> Backend<'a> {
                 let Some(method_name) = &method.declarator.name else {
                     continue;
                 };
-                let symbol = self.symbol(name, &method_name.text, method.span);
+                let symbol = self.symbol(name, &method_name.text, trait_of(block), method.span);
                 let declarator = renamed(method.declarator, &symbol);
                 output.push_str(&format!(
                     "static {} {};\n",
@@ -1029,7 +1110,6 @@ impl<'a> Backend<'a> {
                         spelling,
                     )),
                     "void".to_string(),
-                    None,
                     bindings.clone(),
                 );
                 body.parameters(&function.declarator);
@@ -1041,12 +1121,6 @@ impl<'a> Backend<'a> {
                 ));
             }
             if let Some(blocks) = self.generic_impls.get(&instance.name).cloned() {
-                // The compiler records a call inside a template body under the
-                // impl's own name, which is what this body must ask for.
-                let receiver = blocks
-                    .first()
-                    .map(|block| Ty::from_text(&type_name_text(&block.self_type)).base)
-                    .unwrap_or_default();
                 for block in blocks {
                     let bindings = self.block_bindings(block, &instance);
                     let spelling = self.instance_spelling(&name, &bindings);
@@ -1054,13 +1128,13 @@ impl<'a> Backend<'a> {
                         let Some(method_name) = &method.declarator.name else {
                             continue;
                         };
-                        let symbol = self.symbol(&name, &method_name.text, method.span);
+                        let symbol =
+                            self.symbol(&name, &method_name.text, trait_of(block), method.span);
                         let declarator = renamed(method.declarator, &symbol);
                         let mut body = Body::instance(
                             self,
                             Some(return_type_in(method.specs, method.declarator, spelling)),
                             name.clone(),
-                            Some(receiver.clone()),
                             bindings.clone(),
                         );
                         body.parameters(method.declarator);
@@ -1226,13 +1300,8 @@ impl<'a> Backend<'a> {
         let spelling = self.instance_spelling(receiver, &bindings);
         let declarator = renamed(declarator, &names::symbol(symbol));
         let returned = return_type_in(specs, &declarator, spelling);
-        let mut printed = Body::instance(
-            self,
-            Some(returned),
-            receiver.to_string(),
-            plan.impl_name.clone(),
-            bindings.clone(),
-        );
+        let mut printed =
+            Body::instance(self, Some(returned), receiver.to_string(), bindings.clone());
         printed.parameters(&declarator);
         Ok(format!(
             "static {} {} {}\n\n",
@@ -1241,6 +1310,11 @@ impl<'a> Backend<'a> {
             printed.block(body, 0)?
         ))
     }
+}
+
+/// The trait an impl block implements, if it implements one.
+fn trait_of(block: &ImplBlock) -> Option<&str> {
+    block.trait_name.as_ref().map(|name| name.text.as_str())
 }
 
 /// One method to print: the block's own definition or an inherited default.
@@ -1304,10 +1378,6 @@ struct Body<'a, 'b> {
     /// What `self` means here: the receiver type inside an impl method, `void`
     /// everywhere else.
     self_name: String,
-    /// The receiver this body belongs to, as the compiler names it. One template
-    /// body is lowered once per receiver, so a call inside it is identified by
-    /// this name as well as its span.
-    context: Option<String>,
     /// Type parameters of the specialization this body belongs to, bound to
     /// their concrete spelling. Empty outside a specialization.
     bindings: HashMap<String, String>,
@@ -1328,12 +1398,10 @@ impl<'a, 'b> Body<'a, 'b> {
         return_ty: Option<String>,
         self_name: String,
     ) -> Body<'a, 'b> {
-        let context = Some(self_name.clone());
         Body {
             backend,
             return_ty,
             self_name,
-            context,
             bindings: HashMap::new(),
             instance: false,
             scopes: vec![HashMap::new()],
@@ -1345,14 +1413,12 @@ impl<'a, 'b> Body<'a, 'b> {
         backend: &'a Backend<'b>,
         return_ty: Option<String>,
         self_name: String,
-        context: Option<String>,
         bindings: HashMap<String, String>,
     ) -> Body<'a, 'b> {
         Body {
             backend,
             return_ty,
             self_name,
-            context,
             bindings,
             instance: true,
             scopes: vec![HashMap::new()],
@@ -1408,6 +1474,15 @@ impl<'a, 'b> Body<'a, 'b> {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
+    }
+
+    /// Print one identifier: a local keeps its spelling, and a file-scope
+    /// function takes the symbol the compiler gave it.
+    fn identifier(&self, name: &Name) -> String {
+        match self.local(&name.text) {
+            Some(_) => name.text.clone(),
+            None => self.backend.symbol_of(&name.text),
+        }
     }
 
     fn block(&mut self, block: &Block, depth: usize) -> Result<String, Diagnostic> {
@@ -1574,14 +1649,27 @@ impl<'a, 'b> Body<'a, 'b> {
 
     fn declaration(&mut self, declaration: &Declaration) -> Result<String, Diagnostic> {
         let specs = specs_text_in(&declaration.specs, self.spelling());
+        // A block-scope function declaration names the same function the
+        // file scope does, so it prints under the same symbol.
         let mut declarators = Vec::new();
         for declarator in &declaration.declarators {
-            let mut text = declarator_text_in(&declarator.declarator, self.spelling());
+            let declares_function = function_position(&declarator.declarator) == Some(0);
+            let printed = match &declarator.declarator.name {
+                Some(name) if declares_function => {
+                    renamed(&declarator.declarator, &self.backend.symbol_of(&name.text))
+                }
+                _ => declarator.declarator.clone(),
+            };
+            let mut text = declarator_text_in(&printed, self.spelling());
             if let Some(initializer) = &declarator.init {
                 text.push_str(" = ");
                 text.push_str(&self.initializer(initializer)?);
             }
-            if let Some(name) = &declarator.declarator.name {
+            // A function declaration is not a local object: a call through the
+            // name still reaches the function.
+            if let Some(name) = &declarator.declarator.name
+                && !declares_function
+            {
                 let ty = self.backend.ty_with(
                     &declaration.specs,
                     &declarator.declarator,
@@ -1697,7 +1785,7 @@ impl<'a, 'b> Body<'a, 'b> {
                 .map(|part| format!("{}\"{}\"", part.prefix, part.raw))
                 .collect::<Vec<_>>()
                 .join(" ")),
-            Expr::Name(name) => Ok(name.text.clone()),
+            Expr::Name(name) => Ok(self.identifier(name)),
             Expr::Unary { op, operand, .. } => {
                 Ok(format!("({}{})", unary_op_text(*op), self.expr(operand)?))
             }
@@ -1817,25 +1905,27 @@ impl<'a, 'b> Body<'a, 'b> {
         type_args: &[GenericArg],
         span: Span,
     ) -> Result<String, Diagnostic> {
-        // The compiler resolved this call, so the C output prints the symbol it
-        // chose. A method call passes its receiver first, which the source
-        // arguments do not contain.
-        if let Some(symbol) = self.backend.call_symbol(span, self.context.as_deref()) {
-            let mut printed = Vec::new();
-            if let Expr::Member { object, op, .. } = callee {
-                let receiver = match self.ty(object) {
-                    Some(receiver) => self.receiver(object, &receiver, *op)?,
-                    None => self.expr(object)?,
-                };
-                printed.push(receiver);
+        // A name answers for itself: it is either the function the compiler
+        // registered under it or a variable of its own that C calls indirectly.
+        // The span cannot answer, because one macro expansion or generated
+        // fragment gives every call it produced the same span.
+        if let Expr::Name(name) = callee
+            && self.local(&name.text).is_none()
+        {
+            if let Some(symbol) = self.backend.function_symbol(&name.text) {
+                return Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")));
             }
-            printed.extend(self.arguments(args)?);
-            return Ok(format!(
-                "{}({})",
-                names::symbol(&symbol),
-                printed.join(", ")
-            ));
+            if !self.backend.is_template(&name.text) {
+                return Ok(format!(
+                    "{}({})",
+                    name.text,
+                    self.arguments(args)?.join(", ")
+                ));
+            }
         }
+        // A method call is named by its receiver's type and the method's name:
+        // a macro expansion or a generated fragment gives every call it made one
+        // span, so the span cannot say which call this is.
         match callee {
             Expr::Member {
                 object, name, op, ..
@@ -1941,10 +2031,26 @@ impl<'a, 'b> Body<'a, 'b> {
                         name.text
                     ));
                 }
+                // Type<args>::method(...) names one instance's method, and a
+                // type parameter names the type it is bound to here.
+                let instance = match self.bindings.get(&qualifier.text) {
+                    Some(bound) if type_args.is_empty() => bound.clone(),
+                    _ => generic_spec_text(
+                        &ast::GenericSpec {
+                            span: *span,
+                            name: qualifier.clone(),
+                            args: type_args.clone(),
+                        },
+                        self.spelling(),
+                    ),
+                };
+                if let Some(symbol) = self.backend.method(&instance, &name.text) {
+                    return Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")));
+                }
                 return Err(Diagnostic::new(
                     *span,
                     format!(
-                        "'{}::{}' has no C form; only a variant or Trait::from<Type>() does",
+                        "'{}::{}' has no C form; only a variant, Trait::from<Type>(),                          or a method instance does",
                         qualifier.text, name.text
                     ),
                 ));
