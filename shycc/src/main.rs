@@ -66,6 +66,9 @@ struct Options {
     /// it off): the probe image is temporary and the final image is never the
     /// thing that is executed.
     probe: bool,
+    /// Whether the user spelled `--constfn-probe`; the default quietly turns
+    /// off where a probe cannot run.
+    probe_explicit: bool,
     /// Instruction budget of one probe round.
     constfn_steps: u64,
     /// Wall-clock budget of one probe round, in milliseconds.
@@ -155,6 +158,7 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         emit: None,
         emit_debug_info: false,
         probe: cfg!(feature = "constfn-probe"),
+        probe_explicit: false,
         constfn_steps: DEFAULT_PROBE_STEPS,
         constfn_timeout_ms: DEFAULT_PROBE_TIMEOUT_MS,
         constfn_rounds: DEFAULT_PROBE_ROUNDS,
@@ -172,6 +176,10 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         match arg.as_str() {
             "--help" => {
                 print_usage();
+                std::process::exit(0);
+            }
+            "--version" => {
+                println!("shycc {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "--backend" => {
@@ -215,7 +223,10 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                 opts.emit = Some(what.to_string());
             }
             "-###" => opts.print_only = true,
-            "--constfn-probe" | "--probe" => opts.probe = true,
+            "--constfn-probe" | "--probe" => {
+                opts.probe = true;
+                opts.probe_explicit = true;
+            }
             "--no-constfn-probe" => opts.probe = false,
             "--probe-only" => {
                 opts.probe = true;
@@ -353,6 +364,14 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         bail!("--shy-emit-debug-info requires --shy-emit-source-lines");
     }
 
+    let probe_applies = opts.stage == Stage::Link
+        && opts.emit.as_deref().is_none_or(|emit| matches!(emit, "c" | "c-header"))
+        && !opts.print_only
+        && opts.backend == Backend::Shyc
+        && opts.target == "shy";
+    if opts.probe && !opts.probe_explicit && !probe_applies {
+        opts.probe = false;
+    }
     if opts.probe {
         if opts.constfn_rounds == 0 {
             bail!("`--constfn-rounds` must be at least 1");
@@ -1124,7 +1143,7 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
     if opts.stage == Stage::Link && !bare_target(&opts.target) && !opts.no_default_libs {
         for source in LIBSHY_RUST_LAYERS {
             let ll = temps.temp_path(".ll");
-            emit_llvm(repo, opts, &repo.join(source), &ll, false)?;
+            emit_llvm(repo, opts, &shylib().join(source), &ll, false)?;
             clang_inputs.push(ll);
         }
     }

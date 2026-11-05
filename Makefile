@@ -66,6 +66,7 @@ install-bin: bin
 	for bin in $(TOOL_BINS) shyc chibicc; do \
 		$(INSTALL) -m 0755 $(BIN_DIR)/$$bin $(DESTDIR)$(PREFIX)/bin/$$bin; \
 	done
+	printf '# Where this project'"'"'s C library lives, so the compiler can resolve\n# `use std::io::*;` from any directory.\nshylib = "%s"\n' "$(CURDIR)/libshy" > $(HOME)/.shycc.toml
 
 clean-bin:
 	rm -rf $(BIN_DIR)

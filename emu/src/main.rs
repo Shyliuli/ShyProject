@@ -50,6 +50,10 @@ fn main() -> Result<()> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--version" => {
+                println!("shyemu {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
             "--debug" => debug = true,
             "--probe" => probe_mode = true,
             "--gdb" => {

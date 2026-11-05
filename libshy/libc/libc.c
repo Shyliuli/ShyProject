@@ -668,14 +668,6 @@ int printf(const char *fmt, ...) {
   va_end(ap);
   return r;
 }
-int println(const char *fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-  int r = vprintf(fmt, ap);
-  va_end(ap);
-  putchar('\n');
-  return r;
-}
 typedef struct {
   const char *s;
   int from_string;

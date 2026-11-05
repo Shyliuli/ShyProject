@@ -9,7 +9,7 @@ struct book{
 impl book{
     book new(i32 id,char* name){
         if (strlen(name)>64){
-            println("error:book name too long");
+            printf("error:book name too long\n");
             exit(-1);
         }
         else{
@@ -20,7 +20,7 @@ impl book{
         }
     }
     void print(const self* s){
-        println("[bookid] %s:%d", s.name,s.id);
+        printf("[bookid] %s:%d\n", s.name,s.id);
     }
     void drop(const self* s){
         (void*)s;
@@ -33,5 +33,5 @@ i32 main(void) {
     book b1=book::new(10,"红星照耀中国");   
     book* b2=&b1;
     b2.print();
-    println("%s", b2.name);
+    printf("%s\n", b2.name);
 }

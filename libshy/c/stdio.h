@@ -45,8 +45,6 @@ extern int puts(const char *s);
 
 extern int printf(const char *fmt, ...);
 
-extern int println(const char *fmt, ...);
-
 extern int vprintf(const char *fmt, va_list ap);
 
 extern int fprintf(FILE *f, const char *fmt, ...);
