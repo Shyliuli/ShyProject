@@ -9,6 +9,10 @@ use crate::parser::Obj;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
+    if args.len() == 2 && args[1] == "--version" {
+        println!("shyasm {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if args.len() != 2 && args.len() != 4 {
         bail!("usage:{} <filename> (-o <output_file>)", args[0]);
     }

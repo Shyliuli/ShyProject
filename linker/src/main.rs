@@ -37,6 +37,10 @@ fn main() -> Result<()> {
                 sym = Some(v.clone());
             }
             "--gc-sections" => gc = true,
+            "--version" => {
+                println!("shyld {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
             s if s.starts_with('-') => bail!("unknown option: {s}"),
             s => inputs.push(s.to_string()),
         }

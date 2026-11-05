@@ -439,6 +439,10 @@ fn arguments() -> Result<Option<Options>, String> {
                 );
                 return Ok(None);
             }
+            "--version" => {
+                println!("shyc {}", env!("CARGO_PKG_VERSION"));
+                return Ok(None);
+            }
             "--dump-tokens" => Some(Stage::Tokens),
             "-E" => Some(Stage::Preprocess),
             "--dump-ast" => Some(Stage::Ast),
