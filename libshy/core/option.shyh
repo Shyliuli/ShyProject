@@ -1,6 +1,8 @@
 #ifndef SHY_OPTION_SHYH
 #define SHY_OPTION_SHYH
 
+#include <stdlib.h>
+
 /* Pointer instances use the C-compatible representation: NULL is None and
    a non-null pointer is Some. Some(NULL) is therefore equivalent to None.
    Other instances retain their tag and payload. */
@@ -9,5 +11,39 @@ enum Option<T> {
     None,
     Some(T)
 };
+
+impl Option<T> {
+    fn is_some(const self *o) -> int {
+        switch (*o) {
+        case Option<T>::Some:
+            return 1;
+        default:
+            return 0;
+        }
+    }
+
+    fn is_none(const self *o) -> int {
+        return !o.is_some();
+    }
+
+    /* None 时直接退出程序。 */
+    fn unwrap(const self *o) -> T {
+        switch (*o) {
+        case Option<T>::Some:
+            return o.payload.Some;
+        default:
+            abort();
+        }
+    }
+
+    fn unwrap_or(const self *o, T fallback) -> T {
+        switch (*o) {
+        case Option<T>::Some:
+            return o.payload.Some;
+        default:
+            return fallback;
+        }
+    }
+}
 
 #endif

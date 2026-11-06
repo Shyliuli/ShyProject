@@ -168,10 +168,14 @@ fn run() -> Result<(), String> {
                         .disable_nonexhaustive_switch,
                     disable_rustic_mut: preprocessed.attributes.disable_rustic_mut,
                     disable_default_static: preprocessed.attributes.disable_default_static,
+                    allow_defer_copy: preprocessed.attributes.allow_defer_copy,
                     exports,
                 },
             )
             .map_err(|error| sources.render(&error))?;
+            for warning in &lowered.warnings {
+                eprintln!("warning: {}", sources.render(warning));
+            }
             lowered.module.resources.memory_bytes = preprocessed.attributes.memory.map(u64::from);
             lowered.module.resources.stack_bytes = preprocessed.attributes.stack.map(u64::from);
             if options.opt_level > 0 {
@@ -240,7 +244,7 @@ fn lower_instances(
 ) -> Result<lower::Lowered, String> {
     let target = resolve_target(options)?;
     let exports = instance_requests(options, unit, sources)?;
-    lower::lower(
+    let lowered = lower::lower(
         unit,
         &lower::Options {
             module_name: module_name(&options.input),
@@ -250,10 +254,15 @@ fn lower_instances(
             disable_nonexhaustive_switch: attributes.disable_nonexhaustive_switch,
             disable_rustic_mut: attributes.disable_rustic_mut,
             disable_default_static: attributes.disable_default_static,
+            allow_defer_copy: attributes.allow_defer_copy,
             exports,
         },
     )
-    .map_err(|error| sources.render(&error))
+    .map_err(|error| sources.render(&error))?;
+    for warning in &lowered.warnings {
+        eprintln!("warning: {}", sources.render(warning));
+    }
+    Ok(lowered)
 }
 
 /// The C source of one unit. It names what the compiler resolved: symbols,
@@ -298,9 +307,11 @@ struct Target {
 
 /// Resolve the target triple and the IR data model it implies.
 ///
-/// An explicit target is never guessed: the Shy backend only accepts `shy`,
-/// and the LLVM backend accepts the 64-bit architectures whose layout is
-/// [`Layout::LP64`] plus RISC-V ILP32, whose layout is [`Layout::ILP32`].
+/// An explicit target is never guessed: a target is accepted when its
+/// architecture has a data model ([`Layout::for_arch`]). The Shy backend emits
+/// ShyISA for any of them, and ShyISA keeps its own call ABI whatever the data
+/// model is: the triple only decides pointer and `long` widths and the
+/// preprocessor facts. The LLVM backend also takes the triple's own ABI.
 fn resolve_target(options: &Options) -> Result<Target, String> {
     let backend = match options.stage {
         Stage::Emit(backend) => Some(backend),
@@ -317,12 +328,10 @@ fn resolve_target(options: &Options) -> Result<Target, String> {
         };
     };
     let arch = name.split('-').next().unwrap_or(name);
-    let layout = target_layout(arch);
+    let layout = Layout::for_arch(arch);
     match backend {
-        Some(Backend::Shy) if name != "shy" => Err(format!(
-            "the Shy backend emits ShyISA (`--target shy`), not `{name}`; \
-             use --emit=llvm for that target"
-        )),
+        // ShyISA keeps its own ABI for every data model; only the LLVM
+        // stage takes the triple's ABI.
         Some(Backend::Llvm) => match layout {
             Some(layout) => Ok(Target {
                 triple: name.into(),
@@ -334,33 +343,21 @@ fn resolve_target(options: &Options) -> Result<Target, String> {
                  riscv64, loongarch64, and aarch64"
             )),
         },
-        _ => match arch {
-            "shy" if name == "shy" => Ok(Target {
+        Some(Backend::Shy) | None => match layout {
+            Some(layout) => Ok(Target {
                 triple: name.into(),
-                abi: abi_plan::AbiKind::ShyV1,
-                layout: Layout::SHY,
+                abi: if backend == Some(Backend::Shy) {
+                    abi_plan::AbiKind::ShyV1
+                } else {
+                    abi_kind(name)
+                },
+                layout,
             }),
-            _ => match layout {
-                Some(layout) => Ok(Target {
-                    triple: name.into(),
-                    abi: abi_kind(name),
-                    layout,
-                }),
-                None => Err(format!(
-                    "unknown target `{name}`: expected `shy` or an LLVM triple \
-                     (x86_64, riscv32, riscv64, loongarch64, aarch64)"
-                )),
-            },
+            None => Err(format!(
+                "unknown target `{name}`: expected `shy` or an LLVM triple \
+                 (x86_64, riscv32, riscv64, loongarch64, aarch64)"
+            )),
         },
-    }
-}
-
-/// The IR data model of an architecture shyc can lower to.
-fn target_layout(arch: &str) -> Option<Layout> {
-    match arch {
-        "riscv32" => Some(Layout::ILP32),
-        "x86_64" | "riscv64" | "loongarch64" | "aarch64" => Some(Layout::LP64),
-        _ => None,
     }
 }
 
@@ -382,12 +379,22 @@ fn abi_kind(triple: &str) -> abi_plan::AbiKind {
     }
 }
 
+/// The prefix of this translation unit's file-local symbols.
+///
+/// 链接器按名字区分 section，所以两个单元不能共用前缀。同名的源文件可以
+/// 放在不同目录里，因此前缀取整条路径：路径分隔符等非标识符字符换成 `_`。
 fn module_name(input: &Path) -> String {
     input
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("module")
-        .to_string()
+        .to_string_lossy()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn arguments() -> Result<Option<Options>, String> {
@@ -433,9 +440,9 @@ fn arguments() -> Result<Option<Options>, String> {
                      (with --emit=c-header / --emit=c-wrapper or a code generator); \
                      --constfn-probe --probe-answers <file> --probe-manifest <file> \
                      [--probe-object <file>] compiles one const-fn probe round \
-                     instead of the program (-S, --emit=c, --emit=c-header; \
-                     --probe-object receives the probe unit of a round with \
-                     requests, which then writes no main output)"
+                     instead of the program (-S, --emit=llvm, --emit=c, \
+                     --emit=c-header; --probe-object receives the probe unit \
+                     of a round with requests, which then writes no main output)"
                 );
                 return Ok(None);
             }
@@ -565,6 +572,13 @@ fn arguments() -> Result<Option<Options>, String> {
             );
         }
     }
+    // The C source output is compiled by the host's C compiler, so without an
+    // explicit target it takes the host's data model: the generated `size_t`
+    // and pointer types have to agree with the C library's own declarations.
+    // `--target host` names the same machine for any output.
+    if target.as_deref() == Some("host") || (target.is_none() && stage == Some(Stage::CSource)) {
+        target = Some(format!("{}-unknown-linux-gnu", env::consts::ARCH));
+    }
     if target.as_deref().is_some_and(is_bare_target) {
         freestanding = true;
     }
@@ -690,18 +704,14 @@ fn arguments() -> Result<Option<Options>, String> {
     let stage = stage.unwrap_or(Stage::Emit(Backend::Shy));
     if probe {
         // A probe round runs Shy assembly, so only the outputs whose final
-        // text can follow a round take part: the assembly itself and the two C
-        // text outputs. A probe unit is not a program, so an export table
-        // would name the program instead of the probe.
+        // text can follow a round take part: the assembly itself, LLVM IR, and
+        // the two C text outputs. A probe unit is not a program, so an export
+        // table would name the program instead of the probe.
         match stage {
-            Stage::Emit(Backend::Shy) | Stage::CSource | Stage::CHeader => {}
-            Stage::Emit(Backend::Llvm) => {
-                return Err(
-                    "--constfn-probe cannot be combined with --emit=llvm: a probe round is \
-                     Shy assembly"
-                        .into(),
-                );
-            }
+            Stage::Emit(Backend::Shy)
+            | Stage::Emit(Backend::Llvm)
+            | Stage::CSource
+            | Stage::CHeader => {}
             Stage::CWrapper => {
                 return Err(
                     "--constfn-probe cannot be combined with --emit=c-wrapper: a probe round \
@@ -711,25 +721,23 @@ fn arguments() -> Result<Option<Options>, String> {
             }
             _ => {
                 return Err(
-                    "--constfn-probe only applies to -S / --emit=shy, --emit=c, or \
-                     --emit=c-header"
+                    "--constfn-probe only applies to -S / --emit=shy, --emit=llvm, \
+                     --emit=c, or --emit=c-header"
                         .into(),
                 );
             }
         }
-        if matches!(stage, Stage::CSource | Stage::CHeader) && probe_object.is_none() {
-            // The round's assembly is not the C text the user asked for, so it
+        if matches!(
+            stage,
+            Stage::CSource | Stage::CHeader | Stage::Emit(Backend::Llvm)
+        ) && probe_object.is_none()
+        {
+            // The round's assembly is not the text the user asked for, so it
             // needs a path of its own; repurposing the main output would print
-            // Shy assembly as C.
+            // Shy assembly as the program.
             return Err(
-                "--constfn-probe with --emit=c or --emit=c-header requires --probe-object <path>"
-                    .into(),
-            );
-        }
-        if target.as_deref().is_some_and(|name| name != "shy") {
-            return Err(
-                "--constfn-probe only applies to the shy target: other targets link through \
-                 clang and have no Shy probe image"
+                "--constfn-probe with --emit=c, --emit=c-header, or --emit=llvm requires \
+                 --probe-object <path>"
                     .into(),
             );
         }
@@ -987,8 +995,10 @@ fn probe_round(options: &Options) -> Result<(), String> {
         }
         // A probe image is not a program. Its unit holds the `const fn` clones
         // and the `_start` trampoline that calls them, so it is lowered without
-        // the compiler's automatic startup and never reaches a `main`.
-        let program = match probe::build(&mut parsed) {
+        // the compiler's automatic startup and never reaches a `main`. It runs
+        // on ShyISA whatever the program targets, so it uses the Shy ABI; the
+        // program's data model is what the evaluated values must agree with.
+        let program = match probe::build(&mut parsed, target.layout) {
             probe::Outcome::Unit(program) => program,
             probe::Outcome::Nothing => {
                 return Err("const-fn probe round has requests but no probe unit".into());
@@ -1014,14 +1024,36 @@ fn probe_round(options: &Options) -> Result<(), String> {
                 module_name: "probe".to_string(),
                 layout: target.layout,
                 startup: StartupMode::Manual,
-                abi: target.abi,
+                abi: abi_plan::AbiKind::ShyV1,
                 disable_nonexhaustive_switch: attributes.disable_nonexhaustive_switch,
                 disable_rustic_mut: attributes.disable_rustic_mut,
                 disable_default_static: attributes.disable_default_static,
+                allow_defer_copy: attributes.allow_defer_copy,
                 exports: Vec::new(),
             },
         )
         .map_err(|error| sources.render(&error))?;
+        // A probe computes its answer in the probe image, so an address it
+        // casts to an integer is an address in the program the answer is
+        // folded into. Report it once per const fn of this round.
+        let mut warned: Vec<usize> = Vec::new();
+        for request in &parsed.requests {
+            if warned.contains(&request.function) {
+                continue;
+            }
+            warned.push(request.function);
+            if probe::converts_address(&lowered, request.function) {
+                let function = &parsed.const_fns[request.function];
+                let warning = Diagnostic::new(
+                    function.span,
+                    format!(
+                        "const fn '{}' converts an address to an integer; a probe evaluates it in the probe image, so the integer is an address there and means nothing in this program",
+                        function.name
+                    ),
+                );
+                eprintln!("warning: {}", sources.render(&warning));
+            }
+        }
         let assembly = shy::emit(
             &lowered.module,
             &shy::Options {
@@ -1030,7 +1062,7 @@ fn probe_round(options: &Options) -> Result<(), String> {
             },
         )
         .map_err(|error| sources.render(&error))?;
-        let trampoline = probe::emit_probe_asm(&lowered, &program.calls)
+        let trampoline = probe::emit_probe_asm(&lowered, &program.calls, target.layout)
             .map_err(|reason| format!("{}: probe trampoline: {reason}", options.input.display()))?;
         let manifest = round_manifest(&parsed, &sources)?;
         fs::write(manifest_path, manifest)
@@ -1043,6 +1075,18 @@ fn probe_round(options: &Options) -> Result<(), String> {
                 .map_err(|error| format!("{}: {error}", path.display()));
         }
         return write_output(options.output.as_deref(), &assembly);
+    }
+    // A const fn whose result is a pointer, or holds one, cannot be folded:
+    // it stays an ordinary function call, and an address the probe image
+    // computes only exists in that image.
+    for function in &parsed.const_fns {
+        if let Some(reason) = probe::declared_address(function, &parsed.unit) {
+            let warning = Diagnostic::new(
+                function.span,
+                format!("const fn '{}' {reason}", function.name),
+            );
+            eprintln!("warning: {}", sources.render(&warning));
+        }
     }
     // Nothing is left to ask, so this unit is the program: the selected stage
     // renders it exactly as it would without probe rounds.
@@ -1066,7 +1110,7 @@ fn probe_round(options: &Options) -> Result<(), String> {
                 &mut sources,
             )?
         }
-        _ => {
+        stage => {
             let startup = if attributes.no_main || options.freestanding {
                 StartupMode::Manual
             } else {
@@ -1082,10 +1126,14 @@ fn probe_round(options: &Options) -> Result<(), String> {
                     disable_nonexhaustive_switch: attributes.disable_nonexhaustive_switch,
                     disable_rustic_mut: attributes.disable_rustic_mut,
                     disable_default_static: attributes.disable_default_static,
+                    allow_defer_copy: attributes.allow_defer_copy,
                     exports: Vec::new(),
                 },
             )
             .map_err(|error| sources.render(&error))?;
+            for warning in &lowered.warnings {
+                eprintln!("warning: {}", sources.render(warning));
+            }
             lowered.module.resources.memory_bytes = attributes.memory.map(u64::from);
             lowered.module.resources.stack_bytes = attributes.stack.map(u64::from);
             if options.opt_level > 0 {
@@ -1093,14 +1141,25 @@ fn probe_round(options: &Options) -> Result<(), String> {
                     passes::optimize(function, options.opt_level);
                 }
             }
-            shy::emit(
-                &lowered.module,
-                &shy::Options {
-                    layout: target.layout,
-                    emit_source_comments: false,
-                },
-            )
-            .map_err(|error| sources.render(&error))?
+            if stage == Stage::Emit(Backend::Llvm) {
+                llvm::emit(
+                    &lowered.module,
+                    &llvm::Options {
+                        triple: target.triple.clone(),
+                        layout: target.layout,
+                    },
+                )
+                .map_err(|error| sources.render(&error))?
+            } else {
+                shy::emit(
+                    &lowered.module,
+                    &shy::Options {
+                        layout: target.layout,
+                        emit_source_comments: false,
+                    },
+                )
+                .map_err(|error| sources.render(&error))?
+            }
         }
     };
     // A round that reaches here has no request, so the manifest is header-only

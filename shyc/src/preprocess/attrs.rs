@@ -98,6 +98,29 @@ impl Preprocessor<'_> {
                 }
                 self.attributes.disable_rustic_mut = true;
             }
+            "allow" => {
+                let expected = [
+                    TokenKind::Ident("allow".to_string()),
+                    TokenKind::Punct("(".to_string()),
+                    TokenKind::Ident("defer_copy".to_string()),
+                    TokenKind::Punct(")".to_string()),
+                ];
+                if inside.len() != expected.len()
+                    || !inside
+                        .iter()
+                        .zip(expected.iter())
+                        .all(|(token, expected)| token.kind == *expected)
+                {
+                    return Err(Diagnostic::new(*span, "expected #![allow(defer_copy)]"));
+                }
+                if self.attributes.allow_defer_copy {
+                    return Err(Diagnostic::new(
+                        *span,
+                        "duplicate Shy #![allow(defer_copy)] attribute",
+                    ));
+                }
+                self.attributes.allow_defer_copy = true;
+            }
             "mem" | "stack" => {
                 let value = parse_size_attribute(inside, *span, name)?;
                 let slot = if name == "mem" {

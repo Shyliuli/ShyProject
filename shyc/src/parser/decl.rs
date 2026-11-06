@@ -46,7 +46,14 @@ impl Parser {
     /// `impl` block, a `trait` declaration, or a `use` import.
     pub(crate) fn item(&mut self) -> Result<Item, Diagnostic> {
         self.declaration_attributes()?;
-        let item = self.item_body()?;
+        let mut item = self.item_body()?;
+        if self.pending_args_builtin {
+            return Err(Diagnostic::new(
+                self.here(),
+                "`#[args_builtin]` applies to a non-generic struct definition",
+            ));
+        }
+        self.apply_defer_copy_attribute(&mut item)?;
         self.record_token_builtin(&item)?;
         Ok(item)
     }
@@ -58,22 +65,76 @@ impl Parser {
     fn declaration_attributes(&mut self) -> Result<(), Diagnostic> {
         while self.at_punct("#") {
             self.bump();
-            self.expect_punct("[")?;
-            let name = self.expect_ident()?;
-            self.expect_punct("]")?;
-            match name.text.as_str() {
+            let (name, argument, span) = self.attribute()?;
+            match name.as_str() {
                 "result_niche" => self.pending_enum_niche = true,
                 "option_niche" => self.pending_option_niche = true,
-                "const_fn_token_builtin" => self.pending_token_builtin = Some(name.span),
+                "args_builtin" => self.pending_args_builtin = true,
+                "const_fn_token_builtin" => self.pending_token_builtin = Some(span),
+                "allow" => {
+                    if argument.as_deref() != Some("defer_copy") {
+                        return Err(Diagnostic::new(span, "expected #[allow(defer_copy)]"));
+                    }
+                    self.pending_allow_defer_copy = true;
+                }
                 other => {
                     return Err(Diagnostic::new(
-                        name.span,
+                        span,
                         format!("unknown declaration attribute '#[{other}]'"),
                     ));
                 }
             }
         }
         Ok(())
+    }
+
+    /// Reads one `#[name]` or `#[name(argument)]` attribute; the `#` is already
+    /// consumed.
+    pub(crate) fn attribute(&mut self) -> Result<(String, Option<String>, Span), Diagnostic> {
+        self.expect_punct("[")?;
+        let name = self.expect_ident()?;
+        let argument = if self.at_punct("(") {
+            self.bump();
+            let argument = self.expect_ident()?;
+            self.expect_punct(")")?;
+            Some(argument.text)
+        } else {
+            None
+        };
+        self.expect_punct("]")?;
+        Ok((name.text, argument, name.span))
+    }
+
+    /// Applies `#[allow(defer_copy)]` to the function or impl block behind it.
+    fn apply_defer_copy_attribute(&mut self, item: &mut Item) -> Result<(), Diagnostic> {
+        if !self.pending_allow_defer_copy {
+            return Ok(());
+        }
+        self.pending_allow_defer_copy = false;
+        match item {
+            Item::Function(function) => {
+                function.allow_defer_copy = true;
+                Ok(())
+            }
+            Item::Impl(block) => {
+                for method in &mut block.methods {
+                    method.allow_defer_copy = true;
+                }
+                Ok(())
+            }
+            Item::Decl(declaration) => Err(Diagnostic::new(
+                declaration.span,
+                "`#[allow(defer_copy)]` applies to a function or an impl block",
+            )),
+            Item::Trait(declaration) => Err(Diagnostic::new(
+                declaration.span,
+                "`#[allow(defer_copy)]` applies to a function or an impl block",
+            )),
+            Item::Use(declaration) => Err(Diagnostic::new(
+                declaration.span,
+                "`#[allow(defer_copy)]` applies to a function or an impl block",
+            )),
+        }
     }
 
     /// Records the function `#[const_fn_token_builtin]` marked.
@@ -160,6 +221,7 @@ impl Parser {
                 span: specs.span,
                 specs,
                 declarators: Vec::new(),
+                is_defer: false,
             }));
         }
 
@@ -188,6 +250,7 @@ impl Parser {
             span: specs.span.join(semicolon),
             specs,
             declarators,
+            is_defer: false,
         }))
     }
 
@@ -283,6 +346,7 @@ impl Parser {
                 span: specs.span,
                 specs,
                 declarators: Vec::new(),
+                is_defer: false,
             });
         }
 
@@ -299,6 +363,7 @@ impl Parser {
             span: specs.span.join(semicolon),
             specs,
             declarators,
+            is_defer: false,
         })
     }
 
@@ -375,6 +440,7 @@ impl Parser {
             specs,
             declarator,
             body,
+            allow_defer_copy: false,
         })
     }
 
@@ -479,6 +545,7 @@ impl Parser {
                 specs,
                 declarator,
                 body,
+                allow_defer_copy: false,
             })
         } else {
             let semicolon = self.expect_punct(";")?;
@@ -490,6 +557,7 @@ impl Parser {
                     declarator,
                     init: None,
                 }],
+                is_defer: false,
             })
         };
         self.pop_scope();
@@ -497,8 +565,8 @@ impl Parser {
     }
 
     /// One method of an `impl` block, in `fn` or C spelling. A `;` instead of
-    /// a body makes a prototype; `allow_prototype` is false for generic and
-    /// trait impls, whose methods are always defined where they are written.
+    /// a body makes a prototype; `allow_prototype` is false for a generic impl,
+    /// whose methods are instantiated from the body wherever the impl is used.
     fn impl_method(
         &mut self,
         allow_prototype: bool,
@@ -521,6 +589,7 @@ impl Parser {
                         specs,
                         declarator,
                         body,
+                        allow_defer_copy: false,
                     });
                 })
             } else {
@@ -540,7 +609,9 @@ impl Parser {
         } else {
             Err(Diagnostic::new(
                 self.here(),
-                "methods of a generic or trait impl must have a body",
+                "a generic impl is instantiated in every translation unit that uses it, so \
+                 its methods must have a body; a concrete receiver, such as a typedef of one \
+                 instance, can be declared in a header and defined in one source file",
             ))
         };
         if is_fn {
@@ -585,7 +656,7 @@ impl Parser {
             self.expect_punct("{")?;
 
             self.impl_depth += 1;
-            let allow_prototype = generics.is_empty() && trait_name.is_none();
+            let allow_prototype = generics.is_empty();
             let mut methods = Vec::new();
             let mut prototypes = Vec::new();
             let parsed = (|| {

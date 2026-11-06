@@ -2,10 +2,44 @@
 #define SHY_STD_IO_SHYH
 
 #include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <core/result.shyh>
 #include <alloc/string.shyh>
 
-/* Everything left in the stream, up to the end of input. */
-fn read_to_string(FILE *f) -> String;
+/* Why a file operation failed. A bare machine has no file system, so open()
+   fails there for every path. */
+enum IoError {
+    OpenFailed,
+    ReadFailed,
+    WriteFailed
+};
+
+/* An open file. Its only field is the descriptor the C library returned, so
+   the layout is the same as the `int` a C caller sees. */
+struct File {
+    int fd;
+};
+
+impl File {
+    /* Open an existing file for reading. */
+    fn open(const char *path) -> Result<File, IoError>;
+    /* Create or truncate a file for writing. */
+    fn create(const char *path) -> Result<File, IoError>;
+    /* Read up to max_len bytes: a positive count, 0 at end of file, and a
+       negative value on error. */
+    fn read(self *f, char *data, int max_len) -> int;
+    /* Everything left from the current position, or the error that stopped
+       the read. */
+    fn read_to_string(self *f) -> Result<String, IoError>;
+    /* Write every byte, or report the first failure. */
+    fn write_all(self *f, Str text) -> Result<void, IoError>;
+    /* Close the descriptor. Closing twice is harmless. */
+    fn close(self *f);
+}
+
+/* Everything left in a stdio stream, up to the end of input. */
+fn read_stream(FILE *f) -> String;
 
 /* A cursor over an immutable Str. The view is not advanced; the cursor is. */
 struct StrReader {

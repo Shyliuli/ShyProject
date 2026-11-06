@@ -19,6 +19,19 @@ pub(crate) fn is_64(ty: Type) -> bool {
     matches!(ty, Type::I64 | Type::F64)
 }
 
+/// Bytes a scalar value moves through memory.
+///
+/// A pointer object is as wide as the data model says, but the address it
+/// holds is one 32-bit ShyISA word at the object's start, so a load or a
+/// store moves only that word.
+pub(crate) fn scalar_bytes(ty: Type, layout: Layout) -> u32 {
+    if ty.is_pointer() {
+        4
+    } else {
+        ty.size(layout).unwrap_or(0)
+    }
+}
+
 fn align_up(value: u32, align: u32) -> u32 {
     if align <= 1 {
         value

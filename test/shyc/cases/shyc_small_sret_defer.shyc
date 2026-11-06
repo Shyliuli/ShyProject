@@ -12,7 +12,7 @@ Guard make_guard(int value) {
 int main(void) {
   drops = 0;
   {
-    Guard g = make_guard(7);
+    defer Guard g = make_guard(7);
     if (drops != 0)
       return 1;
     if (g.value != 7)

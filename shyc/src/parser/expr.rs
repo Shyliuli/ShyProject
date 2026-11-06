@@ -591,6 +591,32 @@ impl Parser {
         args: Vec<Expr>,
         span: Span,
     ) -> Result<Expr, Diagnostic> {
+        // `writeln!` takes the destination first, so its literal format
+        // string is the second argument. The writer is one ordinary expression:
+        // the expansion stores it in a local, which evaluates it exactly once.
+        if name.text == "writeln" {
+            if args.len() < 2 {
+                return Err(Diagnostic::new(
+                    span,
+                    "macro 'writeln!' takes a writer and a format string",
+                ));
+            }
+            let writer = args[0].clone();
+            let literal = match &args[1] {
+                Expr::String(group) => Some(string_value(group)?),
+                _ => None,
+            };
+            let Some(text) = literal else {
+                return Err(Diagnostic::new(
+                    name.span,
+                    "the format string of 'writeln!' must be a literal",
+                ));
+            };
+            let parts = split_format(&text, args.len() - 2, name.span)?;
+            let actions = format_actions(parts, args[2..].to_vec(), name.span)?;
+            self.record_macro_site(&name.text.clone(), name.span, "fmt_begin");
+            return Ok(self.format_statement(&name, actions, Some(writer), span));
+        }
         let Some(format) = args.first() else {
             return Err(Diagnostic::new(
                 span,
@@ -619,7 +645,7 @@ impl Parser {
                     "fmt_begin"
                 };
                 self.record_macro_site(&name.text.clone(), name.span, entry);
-                Ok(self.format_statement(&name, actions, span))
+                Ok(self.format_statement(&name, actions, None, span))
             }
             "scanln" => {
                 if args.len() - 1 > 8 {
@@ -656,14 +682,23 @@ impl Parser {
         }
     }
 
-    /// The statement expression a \`println!\` or \`format!\` call stands for.
-    fn format_statement(&mut self, name: &Name, actions: Vec<FormatAction>, span: Span) -> Expr {
+    /// The statement expression a println!, writeln!, or format! call stands
+    /// for. A writeln! fills the same String and hands it to the writer the
+    /// call named, then frees it; format! returns it to the caller.
+    fn format_statement(
+        &mut self,
+        name: &Name,
+        actions: Vec<FormatAction>,
+        writer: Option<Expr>,
+        span: Span,
+    ) -> Expr {
         self.macro_index += 1;
         let out = Name::new(format!("__fmt_out_{}", self.macro_index), span);
         let mut stmts = Vec::with_capacity(actions.len() + 2);
         stmts.push(Stmt::Let(LetDecl {
             span,
             is_mut: true,
+            is_defer: false,
             name: out.clone(),
             init: plain_call("fmt_begin", Vec::new(), span),
         }));
@@ -693,12 +728,64 @@ impl Parser {
                 }
             }
         }
-        let tail = if name.text == "println" {
-            plain_call("fmt_line", vec![address_of(&out, span)], span)
+        if let Some(writer) = writer {
+            // One local for the destination expression: it is evaluated here,
+            // once, and every call below uses that same value.
+            let writer_name = Name::new(format!("__fmt_writer_{}", self.macro_index), span);
+            stmts.push(Stmt::Let(LetDecl {
+                span,
+                is_mut: true,
+                is_defer: false,
+                name: writer_name.clone(),
+                init: writer,
+            }));
+            let written = Name::new(format!("__fmt_written_{}", self.macro_index), span);
+            stmts.push(Stmt::Let(LetDecl {
+                span,
+                is_mut: false,
+                is_defer: false,
+                name: written.clone(),
+                init: method_call(
+                    &writer_name,
+                    "write_line",
+                    vec![address_of(&out, span)],
+                    span,
+                ),
+            }));
+            stmts.push(Stmt::Expr {
+                expr: method_call(&out, "free", Vec::new(), span),
+                span,
+            });
+            stmts.push(Stmt::Expr {
+                expr: Expr::Name(written),
+                span,
+            });
+        } else if name.text == "println" {
+            // println! writes the line itself, so it keeps the count the
+            // writer returned and frees the temporary String before handing
+            // that count back to the caller.
+            let written = Name::new(format!("__fmt_written_{}", self.macro_index), span);
+            stmts.push(Stmt::Let(LetDecl {
+                span,
+                is_mut: false,
+                is_defer: false,
+                name: written.clone(),
+                init: plain_call("fmt_line", vec![address_of(&out, span)], span),
+            }));
+            stmts.push(Stmt::Expr {
+                expr: method_call(&out, "free", Vec::new(), span),
+                span,
+            });
+            stmts.push(Stmt::Expr {
+                expr: Expr::Name(written),
+                span,
+            });
         } else {
-            Expr::Name(out)
-        };
-        stmts.push(Stmt::Expr { expr: tail, span });
+            stmts.push(Stmt::Expr {
+                expr: Expr::Name(out),
+                span,
+            });
+        }
         Expr::StatementExpr {
             block: Block { span, stmts },
             span,

@@ -78,10 +78,13 @@ pub fn emit(
     module: &crate::ir::Module,
     options: &Options,
 ) -> Result<String, crate::source::Diagnostic> {
-    if options.layout.pointer_bytes != 4 || options.layout.pointer_align != 4 {
-        return Err(error(
-            "the Shy backend requires the 32-bit ShyISA pointer layout",
-        ));
+    // ShyISA addresses are 32 bits, but a pointer object follows the data
+    // model: a probe image for a 64-bit program keeps eight-byte pointer
+    // fields and stores the 32-bit address in the first of them.
+    if !matches!(options.layout.pointer_bytes, 4 | 8)
+        || options.layout.pointer_align != options.layout.pointer_bytes
+    {
+        return Err(error("the Shy backend requires 32-bit or 64-bit pointers"));
     }
     let mut writer = Writer {
         module,

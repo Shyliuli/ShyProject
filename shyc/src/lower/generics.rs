@@ -16,10 +16,12 @@
 //! type are not inferred; such a call names the parameter and asks for explicit
 //! generic arguments.
 //!
-//! `impl<T> Box<T>` (or `impl Box<T>`) is the same kind of template. A method
-//! lookup on one concrete record instance unifies the impl target against that
-//! record's own arguments and registers one ordinary function per method with
-//! an internal symbol naming the receiver. A method body is only lowered when
+//! `impl<T> Box<T>` (or `impl Box<T>`) is the same kind of template. The target
+//! may be a generic record or a generic enum, so `Option<T>` and
+//! `Result<T, E>` carry their methods the same way. A method lookup on one
+//! concrete instance unifies the impl target against that instance's own
+//! arguments and registers one ordinary function per method with an internal
+//! symbol naming the receiver. A method body is only lowered when
 //! a lookup asks for it, so an instance compiles exactly the methods it uses.
 //! A generic impl target may reorder or repeat its parameters, as in
 //! `impl<T, U> Trait for Pair<U, T>`, and it may mix them with concrete,
@@ -282,24 +284,34 @@ impl Lowerer {
         let Some(generic) = generic_impl_target(&block.self_type) else {
             return Err(Diagnostic::new(
                 block.self_type.span,
-                "a generic impl target must name a generic record, as in 'impl<T> Box<T>'",
+                "a generic impl target must name a generic record or enum, as in 'impl<T> Box<T>'",
             ));
         };
-        let Some(record) = self.generic_records.get(&generic.name.text) else {
-            return Err(Diagnostic::new(
-                generic.name.span,
-                format!("'{}' is not a generic record", generic.name.text),
-            ));
+        // The target may be a generic record or a generic enum; both kinds
+        // keep their parameter list the same way, and both are receivers a
+        // method can be implemented for.
+        let params = match (
+            self.generic_records.get(&generic.name.text),
+            self.generic_enums.get(&generic.name.text),
+        ) {
+            (Some(record), _) => record.params.clone(),
+            (None, Some(enumeration)) => enumeration.params.clone(),
+            (None, None) => {
+                return Err(Diagnostic::new(
+                    generic.name.span,
+                    format!("'{}' is not a generic record or enum", generic.name.text),
+                ));
+            }
         };
-        if generic.args.len() != record.params.len() {
+        if generic.args.len() != params.len() {
             return Err(Diagnostic::new(
                 block.self_type.span,
                 format!(
-                    "generic impl for '{}' names {} argument(s), but the record has {} \
+                    "generic impl for '{}' names {} argument(s), but the target has {} \
                      parameter(s)",
                     generic.name.text,
                     generic.args.len(),
-                    record.params.len()
+                    params.len()
                 ),
             ));
         }
@@ -327,7 +339,7 @@ impl Lowerer {
         // instantiation, when every file-scope name exists.
         for (position, argument) in generic.args.iter().enumerate() {
             let actual = generic_argument_kind(argument);
-            let expected = &record.params[position].kind;
+            let expected = &params[position].kind;
             if &actual != expected {
                 return Err(Diagnostic::new(
                     argument.span,
@@ -537,7 +549,7 @@ impl Lowerer {
         let Some(generic) = generic_impl_target(type_name) else {
             return Err(Diagnostic::new(
                 type_name.span,
-                "a generic impl target must name a generic record, as in 'impl<T> Box<T>'",
+                "a generic impl target must name a generic record or enum, as in 'impl<T> Box<T>'",
             ));
         };
         let mut arguments = Vec::with_capacity(generic.args.len());
@@ -825,6 +837,20 @@ impl Lowerer {
                     args,
                 };
                 for method in &template.block.methods {
+                    // A parameter type may collapse to `void`, which no C
+                    // parameter can have: `Result<void, E>::unwrap_or` takes a
+                    // `T` fallback. Such a method is left out of this instance
+                    // instead of making the whole impl unusable, and a call to
+                    // it reports why.
+                    if generic_declarator(&method.declarator).is_none()
+                        && let Some(error) = self.method_signature_error(method)
+                    {
+                        if let Some(name) = &method.declarator.name {
+                            self.unavailable_methods
+                                .insert((record, name.text.clone()), error);
+                        }
+                        continue;
+                    }
                     self.collect_function(
                         method,
                         Some(super::ImplTarget {
@@ -848,7 +874,14 @@ impl Lowerer {
                     )?;
                 }
                 if let Some((trait_name, info, _)) = &trait_info {
-                    self.check_impl_method_names(&template.block, trait_name, info, record_name)?;
+                    self.check_impl_method_names(
+                        &template.block,
+                        trait_name,
+                        info,
+                        record_name,
+                        record,
+                        trait_impl.as_ref(),
+                    )?;
                     self.check_impl_signatures(
                         &template.block,
                         trait_name,
@@ -877,6 +910,17 @@ impl Lowerer {
         Ok(())
     }
 
+    /// Why one method of a materialized generic impl cannot declare its
+    /// signature for these arguments, if it cannot.
+    fn method_signature_error(&mut self, method: &ast::FunctionDecl) -> Option<Diagnostic> {
+        let resolved = (|| {
+            let ResolvedSpecs { ty, qualifiers } = self.resolve_specs(&method.specs)?;
+            self.resolve_declarator(ty, qualifiers, &method.declarator)?;
+            Ok::<(), Diagnostic>(())
+        })();
+        resolved.err()
+    }
+
     /// A readable spelling of one concrete generic argument for a diagnostic.
     fn generic_arg_text(&self, argument: GenericArgKey) -> String {
         match argument {
@@ -885,12 +929,17 @@ impl Lowerer {
         }
     }
 
-    /// The instantiation key of a concrete record, when it came from a generic
-    /// record template.
+    /// The instantiation key of a concrete type, when it came from a generic
+    /// record or enum template.
     pub(super) fn record_instance_key(&self, record: TypeId) -> Option<InstanceKey> {
         self.record_instances
             .iter()
             .find_map(|(key, instance)| (*instance == record).then(|| key.clone()))
+            .or_else(|| {
+                self.enum_instances
+                    .iter()
+                    .find_map(|(key, instance)| (*instance == record).then(|| key.clone()))
+            })
     }
 
     /// Deterministic internal symbol for one method of one materialized impl.

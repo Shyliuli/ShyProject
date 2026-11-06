@@ -17,6 +17,7 @@ use shy_isa_lib::address::Address;
 use shy_isa_lib::op::OpType;
 
 use crate::probe;
+use crate::user;
 
 /// 默认内存大小：32MiB。
 pub const DEFAULT_MEM_SIZE: u32 = 0x0200_0000;
@@ -186,6 +187,10 @@ pub struct Emu {
     sege: u32,
     mem_size: u32,
     mem: Vec<u8>,
+    /// 已加载镜像的字节数，用户态堆从它后面开始。
+    image_len: usize,
+    /// 设置后以用户态进程运行：syscall 直接交给宿主，见 `crate::user`。
+    user: Option<user::UserMode>,
     instr_cache: Vec<Option<CachedInstr>>,
     trap_stack: Vec<u32>,
     timer_pending: bool,
@@ -219,6 +224,8 @@ impl Emu {
             sege: mem_size,
             mem_size,
             mem: vec![0; mem_size as usize],
+            image_len: 0,
+            user: None,
             instr_cache: vec![None; INSTR_CACHE_ENTRIES],
             trap_stack: Vec::new(),
             timer_pending: false,
@@ -808,8 +815,24 @@ impl Emu {
             );
         }
         self.mem[..image.len()].copy_from_slice(image);
+        self.image_len = image.len();
         self.clear_instr_cache();
         Ok(())
+    }
+
+    /// 以用户态进程启动：sp 以上是空闲栈，4x/5x/6x 给出 argc/argv/envp。
+    ///
+    /// 段映射保持一一对应，之后每条 `syscall` 都由宿主执行。
+    pub fn enter_user(&mut self, entry: user::Entry) {
+        self.regs[4] = entry.argc;
+        self.regs[5] = entry.argv;
+        self.regs[6] = entry.envp;
+        self.sp = entry.sp;
+        self.segs = 0;
+        self.sege = self.mem_size;
+        self.status = 0b01;
+        self.user = Some(user::UserMode::new(self.image_len as u32, entry.data_start));
+        self.clear_instr_cache();
     }
 
     pub fn pc(&self) -> u32 {
@@ -930,6 +953,9 @@ impl Emu {
                 pc: self.pc,
             });
             return;
+        }
+        if self.user.is_some() {
+            panic!("user process trapped without a kernel: cause={cause:?}, EPC=0x{epc:08X}");
         }
         if self.trap < SPECIAL_TOP {
             panic!(
@@ -1190,7 +1216,12 @@ impl Emu {
             0x16..=0x19 => self.music[(addr - 0x16) as usize] = val,
             0x1A => self.rs = val,
             0x1B if self.is_user() => {
-                // 用户态写 EXIT 是退出请求，不是停机。内核结束当前进程，
+                // shyemu-user 没有内核，用户程序写 EXIT 就是进程结束。
+                if self.user.is_some() {
+                    self.exit_code = Some(val);
+                    return Ok(());
+                }
+                // 有内核时写 EXIT 是退出请求，不是停机。内核结束当前进程，
                 // 否则一个用户程序就能把整个操作系统停掉。退出码放在 0x，
                 // trap 处理函数的第一个参数就是它。
                 self.regs[0] = val;
@@ -1743,6 +1774,26 @@ impl Emu {
             OpType::Syscall => {
                 if self.probe.is_some() {
                     return self.probe_syscall(cur);
+                }
+                if let Some(mut process) = self.user.take() {
+                    let number = self.regs[0];
+                    let args = [
+                        self.regs[1],
+                        self.regs[2],
+                        self.regs[3],
+                        self.regs[4],
+                        self.regs[5],
+                        self.regs[6],
+                    ];
+                    match process.syscall(self, number, args) {
+                        user::Outcome::Return(value) => {
+                            self.regs[1] = value;
+                            self.pc = cur.wrapping_add(12);
+                            self.user = Some(process);
+                            return Flow::Continue;
+                        }
+                        user::Outcome::Exit(code) => return Flow::Exit(code),
+                    }
                 }
                 let epc = cur.wrapping_add(12);
                 return Flow::Trap {

@@ -10,7 +10,7 @@
 use super::{ExprKind, ExprVal, FnLower, FunctionInstance};
 use crate::ast;
 use crate::ir;
-use crate::sema::types::{Qualifiers, TypeId, TypeKind};
+use crate::sema::types::{Builtin, Qualifiers, TypeId, TypeKind};
 use crate::source::{Diagnostic, Span};
 
 pub(super) struct MemberTarget {
@@ -111,11 +111,16 @@ impl FnLower<'_> {
                             format!("payload enum has no variant '{}'", name.text),
                         )
                     })?;
+                // A payload-free variant stores nothing, so reading its
+                // payload yields no value. A generic payload that collapsed to
+                // `void` reaches this point, and `return o.payload.Some;` in a
+                // `-> T` method is then a plain `void` return.
                 let Some(payload_ty) = variant.payload else {
-                    return Err(Diagnostic::new(
-                        name.span,
-                        format!("variant '{}' has no payload", name.text),
-                    ));
+                    return Ok(Some(ExprVal {
+                        ty: self.l.types.builtin(Builtin::Void),
+                        qualifiers,
+                        kind: ExprKind::Void,
+                    }));
                 };
                 let payload_offset = self
                     .l
@@ -186,6 +191,30 @@ impl FnLower<'_> {
             };
         }
         Err(Diagnostic::new(span, "member access needs a payload enum"))
+    }
+
+    /// The tag constant a bare variant name denotes.
+    ///
+    /// A variant with a payload cannot be built without one, so the name alone
+    /// is its tag: `o.tag != Option<Str>::Some`. `case Enum::Variant:` already
+    /// reads the same way through constant evaluation.
+    pub(super) fn variant_tag_value(
+        &mut self,
+        variant: &super::type_of::ScopedVariant,
+        span: Span,
+    ) -> Result<ExprVal, Diagnostic> {
+        let underlying = self
+            .l
+            .types
+            .enum_underlying(variant.ty)
+            .ok_or_else(|| Diagnostic::new(span, "payload enum has no underlying type"))?;
+        let operand =
+            ir::Operand::Constant(ir::Constant::int(self.l.ir_type(underlying), variant.tag));
+        Ok(ExprVal {
+            ty: underlying,
+            qualifiers: Qualifiers::NONE,
+            kind: ExprKind::Value(operand),
+        })
     }
 
     /// Build a payload enum value: zero the whole object, store the tag, then
@@ -421,7 +450,7 @@ impl FnLower<'_> {
             {
                 return self.lower_generic_method_call(object, name, *op, instance, args, span);
             }
-            return self.lower_instance_call(instance, args, span);
+            return self.lower_instance_call(callee, instance, args, span);
         }
         // A template name with no written type arguments infers them from the
         // value arguments, then calls the one instance those arguments name. A
@@ -432,7 +461,14 @@ impl FnLower<'_> {
             && self.l.is_inferred_generic_call(&name.text)
         {
             let instance = self.infer_generic_call(name, args)?;
-            return self.lower_instance_call(instance, args, span);
+            return self.lower_instance_call(callee, instance, args, span);
+        }
+        if let ast::Expr::Member {
+            object, name, op, ..
+        } = callee
+            && name.text == "move"
+        {
+            return self.lower_defer_move(object, *op, args, span);
         }
         if let ast::Expr::Member {
             object, name, op, ..
@@ -446,7 +482,6 @@ impl FnLower<'_> {
                     let step_op = if index == 0 { *op } else { ast::MemberOp::Dot };
                     receiver = self.lower_method_call_value(
                         receiver,
-                        None,
                         &step_name,
                         step_op,
                         step.method.clone(),
@@ -461,7 +496,6 @@ impl FnLower<'_> {
                 };
                 return self.lower_method_call_value(
                     receiver,
-                    Some(object),
                     name,
                     method_op,
                     resolved.method,
@@ -480,7 +514,7 @@ impl FnLower<'_> {
             {
                 return self.lower_generic_method_call(object, name, *op, instance, args, span);
             }
-            return self.lower_instance_call(instance, args, span);
+            return self.lower_instance_call(callee, instance, args, span);
         }
         if let ast::Expr::ScopedName {
             qualifier,
@@ -687,12 +721,22 @@ impl FnLower<'_> {
     }
 
     /// Lower a call through one already instantiated generic function.
+    ///
+    /// The C export names the call the way the compiler resolved it: one
+    /// template has one symbol per instance, so the callee's name alone cannot
+    /// say which symbol a call reaches.
     fn lower_instance_call(
         &mut self,
+        callee: &ast::Expr,
         instance: FunctionInstance,
         args: &[ast::Expr],
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
+        if let ast::Expr::Name(name) = callee {
+            self.l
+                .call_symbols
+                .insert((span, name.text.clone()), instance.symbol.clone());
+        }
         let (params, variadic) = self.function_params(instance.ty, span)?;
         let operands = self.lower_arguments(args, &params, variadic, span)?;
         self.emit_call(
@@ -759,13 +803,12 @@ impl FnLower<'_> {
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
         let object_value = self.lower_expr(object)?;
-        self.lower_method_call_value(object_value, Some(object), name, op, method, args, span)
+        self.lower_method_call_value(object_value, name, op, method, args, span)
     }
 
     pub(super) fn lower_method_call_value(
         &mut self,
         object_value: ExprVal,
-        object_expr: Option<&ast::Expr>,
         name: &ast::Name,
         op: ast::MemberOp,
         method: super::MethodInfo,
@@ -883,16 +926,47 @@ impl FnLower<'_> {
             operands,
             span,
         )?;
-        if name.text == "drop"
-            && let Some(object) = object_expr
-            && let ast::Expr::Name(object_name) = object
-            && let Ok(super::Resolved::Local(local)) =
-                self.resolve_name(&object_name.text, object_name.span)
-            && self.locals[local].drop_symbol.is_some()
-        {
-            self.locals[local].drop_active = false;
-        }
         Ok(result)
+    }
+
+    /// `name.move()`: read a defer local and set its moved flag, so the scope's
+    /// exit drops skip it.
+    fn lower_defer_move(
+        &mut self,
+        object: &ast::Expr,
+        op: ast::MemberOp,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<ExprVal, Diagnostic> {
+        if !args.is_empty() {
+            return Err(Diagnostic::new(span, "move() takes no arguments"));
+        }
+        if op == ast::MemberOp::Arrow {
+            return Err(Diagnostic::new(
+                span,
+                "move() needs a variable declared with `defer`",
+            ));
+        }
+        let ast::Expr::Name(name) = object else {
+            return Err(Diagnostic::new(
+                object.span(),
+                "move() needs a variable declared with `defer`",
+            ));
+        };
+        let instruction = "move() needs a variable declared with `defer`";
+        let Ok(super::Resolved::Local(local)) = self.resolve_name(&name.text, name.span) else {
+            return Err(Diagnostic::new(name.span, instruction));
+        };
+        if self.locals[local].moved_slot.is_none() {
+            return Err(Diagnostic::new(
+                name.span,
+                format!(
+                    "'{}' is not a defer variable; .move() only applies to one",
+                    name.text
+                ),
+            ));
+        }
+        Ok(self.move_defer_local(local))
     }
 
     fn function_params(
@@ -932,9 +1006,6 @@ impl FnLower<'_> {
                             "argument type does not match the parameter type",
                         ));
                     }
-                    if self.l.drop_method(param)?.is_some() {
-                        self.deactivate_if_local(argument);
-                    }
                     operands.push(operand);
                 } else {
                     let (operand, ty) = self.rvalue(argument)?;
@@ -968,7 +1039,13 @@ impl FnLower<'_> {
         arguments: Vec<ir::Operand>,
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
-        let signature = self.l.ir_signature(function_ty);
+        // Only main expands an #[args_builtin] parameter into its fields.
+        let expand_args = matches!(&target, ir::CallTarget::Direct(symbol) if symbol == "main");
+        let mut arguments = arguments;
+        if expand_args {
+            arguments = self.expand_args_arguments(function_ty, arguments);
+        }
+        let signature = self.l.ir_signature(function_ty, expand_args);
         let TypeKind::Function { result, .. } = self.l.types.kind(function_ty) else {
             return Err(Diagnostic::new(span, "called object is not a function"));
         };
@@ -986,6 +1063,7 @@ impl FnLower<'_> {
             &extras,
             self.l.layout,
             self.l.abi,
+            expand_args,
         )
         .map_err(|error| Diagnostic::new(span, format!("cannot plan the target ABI: {error}")))?;
         let call = match target {
@@ -1018,5 +1096,37 @@ impl FnLower<'_> {
                 kind: ExprKind::Value(ir::Operand::Value(value)),
             })
         }
+    }
+
+    /// main's #[args_builtin] argument becomes its fields, so the call matches
+    /// the flattened signature. Any other argument passes through unchanged.
+    fn expand_args_arguments(
+        &mut self,
+        function_ty: TypeId,
+        arguments: Vec<ir::Operand>,
+    ) -> Vec<ir::Operand> {
+        let TypeKind::Function { params, .. } = self.l.types.kind(function_ty) else {
+            return arguments;
+        };
+        let params = params.clone();
+        let mut expanded = Vec::with_capacity(arguments.len());
+        let mut arguments = arguments.into_iter();
+        for param in params {
+            let Some(argument) = arguments.next() else {
+                break;
+            };
+            let Some(fields) = self.l.args_builtin_fields(param) else {
+                expanded.push(argument);
+                continue;
+            };
+            let slot = self.temp_slot(param, "");
+            self.store_value(ir::Address::slot(slot), argument, param, Qualifiers::NONE);
+            for (field_ty, offset) in fields {
+                let address = ir::Address::slot(slot).offset_by(i64::from(offset));
+                expanded.push(self.load_value(address, field_ty, Qualifiers::NONE));
+            }
+        }
+        expanded.extend(arguments);
+        expanded
     }
 }

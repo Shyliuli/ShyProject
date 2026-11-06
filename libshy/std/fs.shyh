@@ -1,12 +1,11 @@
 #ifndef SHY_STD_FS_SHYH
 #define SHY_STD_FS_SHYH
 
-#include <core/option.shyh>
-#include <alloc/string.shyh>
+#include <std/io.shyh>
 
-/* The whole file, or None when it cannot be opened. */
-fn read_file(const char *path) -> Option<String>;
+/* The whole file, or the error that stopped it. */
+fn read_to_string(Str path) -> Result<String, IoError>;
 /* 1 when every byte was written, 0 otherwise. */
-fn write_file(const char *path, Str text) -> int;
+fn write_file(Str path, Str text) -> int;
 
 #endif

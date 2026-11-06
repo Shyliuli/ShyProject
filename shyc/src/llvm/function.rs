@@ -92,7 +92,14 @@ impl Body<'_> {
             ),
             super::abi::Shape::Registers(chunks) => chunks[0].llvm_type(),
         };
-        let linkage = if function.internal { "internal " } else { "" };
+        // A `.L.` symbol is assembler-local: the object path accepts it, but
+        // text assembly rejects `.globl` on it, so it gets internal linkage
+        // like a private global does.
+        let linkage = if function.internal || function.name.starts_with(".L.") {
+            "internal "
+        } else {
+            ""
+        };
         let mut signature = format!("define {linkage}{ret_text} {}(", symbol(&function.name));
         let mut first = true;
         if sret {

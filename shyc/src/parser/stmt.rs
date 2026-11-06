@@ -13,6 +13,9 @@ use super::probe::{Answer, Place, ProbeRequest};
 impl Parser {
     /// One statement, including a declaration used as a statement.
     pub(crate) fn statement(&mut self) -> Result<Stmt, Diagnostic> {
+        if self.at_punct("#") {
+            return self.attributed_statement();
+        }
         if self.at_punct("{") {
             return Ok(Stmt::Block(self.block()?));
         }
@@ -22,6 +25,9 @@ impl Parser {
         if self.at_punct(";") {
             let span = self.bump().span;
             return Ok(Stmt::Empty(span));
+        }
+        if self.at_defer_declaration() {
+            return self.defer_statement();
         }
         if self.at_let_declaration() {
             return self.let_statement();
@@ -120,13 +126,61 @@ impl Parser {
     /// `let mut name` starts the inferred form. A visible typedef named `let`
     /// wins, so existing C declarations keep parsing as declarations.
     pub(crate) fn at_let_declaration(&self) -> bool {
-        if !self.at_ident("let") || self.is_type_name("let") {
+        self.at_let_declaration_at(0)
+    }
+
+    /// Whether the cursor `at` tokens ahead starts a `let` declaration.
+    fn at_let_declaration_at(&self, at: usize) -> bool {
+        if !self.at_ident_ahead(at, "let") {
             return false;
         }
-        if self.at_ident_ahead(1, "mut") {
-            return matches!(&self.peek_ahead(2).kind, TokenKind::Ident(name) if !is_keyword(name));
+        if at == 0 && self.is_type_name("let") {
+            return false;
         }
-        matches!(&self.peek_ahead(1).kind, TokenKind::Ident(name) if !is_keyword(name))
+        if self.at_ident_ahead(at + 1, "mut") {
+            return matches!(&self.peek_ahead(at + 2).kind, TokenKind::Ident(name) if !is_keyword(name));
+        }
+        matches!(&self.peek_ahead(at + 1).kind, TokenKind::Ident(name) if !is_keyword(name))
+    }
+
+    /// Whether the cursor starts a `defer` declaration.
+    ///
+    /// `defer` is a soft keyword, like `let`: it only starts a declaration when
+    /// a `let` or a type name follows, so an ordinary C identifier keeps its
+    /// meaning.
+    fn at_defer_declaration(&self) -> bool {
+        self.at_ident("defer") && (self.at_let_declaration_at(1) || self.starts_type_name(1))
+    }
+
+    /// `defer T name = ...;` or `defer let name = ...;`.
+    fn defer_statement(&mut self) -> Result<Stmt, Diagnostic> {
+        let start = self.bump().span;
+        if self.at_let_declaration() {
+            let Stmt::Let(mut declaration) = self.let_statement()? else {
+                unreachable!("let_statement returns Stmt::Let");
+            };
+            declaration.is_defer = true;
+            declaration.span = start.join(declaration.span);
+            return Ok(Stmt::Let(declaration));
+        }
+        let mut declaration = self.declaration()?;
+        declaration.is_defer = true;
+        declaration.span = start.join(declaration.span);
+        Ok(Stmt::Decl(declaration))
+    }
+
+    /// `#[allow(defer_copy)] statement`.
+    fn attributed_statement(&mut self) -> Result<Stmt, Diagnostic> {
+        let start = self.bump().span;
+        let (name, argument, span) = self.attribute()?;
+        if name != "allow" || argument.as_deref() != Some("defer_copy") {
+            return Err(Diagnostic::new(span, "expected #[allow(defer_copy)]"));
+        }
+        let inner = self.statement()?;
+        Ok(Stmt::AllowDeferCopy {
+            span: start.join(inner.span()),
+            stmt: Box::new(inner),
+        })
     }
 
     /// `let [mut] name = expr;`; the type is inferred from `expr` in lowering.
@@ -147,6 +201,7 @@ impl Parser {
         Ok(Stmt::Let(LetDecl {
             span: start.join(semicolon),
             is_mut,
+            is_defer: false,
             name,
             init,
         }))

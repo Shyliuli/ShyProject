@@ -252,6 +252,10 @@ pub(crate) struct Parser {
     pending_enum_niche: bool,
     /// `#[option_niche]` seen before the item currently being parsed.
     pending_option_niche: bool,
+    /// `#[args_builtin]` seen before the item currently being parsed.
+    pending_args_builtin: bool,
+    /// `#[allow(defer_copy)]` seen before the item currently being parsed.
+    pending_allow_defer_copy: bool,
     /// Name scopes, innermost last. `scopes[0]` is file scope.
     pub(crate) scopes: Vec<Scope>,
     /// Nesting depth of `impl` and `trait` bodies; `self` is a type only
@@ -719,6 +723,8 @@ impl Parser {
             angle_depth: 0,
             pending_enum_niche: false,
             pending_option_niche: false,
+            pending_args_builtin: false,
+            pending_allow_defer_copy: false,
             scopes: vec![Scope::default()],
             impl_depth: 0,
             prescan,

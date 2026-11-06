@@ -511,6 +511,7 @@ impl TypeStore {
         self.records.push(RecordInfo {
             fields: Vec::new(),
             is_flexible: false,
+            args_builtin: false,
         });
         push_type(&mut self.types, TypeKind::Record { id, kind }, None, None)
     }
@@ -722,6 +723,20 @@ impl TypeStore {
             TypeKind::Record { id, .. } => self.records.get(id.index()),
             _ => None,
         }
+    }
+
+    /// Marks the struct `#[args_builtin]` named, so main's parameter of this
+    /// type passes its fields one by one.
+    pub fn mark_args_builtin(&mut self, ty: TypeId) {
+        let index = match self.kind(ty) {
+            TypeKind::Record { id, .. } => id.index(),
+            _ => return,
+        };
+        self.records[index].args_builtin = true;
+    }
+
+    pub fn is_args_builtin(&self, ty: TypeId) -> bool {
+        self.record_info(ty).is_some_and(|info| info.args_builtin)
     }
 
     pub fn enum_info(&self, ty: TypeId) -> Option<&EnumInfo> {

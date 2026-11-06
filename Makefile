@@ -4,8 +4,8 @@ MAKE ?= make
 INSTALL ?= install
 
 BIN_DIR := target/bin
-TOOL_BINS := shyasm shyemu shyld shycc
-CHIBICC := third_party/chibicc/chibicc
+TOOL_BINS := shyasm shyemu shyemu-user shyld shycc
+LSP_DIR := vscode-shyc/server
 
 # C headers generated from the native ShyC headers. Order matters: stddef and
 # stdint are included by the others, so they are generated first. The list is
@@ -31,17 +31,18 @@ LIBSHY_INCLUDES := -Ilibshy/c -Ilibshy -Ilibshy/include
 SHYC_RELEASE := target/release/shyc
 SHYC_SOURCES := $(wildcard shyc/src/*.rs shyc/src/*/*.rs) shyc/Cargo.toml
 
-.PHONY: bin install-bin clean-bin test cargo-test test-chibicc-shy os-build os-run libshy-headers
+.PHONY: bin install-bin clean-bin test cargo-test test-shyc os-build os-run libshy-headers
 
 bin: libshy-headers $(BIN_DIR)
 	$(CARGO) build --release -p asm -p emu -p linker -p shycc -p shyc
-	$(MAKE) -C third_party/chibicc chibicc
+	$(CARGO) build --release --manifest-path $(LSP_DIR)/Cargo.toml
 	$(INSTALL) -m 0755 target/release/asm $(BIN_DIR)/shyasm
 	$(INSTALL) -m 0755 target/release/emu $(BIN_DIR)/shyemu
+	$(INSTALL) -m 0755 target/release/shyemu-user $(BIN_DIR)/shyemu-user
 	$(INSTALL) -m 0755 target/release/linker $(BIN_DIR)/shyld
 	$(INSTALL) -m 0755 target/release/shycc $(BIN_DIR)/shycc
 	$(INSTALL) -m 0755 target/release/shyc $(BIN_DIR)/shyc
-	$(INSTALL) -m 0755 $(CHIBICC) $(BIN_DIR)/chibicc
+	$(INSTALL) -m 0755 $(LSP_DIR)/target/release/shyc-lsp $(BIN_DIR)/shyc-lsp
 
 libshy-headers: $(LIBSHY_HEADERS)
 
@@ -63,7 +64,7 @@ libshy/core/%.h: libshy/core/%.shyh $(SHYC_RELEASE)
 
 install-bin: bin
 	$(INSTALL) -d $(DESTDIR)$(PREFIX)/bin
-	for bin in $(TOOL_BINS) shyc chibicc; do \
+	for bin in $(TOOL_BINS) shyc; do \
 		$(INSTALL) -m 0755 $(BIN_DIR)/$$bin $(DESTDIR)$(PREFIX)/bin/$$bin; \
 	done
 	printf '# Where this project'"'"'s C library lives, so the compiler can resolve\n# `use std::io::*;` from any directory.\nshylib = "%s"\n' "$(CURDIR)/libshy" > $(HOME)/.shycc.toml
@@ -71,13 +72,13 @@ install-bin: bin
 clean-bin:
 	rm -rf $(BIN_DIR)
 
-test: libshy-headers cargo-test test-chibicc-shy
+test: libshy-headers cargo-test test-shyc
 
 cargo-test:
 	$(CARGO) test
 
-test-chibicc-shy:
-	test/chibicc-shy/run.sh
+test-shyc:
+	test/shyc/run.sh
 
 os-build: libshy-headers
 	$(MAKE) -C projects/os build

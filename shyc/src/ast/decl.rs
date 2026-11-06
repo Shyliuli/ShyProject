@@ -59,6 +59,9 @@ pub struct Declaration {
     pub span: Span,
     pub specs: DeclSpecs,
     pub declarators: Vec<InitDeclarator>,
+    /// `defer T name ...;`: every object declared here is dropped when its
+    /// scope is left.
+    pub is_defer: bool,
 }
 
 /// One declarator plus its optional initializer.
@@ -83,6 +86,8 @@ pub struct FunctionDecl {
     pub specs: DeclSpecs,
     pub declarator: Declarator,
     pub body: Block,
+    /// `#[allow(defer_copy)]`: no by-value copy warning in this body.
+    pub allow_defer_copy: bool,
 }
 
 /// Shy's `impl Type { methods }` or `impl Trait for Type { methods }` block.

@@ -301,6 +301,35 @@ impl Lowerer {
         names
     }
 
+    /// The C spelling of every file-scope type the source named.
+    ///
+    /// The C source output declares a hand-written record or enum under its own
+    /// tag, so a layout that mentions one has to spell it that way instead of
+    /// synthesizing a name for it. An instantiated generic type has no file-scope
+    /// tag, so it keeps the printer's own name.
+    pub(super) fn add_source_type_names(&self, names: &mut HashMap<TypeId, CTypeName>) {
+        let Some(scope) = self.type_scopes.first() else {
+            return;
+        };
+        for (tag, ty) in &scope.tags {
+            let base = match self.types.kind(*ty) {
+                TypeKind::Record { kind, .. } => {
+                    let keyword = match kind {
+                        RecordKind::Struct => "struct",
+                        RecordKind::Union => "union",
+                    };
+                    format!("{keyword} {tag}")
+                }
+                TypeKind::Enum(_) | TypeKind::PayloadEnum(_) => tag.clone(),
+                _ => continue,
+            };
+            names.entry(*ty).or_insert(CTypeName {
+                base,
+                emit_header: false,
+            });
+        }
+    }
+
     /// Whether a plain record's definition mentions a generic instance, which
     /// makes the ordinary AST header skip it.
     fn record_mentions_instance(&self, ty: TypeId) -> bool {

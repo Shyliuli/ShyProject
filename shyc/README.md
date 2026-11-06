@@ -1,8 +1,7 @@
 # shyc
 
 `shyc` is an independent ShyC compiler: its own preprocessor, parser, type
-checker, typed IR, optimiser, and two code generators. It is the default
-backend of `shycc`; `--backend=chibicc` keeps the old bootstrap path.
+checker, typed IR, optimiser, and two code generators. `shycc` drives it.
 
 ## Pipeline
 
@@ -134,8 +133,15 @@ instance table or the type printer gave it, and `value?` expands to a statement
 expression whose failure arm returns the enclosing function's failure variant;
 `asm!` becomes a GCC extended asm statement. A generic function, method, or
 record is specialized on demand from the specializations the compiler already
-materialized, so C needs no template. The output is deterministic: one input
-prints one file.
+materialized, so C needs no template. A definition the output never names is not
+printed, so the file holds no dead static function. The output is deterministic:
+one input prints one file.
+
+The C source output takes the host data model when no `--target` is given: a
+host C compiler builds it, so its `size_t`, `long`, and pointer widths have to
+agree with the C library's own declarations. Name `--target` to print another
+model; `--emit=c-header` still defaults to the Shy model, because the committed
+`libshy/c` headers are generated that way.
 
 Options: `-I`, `-D name[=value]`, `-U name`, `-o file`, `--instances <file>`,
 `-O0`..`-O3`
@@ -167,7 +173,7 @@ The two backends have different C libraries, and each one gets its own default:
 
 | Backend | Default library | Turn it off |
 |---|---|---|
-| Shy (`--backend shyc`, `-S`) | libshy plus the soft-float runtime | `-nostdlib`, `-nodefaultlibs` |
+| Shy (`-S`) | libshy plus the soft-float runtime | `-nostdlib`, `-nodefaultlibs` |
 | LLVM (`--emit=llvm`) | the system libc, linked by `clang` | `clang -nostdlib` |
 
 `shycc` links libshy by default because it owns the whole Shy link step, and
@@ -199,8 +205,8 @@ Checked against clang for x86-64, aarch64, riscv64, and loongarch64.
 
 Working: integers, pointers, arrays, structs and unions, enums, control flow,
 direct and indirect calls, recursion, global initialisers with symbol
-relocations, ShyC's `impl`/`self`/`drop`, compile-time traits and trait values,
-and floating point through the soft-float runtime.
+relocations, ShyC's `impl`/`self`, deferred `drop`, compile-time traits and
+trait values, and floating point through the soft-float runtime.
 
 Generics are compile-time templates. `fn identity<T>(T value) -> T` and
 `struct Pair<T> { ... }` are instantiated on use; an explicit `identity<int>(1)`
@@ -277,10 +283,13 @@ diagnostic naming the method. Trait bounds on a generic method parameter and
 const generic parameters on a trait method are not implemented yet.
 
 `trait Drawable { void draw(self *value); }` declares method signatures, and
-`impl Drawable for Circle { ... }` checks that the implementation defines exactly
-those methods with matching signatures. A method of a concrete
-`impl Trait for Type` lowers to `____Trait__Type__method`, and a parameterized
-trait adds one `__tN` (type argument) or `__n<bits>` (`const` argument) part per
+`impl Drawable for Circle { ... }` checks that the implementation writes exactly
+those methods with matching signatures. A method may be declared without a body,
+in which case one translation unit defines it; a generic impl is materialized
+where it is used, so its methods always carry their bodies. A method of a
+concrete `impl Trait for Type` lowers to `____Trait__Type__method`, and a
+parameterized trait adds one `__tN` (type argument) or `__n<bits>` (`const`
+argument) part per
 resolved trait argument: `impl From<int> for Target` gives
 `____From__Target__from__tN`. A method of a materialized generic impl keeps an
 internal symbol that names the trait, its arguments, and the concrete receiver.
@@ -425,7 +434,7 @@ Floating point on the Shy target needs the runtime object linked in; build it
 once with the existing toolchain:
 
 ```sh
-target/bin/shycc -S third_party/chibicc/shy_runtime_softfloat.c -o float.shy
+target/bin/shycc -S third_party/shy_runtime_softfloat.c -o float.shy
 target/bin/shyasm float.shy -o float.sobj
 ```
 

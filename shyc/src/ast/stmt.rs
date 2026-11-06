@@ -71,6 +71,8 @@ pub struct LetDecl {
     pub span: Span,
     /// `true` for `let mut`, `false` for a read-only `let`.
     pub is_mut: bool,
+    /// `defer let ...`: the local is dropped when its scope is left.
+    pub is_defer: bool,
     pub name: Name,
     pub init: Expr,
 }
@@ -152,9 +154,22 @@ pub enum Stmt {
     Return { value: Option<Expr>, span: Span },
     /// `asm("...");` or `asm!(...) { ... };`
     Asm(AsmStmt),
+    /// `#[allow(defer_copy)]` in front of one statement.
+    AllowDeferCopy { stmt: Box<Stmt>, span: Span },
 }
 
 impl Stmt {
+    /// Whether this statement declares a `defer` local, possibly behind a
+    /// statement attribute.
+    pub fn is_defer_declaration(&self) -> bool {
+        match self {
+            Stmt::Decl(declaration) => declaration.is_defer,
+            Stmt::Let(declaration) => declaration.is_defer,
+            Stmt::AllowDeferCopy { stmt, .. } => stmt.is_defer_declaration(),
+            _ => false,
+        }
+    }
+
     /// Source range of the whole statement, including its `;` where present.
     pub fn span(&self) -> Span {
         match self {
@@ -170,6 +185,7 @@ impl Stmt {
             | Stmt::Label { span, .. }
             | Stmt::Goto { span, .. }
             | Stmt::Return { span, .. } => *span,
+            Stmt::AllowDeferCopy { span, .. } => *span,
             Stmt::Decl(decl) => decl.span,
             Stmt::Let(decl) => decl.span,
             Stmt::Block(block) => block.span,

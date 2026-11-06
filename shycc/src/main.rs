@@ -31,17 +31,8 @@ enum InputKind {
     Obj,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Backend {
-    /// The local chibicc fork, kept for early bootstrap and compatibility.
-    Chibicc,
-    /// The independent `shyc` compiler, which is the default.
-    Shyc,
-}
-
 struct Options {
     stage: Stage,
-    backend: Backend,
     output: Option<PathBuf>,
     sym: Option<PathBuf>,
     save_temps: bool,
@@ -59,6 +50,9 @@ struct Options {
     /// compiling. C source, C header, and the C wrapper have no object form, so
     /// this stops after the frontend.
     emit: Option<String>,
+    /// Whether the user spelled `--target`. The C source output takes the
+    /// host data model when they did not, because a host C compiler builds it.
+    target_given: bool,
     emit_debug_info: bool,
     /// Whether `const fn` calls run as probe rounds in the emulator.
     ///
@@ -142,11 +136,6 @@ fn main() -> Result<()> {
 fn parse_args(args: Vec<String>) -> Result<Options> {
     let mut opts = Options {
         stage: Stage::Link,
-        backend: match env::var("SHYCC_BACKEND").as_deref() {
-            Ok("chibicc") => Backend::Chibicc,
-            Ok("shyc") | Err(_) => Backend::Shyc,
-            Ok(other) => bail!("unknown SHYCC_BACKEND: {other}"),
-        },
         output: None,
         sym: None,
         save_temps: false,
@@ -156,6 +145,7 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         target: "shy".to_string(),
         sysroot: None,
         emit: None,
+        target_given: false,
         emit_debug_info: false,
         probe: cfg!(feature = "constfn-probe"),
         probe_explicit: false,
@@ -182,16 +172,6 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                 println!("shycc {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
-            "--backend" => {
-                i += 1;
-                let Some(value) = args.get(i) else {
-                    bail!("option `--backend` requires an argument");
-                };
-                opts.backend = parse_backend(value)?;
-            }
-            flag if flag.starts_with("--backend=") => {
-                opts.backend = parse_backend(&flag["--backend=".len()..])?;
-            }
             "-nostdlib" | "-nodefaultlibs" | "-nolibc" => opts.no_default_libs = true,
             "--target" => {
                 i += 1;
@@ -199,9 +179,11 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                     bail!("option `--target` requires an argument");
                 };
                 opts.target = value.clone();
+                opts.target_given = true;
             }
             flag if flag.starts_with("--target=") => {
                 opts.target = flag["--target=".len()..].to_string();
+                opts.target_given = true;
             }
             "--sysroot" => {
                 i += 1;
@@ -364,11 +346,15 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         bail!("--shy-emit-debug-info requires --shy-emit-source-lines");
     }
 
-    let probe_applies = opts.stage == Stage::Link
-        && opts.emit.as_deref().is_none_or(|emit| matches!(emit, "c" | "c-header"))
-        && !opts.print_only
-        && opts.backend == Backend::Shyc
-        && opts.target == "shy";
+    // A probe round is a frontend step: assembling, linking, and the text
+    // outputs all stand behind it, and it runs for every target the Shy
+    // backend can compile a probe unit for.
+    let probe_applies = opts.stage != Stage::Preprocess
+        && opts
+            .emit
+            .as_deref()
+            .is_none_or(|emit| matches!(emit, "c" | "c-header" | "llvm"))
+        && !opts.print_only;
     if opts.probe && !opts.probe_explicit && !probe_applies {
         opts.probe = false;
     }
@@ -377,32 +363,19 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
             bail!("`--constfn-rounds` must be at least 1");
         }
         probe::check_limits(opts.constfn_steps, opts.constfn_timeout_ms)?;
-        if opts.stage != Stage::Link {
-            bail!(
-                "`--constfn-probe` needs a final link or a C text output; it cannot be \
-                 combined with -E, -S, or -c"
-            );
+        if opts.stage == Stage::Preprocess {
+            bail!("`--constfn-probe` cannot be combined with -E, which parses nothing");
         }
         if let Some(emit) = &opts.emit
-            && !matches!(emit.as_str(), "c" | "c-header")
+            && !matches!(emit.as_str(), "llvm" | "c" | "c-header")
         {
             bail!(
-                "`--constfn-probe` only applies to a final link, --emit=c, or \
-                 --emit=c-header; `--emit={emit}` cannot run probe rounds"
+                "`--constfn-probe` only applies to a final link, --emit=llvm, \
+                 --emit=c, or --emit=c-header; `--emit={emit}` cannot run probe rounds"
             );
         }
         if opts.print_only {
             bail!("`--constfn-probe` cannot be combined with -###, which only prints commands");
-        }
-        if opts.backend != Backend::Shyc {
-            bail!("`--constfn-probe` requires the Shy pipeline (`--backend shyc`)");
-        }
-        if opts.target != "shy" {
-            bail!(
-                "`--constfn-probe` only applies to the shy target; `{}` is linked by \
-                 clang and produces no Shy image to probe",
-                opts.target
-            );
         }
     }
     if opts.probe_only && opts.probe_answers.is_none() {
@@ -423,12 +396,12 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
     Ok(opts)
 }
 
-fn parse_backend(name: &str) -> Result<Backend> {
-    match name {
-        "chibicc" => Ok(Backend::Chibicc),
-        "shyc" => Ok(Backend::Shyc),
-        other => bail!("unknown backend: {other}"),
-    }
+/// The user-mode Shy target: the ShyISA pipeline with the shyemu-user runtime.
+const SHY_USER: &str = "shy-user";
+
+/// The target name `shyc` knows. The user-mode target is still ShyISA code.
+fn shyc_target(target: &str) -> &str {
+    if target == SHY_USER { "shy" } else { target }
 }
 
 fn clang_command() -> String {
@@ -532,8 +505,9 @@ fn is_compile_option(arg: &str) -> bool {
 
 /// Options of `compile_args` that the `shyc` frontend accepts verbatim.
 ///
-/// The rest belong to chibicc. Only `-O0`..`-O3` reach this point as `-O`
-/// spellings, because the parse loop rejects every other level.
+/// The rest are C compiler flags with no `shyc` equivalent. Only `-O0`..`-O3`
+/// reach this point as `-O` spellings, because the parse loop rejects every
+/// other level.
 fn forwarded_to_shyc(arg: &str) -> bool {
     arg.starts_with("-I") || arg.starts_with("-D") || arg.starts_with("-U") || arg.starts_with("-O")
 }
@@ -548,7 +522,13 @@ fn run(mut opts: Options) -> Result<()> {
     opts.target = normalize_target(&opts.target);
     if opts.target == "host" {
         opts.target = clang_triple(None)?;
-    } else if opts.target != "shy" {
+    } else if !opts.target_given && opts.emit.as_deref() == Some("c") {
+        // A C source output is built by the host C compiler, so it takes the
+        // host data model when the user did not name a target: a 32-bit
+        // `size_t` would disagree with the C library's own declarations.
+        opts.target = clang_triple(None)
+            .unwrap_or_else(|_| format!("{}-unknown-linux-gnu", env::consts::ARCH));
+    } else if opts.target != "shy" && opts.target != SHY_USER {
         // Keep the spelling the user gave when clang is not available; the
         // compile step reports that failure itself.
         if let Ok(triple) = clang_triple(Some(&opts.target)) {
@@ -586,7 +566,7 @@ fn run(mut opts: Options) -> Result<()> {
         }
         return Ok(());
     }
-    if opts.target != "shy" {
+    if opts.target != "shy" && opts.target != SHY_USER {
         return run_llvm(&repo, &opts);
     }
     if let Some(arg) = opts.link_args.first() {
@@ -604,7 +584,7 @@ fn run(mut opts: Options) -> Result<()> {
         for input in &opts.inputs {
             ensure_kind(input, InputKind::C)?;
             let output = opts.output.clone();
-            run_compiler(&repo, &opts, input, output.as_deref(), true, false)?;
+            run_compiler(&repo, &opts, input, output.as_deref(), true)?;
         }
         return Ok(());
     }
@@ -626,7 +606,7 @@ fn run(mut opts: Options) -> Result<()> {
                 if opts.probe {
                     run_probe_unit(&repo, &opts, input, &asm, &mut probe_temps, &mut probe_libs)?;
                 } else {
-                    run_compiler(&repo, &opts, input, Some(&asm), false, false)?;
+                    run_compiler(&repo, &opts, input, Some(&asm), false)?;
                 }
                 collect_debug_input(&opts, &mut temps, &mut debug_inputs, &asm)?;
                 if opts.stage == Stage::Asm {
@@ -697,9 +677,13 @@ fn run(mut opts: Options) -> Result<()> {
 
     for lib in &libraries {
         match lib.as_str() {
+            // A user-mode program links its own platform layer, so the
+            // bare probe objects only stand in for the bare target.
             "libshy" => match &probe_libs {
-                Some(built) => objects.extend(built.libshy.iter().cloned()),
-                None => objects.extend(build_libshy(&repo, &opts, &mut temps)?),
+                Some(built) if opts.target != SHY_USER => {
+                    objects.extend(built.libshy.iter().cloned())
+                }
+                _ => objects.extend(build_libshy(&repo, &opts, &mut temps, false)?),
             },
             "float" => match &probe_libs {
                 Some(built) => objects.push(built.float.clone()),
@@ -735,12 +719,8 @@ fn run_compiler(
     input: &str,
     output: Option<&Path>,
     preprocess_only: bool,
-    link_runtime: bool,
 ) -> Result<()> {
-    match opts.backend {
-        Backend::Chibicc => run_chibicc(repo, opts, input, output, preprocess_only, link_runtime),
-        Backend::Shyc => run_shyc(repo, opts, input, output, preprocess_only, None),
-    }
+    run_shyc(repo, opts, input, output, preprocess_only, None)
 }
 
 /// Add the libshy layers in lookup order: C headers first, then explicit
@@ -757,9 +737,8 @@ fn shylib() -> PathBuf {
     shyc::config::shylib().unwrap_or_else(|| repo_root().join("libshy"))
 }
 
-/// Drive the independent compiler. It has no equivalent of chibicc's extra
-/// flags: the runtime is linked as a normal object and source lines are not
-/// emitted yet.
+/// Drive the independent compiler. The runtime is linked as a normal object
+/// and source lines are not emitted yet.
 /// Files one probe round exchanges with `shyc`.
 struct ProbeArgs<'a> {
     manifest: &'a Path,
@@ -778,7 +757,12 @@ fn run_shyc(
     probe: Option<&ProbeArgs>,
 ) -> Result<()> {
     let mut cmd = shyc_command(repo, opts.print_only)?;
-    cmd.arg(format!("--target={}", opts.target));
+    cmd.arg(format!("--target={}", shyc_target(&opts.target)));
+    if opts.target == SHY_USER {
+        // The user-mode runtime supplies _start, so the program itself has no
+        // automatic startup.
+        cmd.arg("-ffreestanding");
+    }
     if preprocess_only {
         cmd.arg("-E");
     } else {
@@ -876,6 +860,16 @@ fn run_probe_unit(
     )
 }
 
+/// The data model a probe image is lowered with.
+///
+/// The image is ShyISA code, but its object layout has to be the program's:
+/// a const fn result -- `sizeof`, an offset, a `long` width -- is used in the
+/// program, so it must be computed for the target the program is built for.
+fn probe_layout(target: &str) -> Result<shyc::ir::Layout> {
+    shyc::ir::Layout::for_arch(target_arch(shyc_target(target)))
+        .with_context(|| format!("no data model for probe target `{target}`"))
+}
+
 /// Assemble one probe unit, link it into a temporary image, run it, and write
 /// the answers the next round reads.
 ///
@@ -897,7 +891,7 @@ fn run_probe_image(
     run_asm(repo, opts, asm, &obj)?;
     if libs.is_none() {
         *libs = Some(ProbeLibs {
-            libshy: build_libshy(repo, opts, temps)?,
+            libshy: build_libshy(repo, opts, temps, true)?,
             float: build_float_lib(repo, opts, temps)?,
         });
     }
@@ -913,7 +907,12 @@ fn run_probe_image(
     // produced after an earlier answer, so a round that dropped the previous
     // answers would ask for them again forever.
     let options = probe::options(opts.constfn_steps, opts.constfn_timeout_ms);
-    answered.extend(probe::run_answers(&bytes, requests, options)?);
+    answered.extend(probe::run_answers(
+        &bytes,
+        requests,
+        options,
+        probe_layout(&opts.target)?,
+    )?);
     probe::write_answers(answers, answered)
 }
 
@@ -945,8 +944,11 @@ fn run_emit(
 ) -> Result<()> {
     let mut cmd = shyc_command(repo, opts.print_only)?;
     cmd.arg(format!("--emit={emit}"));
-    if emit == "llvm" || opts.target != "shy" {
-        cmd.arg(format!("--target={}", opts.target));
+    // Every C output states its data model: the compiler defaults `--emit=c`
+    // to the host's, so an explicit `--target` has to reach it, including the
+    // Shy one the probe object was built for.
+    if emit == "llvm" || emit == "c" || (opts.target != "shy" && opts.target != SHY_USER) {
+        cmd.arg(format!("--target={}", shyc_target(&opts.target)));
     }
     for arg in &opts.compile_args {
         if forwarded_to_shyc(arg) {
@@ -1112,12 +1114,16 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
         for input in &opts.inputs {
             ensure_kind(input, InputKind::C)?;
             let output = opts.output.clone();
-            run_compiler(repo, opts, input, output.as_deref(), true, false)?;
+            run_compiler(repo, opts, input, output.as_deref(), true)?;
         }
         return Ok(());
     }
 
     let mut temps = TempFiles::new(opts.save_temps || opts.print_only);
+    // Probe rounds keep their own temporary files and their own copy of the
+    // default libraries; both go away with the build.
+    let mut probe_temps = TempFiles::new(false);
+    let mut probe_libs: Option<ProbeLibs> = None;
     let mut clang_inputs: Vec<PathBuf> = Vec::new();
 
     for input in &opts.inputs {
@@ -1130,7 +1136,21 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
                 } else {
                     replace_ext(input, ".ll")
                 };
-                emit_llvm(repo, opts, Path::new(input), &ll, true)?;
+                if opts.probe {
+                    // A round with requests builds the program's probe image
+                    // instead of the IR, so the final round is what lands here.
+                    run_emit_probe(
+                        repo,
+                        opts,
+                        input,
+                        Some(&ll),
+                        "llvm",
+                        &mut probe_temps,
+                        &mut probe_libs,
+                    )?;
+                } else {
+                    emit_llvm(repo, opts, Path::new(input), &ll, true)?;
+                }
                 clang_inputs.push(ll);
             }
             // `.S` files are target assembly text: clang assembles and preprocesses
@@ -1233,34 +1253,6 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
     result
 }
 
-fn run_chibicc(
-    repo: &Path,
-    opts: &Options,
-    input: &str,
-    output: Option<&Path>,
-    preprocess_only: bool,
-    link_runtime: bool,
-) -> Result<()> {
-    let chibicc = chibicc_path(repo, opts.print_only)?;
-    let mut cmd = Command::new(chibicc);
-    cmd.arg("--target=shy");
-    if preprocess_only {
-        cmd.arg("-E");
-    } else {
-        cmd.arg("-S");
-    }
-    if link_runtime {
-        cmd.arg("--shy-link-runtime");
-    }
-    add_libshy_includes(&mut cmd, repo);
-    cmd.args(&opts.compile_args);
-    if let Some(output) = output {
-        cmd.arg("-o").arg(output);
-    }
-    cmd.arg(input);
-    run_command(opts, &mut cmd)
-}
-
 fn run_asm(repo: &Path, opts: &Options, input: &Path, output: &Path) -> Result<()> {
     let mut cmd = tool_command(repo, "asm", "shyasm");
     cmd.arg(input).arg("-o").arg(output);
@@ -1334,7 +1326,7 @@ fn collect_debug_input(
 }
 
 fn build_float_lib(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result<PathBuf> {
-    let src = repo.join("third_party/chibicc/shy_runtime_softfloat.c");
+    let src = repo.join("third_party/shy_runtime_softfloat.c");
     if !src.exists() {
         bail!("missing internal float library source: {}", src.display());
     }
@@ -1361,13 +1353,18 @@ fn build_float_lib(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result
     };
 
     let input = runtime_c.to_string_lossy().into_owned();
-    run_compiler(repo, opts, &input, Some(&asm), false, true)?;
+    run_compiler(repo, opts, &input, Some(&asm), false)?;
     run_asm(repo, opts, &asm, &obj)?;
     Ok(obj)
 }
 
 /// libshy's layers above the C library, in dependency order.
-const LIBSHY_RUST_LAYERS: [&str; 3] = ["core/core.shyc", "alloc/alloc.shyc", "std/std.shyc"];
+const LIBSHY_RUST_LAYERS: [&str; 4] = [
+    "core/core.shyc",
+    "alloc/alloc.shyc",
+    "std/std.shyc",
+    "std/env.shyc",
+];
 
 /// One unit through `shyc --emit=llvm`. A library unit gets only the
 /// optimization level, never the user's `-I`/`-D`/`-U`.
@@ -1391,9 +1388,28 @@ fn emit_llvm(repo: &Path, opts: &Options, input: &Path, ll: &Path, user_unit: bo
 /// The Shy target's whole library: the portable C layer, the Shy
 /// implementation of its platform calls, then core, alloc, and std. ShyOS
 /// links the same sources with its own system calls instead of `sys/shy`.
-fn build_libshy(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result<Vec<PathBuf>> {
-    let mut sources = vec!["libc/libc.c", "sys/shy.shyc"];
+///
+/// A probe image runs in the bare emulator and brings its own `_start`, so
+/// it always takes the bare platform, whatever the program targets.
+fn build_libshy(
+    repo: &Path,
+    opts: &Options,
+    temps: &mut TempFiles,
+    probe: bool,
+) -> Result<Vec<PathBuf>> {
+    // Bare Shy calls the UART; the user-mode target calls the host through
+    // syscall and brings its own _start.
+    let user = opts.target == SHY_USER && !probe;
+    let platform = if user {
+        "sys/user.shyc"
+    } else {
+        "sys/shy.shyc"
+    };
+    let mut sources = vec!["libc/libc.c", platform];
     sources.extend(LIBSHY_RUST_LAYERS);
+    if user {
+        sources.push("sys/user_start.shyc");
+    }
     let mut objects = Vec::new();
     for source in sources {
         let name = Path::new(source)
@@ -1419,7 +1435,7 @@ fn build_libshy(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result<Ve
             )
         };
         let input = src.to_string_lossy().into_owned();
-        run_compiler(repo, opts, &input, Some(&asm), false, true)?;
+        run_compiler(repo, opts, &input, Some(&asm), false)?;
         run_asm(repo, opts, &asm, &obj)?;
         objects.push(obj);
     }
@@ -1456,34 +1472,6 @@ fn tool_command(repo: &Path, package: &str, installed_name: &str) -> Command {
     cmd
 }
 
-fn chibicc_path(repo: &Path, print_only: bool) -> Result<PathBuf> {
-    if let Ok(path) = env::var("SHYCC_CHIBICC") {
-        return Ok(PathBuf::from(path));
-    }
-
-    if let Ok(current) = env::current_exe()
-        && let Some(dir) = current.parent()
-    {
-        let sibling = dir.join("chibicc");
-        if sibling.exists() {
-            return Ok(sibling);
-        }
-    }
-
-    let path = repo.join("third_party/chibicc/chibicc");
-    if path.exists() || print_only {
-        return Ok(path);
-    }
-
-    let status = Command::new("make")
-        .current_dir(repo.join("third_party/chibicc"))
-        .arg("chibicc")
-        .status()
-        .context("failed to run `make -C third_party/chibicc chibicc`")?;
-    ensure_success(status, "make chibicc")?;
-    Ok(path)
-}
-
 fn run_command(opts: &Options, cmd: &mut Command) -> Result<()> {
     if opts.print_only {
         eprintln!("{}", command_line(cmd));
@@ -1509,7 +1497,9 @@ fn input_kind(path: &str) -> Result<InputKind> {
     match p.extension().and_then(|s| s.to_str()) {
         Some("shyc") | Some("shyh") | Some("c") | Some("h") => Ok(InputKind::C),
         Some("shy") | Some("S") | Some("s") => Ok(InputKind::Asm),
-        Some("sobj") => Ok(InputKind::Obj),
+        // `.sobj` is a Shy object; `.o`/`.obj` are what a hosted target
+        // produces, and clang links them back as they are.
+        Some("sobj") | Some("o") | Some("obj") => Ok(InputKind::Obj),
         _ => bail!("unknown input file extension: {path}"),
     }
 }
@@ -1591,11 +1581,11 @@ fn print_usage() {
          \x20 --probe-only <file> --probe-answers <file> runs just those rounds\n\
          \x20 and writes the answers instead of linking\n\
          inputs: .shyc/.c, .shy, .sobj\n\
-         backend: --backend shyc|chibicc (default shyc)\n\
-         target: --target <name> (default shy); rv64/riscv64, rv32/riscv32, x64/x86_64,\n\
-         \x20 arm64/aarch64 and la64/loong64/loongarch64 name Linux targets (rv32 needs\n\
-         \x20 a sysroot), a `-bare` suffix makes them freestanding, `host` is the local\n\
-         \x20 clang triple, and a full triple is handed to clang as written\n\
+         target: --target <name> (default shy); shy-user runs the ShyISA pipeline on\n\
+         \x20 the shyemu-user runtime with host syscalls; rv64/riscv64, rv32/riscv32,\n\
+         \x20 x64/x86_64, arm64/aarch64 and la64/loong64/loongarch64 name Linux targets\n\
+         \x20 (rv32 needs a sysroot), a `-bare` suffix makes them freestanding, `host`\n\
+         \x20 is the local clang triple, and a full triple is handed to clang as written\n\
          sysroot: --sysroot <dir> for a cross link (default /usr/<triple>)\n\
          optimization: -O0, -O1, -O2, or -O3 (forwarded to shyc; -O0 by default)\n\
          libraries: libshy and the soft-float runtime are linked by default;\n\

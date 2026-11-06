@@ -4,7 +4,7 @@ use crate::sema::types::{TypeId, TypeKind};
 use crate::source::Diagnostic;
 use std::collections::HashSet;
 
-const MAX_AUTO_DEREF: usize = 8;
+pub(super) const MAX_AUTO_DEREF: usize = 8;
 
 impl Lowerer {
     pub(super) fn record_paths(

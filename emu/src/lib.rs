@@ -6,3 +6,4 @@
 
 pub mod cpu;
 pub mod probe;
+pub mod user;

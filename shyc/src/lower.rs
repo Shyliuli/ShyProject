@@ -14,9 +14,10 @@
 //! Shy extensions are handled here too: inherent `impl` methods get the
 //! `____Type__method` symbol, trait methods add the trait name and trait
 //! arguments, and a materialized generic impl gets one internal symbol per
-//! receiver, trait, and method. `self` names the implemented record type,
-//! dot access auto-dereferences a pointer, and locals with a `drop` method are
-//! dropped at scope exit, `return`, `break`, and `continue`.
+//! receiver, trait, and method. `self` names the implemented record type and
+//! dot access auto-dereferences a pointer. A local declared with `defer` owns a
+//! `moved` flag and is dropped at scope exit, `return`, `break`, `continue`,
+//! and `goto` unless `.move()` or `return name` set that flag.
 //!
 //! Deliberately not lowered: bit-fields, variable-length arrays, `_Atomic`
 //! objects, thread-local storage, nested functions, and computed `goto`. Each
@@ -61,8 +62,24 @@ pub struct Lowered {
     /// backend prints: the template, its concrete arguments spelled as C, and
     /// the type name or symbol the compiler gave it.
     pub instances: Vec<InstancePlan>,
+    /// Every payload enum the C backend can meet: the variants, their tags, and
+    /// whether the value is a niche.
+    pub payload_enums: Vec<PayloadEnumPlan>,
+    /// The fields of every record the C output can name, by C name: a member
+    /// read resolves its type through this table.
+    pub record_fields: HashMap<String, Vec<(String, String)>>,
+    /// The C names of the types each type definition needs complete first, by
+    /// the C name the definition is printed under.
+    pub layout_needs: HashMap<String, Vec<String>>,
+    /// The C name of each `#[args_builtin]` struct: `main` takes it as its
+    /// process arguments.
+    pub args_builtin: HashSet<String>,
     /// The symbol every function and method definition emits, by span.
     pub declaration_symbols: HashMap<Span, String>,
+    /// The symbol a call resolved to, by span and callee name. A generic
+    /// function has one symbol per instance, so the callee's name alone cannot
+    /// name the call; the compiler resolved it, and this table is its answer.
+    pub call_symbols: HashMap<(Span, String), String>,
     /// The symbol the compiler gave every name in its function table. One span
     /// can cover several functions when a macro expansion or a generated
     /// fragment produced them, so the C output names a function by this table
@@ -72,6 +89,8 @@ pub struct Lowered {
     /// ordinary header drops a declaration whose type mentions a generic
     /// instance, and the instance section prints its prototype from here.
     pub c_functions: Vec<(String, TypeId)>,
+    /// Diagnostics that do not stop compilation, in source order.
+    pub warnings: Vec<Diagnostic>,
 }
 
 /// A generic method the compiler materialized.
@@ -89,20 +108,80 @@ pub struct MethodInstancePlan {
     pub symbol: String,
 }
 
+/// The facts the C export needs about the specializations one unit materialized.
+///
+/// The C printer names a call, a type, a member, and a variant with these
+/// answers instead of deriving any of them from an arena index. They are all
+/// keyed the way the C output spells the name, so the printer can ask with the
+/// text it already prints.
+#[derive(Debug, Default)]
+pub struct InstanceTables {
+    /// Every specialization, in a stable order.
+    pub plans: Vec<InstancePlan>,
+    /// Every payload enum, by the C name it is printed under.
+    pub payload_enums: Vec<PayloadEnumPlan>,
+    /// The fields of every record the output can name, by C name: a member read
+    /// resolves its type through this table.
+    pub record_fields: HashMap<String, Vec<(String, String)>>,
+    /// The C names of the types each definition needs complete first, by C name.
+    pub layout_needs: HashMap<String, Vec<String>>,
+    /// The C name of each `#[args_builtin]` struct: `main` takes it as its
+    /// process arguments.
+    pub args_builtin: HashSet<String>,
+}
+
+/// One payload enum the C output prints.
+///
+/// The C printer asks this table about `.tag`, `.payload.<Variant>`, a `case`
+/// label, and a variant value, so the representation the compiler chose is the
+/// one C sees. A niche stores the payload itself, which no C declaration can
+/// express, so the printer builds and reads it through these entries.
+#[derive(Clone, Debug)]
+pub struct PayloadEnumPlan {
+    /// The C type name the printer spells this enum with.
+    pub name: String,
+    /// Whether the value is the payload itself: a pointer for `Option<T *>`, an
+    /// error enum's integer for `Result<void, E>`, with `0` standing for the
+    /// payload-free variant.
+    pub niche: bool,
+    /// One entry per variant, in declaration order.
+    pub variants: Vec<VariantPlan>,
+}
+
+/// One variant of a payload enum.
+#[derive(Clone, Debug)]
+pub struct VariantPlan {
+    pub name: String,
+    /// The tag stored when this variant is active.
+    pub tag: i64,
+    /// The C spelling of the payload the variant stores, or `None` for a
+    /// payload-free variant.
+    pub payload: Option<String>,
+}
+
 /// Every specialization the compiler materialized, ready for the C export.
 ///
 /// A record instance is named by the type it became and a function or method
 /// instance by its symbol; both are the compiler's answer, so the C output and
-/// the generated header name one instance the same way.
+/// the generated header name one instance the same way. The payload enums come
+/// with it because a payload enum instance is a C type of its own.
 fn instance_plans(
     lowerer: &Lowerer,
     c_types: &HashMap<TypeId, crate::export_instances::CTypeName>,
-) -> Vec<InstancePlan> {
+) -> InstanceTables {
+    let types = &lowerer.types;
     // A plain record is declared under its source tag, so its C spelling is the
-    // tag; a generic instance is spelled by the type printer.
-    let spell = |ty: TypeId| match lowerer.type_names.get(&ty) {
-        Some(tag) => tag.clone(),
-        None => crate::export_instances::type_text(&lowerer.types, c_types, ty),
+    // tag; a generic instance is spelled by the type printer. A niche enum is
+    // named here and typedef'd to the payload it stores, so a declaration can
+    // say `Option<int *>` without the C compiler mistaking a pointer for a tag.
+    let spell = |ty: TypeId| -> String {
+        if types.is_niche_enum(ty) {
+            return format!("shyc_niche_E{}", ty.index());
+        }
+        match lowerer.type_names.get(&ty) {
+            Some(tag) => tag.clone(),
+            None => crate::export_instances::type_text(types, c_types, ty),
+        }
     };
     let text = |arg: &GenericArgKey| match arg {
         // The C backend declares a plain record under its source tag, so an
@@ -110,22 +189,111 @@ fn instance_plans(
         GenericArgKey::Type(ty) => spell(*ty),
         GenericArgKey::Int(value) => value.to_string(),
     };
+    let payload_enum = |ty: TypeId, name: &str| -> Option<PayloadEnumPlan> {
+        if !matches!(types.kind(ty), TypeKind::PayloadEnum(_)) {
+            return None;
+        }
+        let info = types.enum_info(ty)?;
+        Some(PayloadEnumPlan {
+            name: name.to_string(),
+            niche: info.niche,
+            variants: info
+                .variants
+                .iter()
+                .map(|variant| VariantPlan {
+                    name: variant.name.clone(),
+                    tag: variant.value,
+                    payload: variant.payload.map(&spell),
+                })
+                .collect(),
+        })
+    };
+    // The fields of one record, spelled the way the C output declares them.
+    let fields = |ty: TypeId| -> Vec<(String, String)> {
+        types
+            .record_info(ty)
+            .map(|info| {
+                info.fields
+                    .iter()
+                    .map(|field| (field.name.clone().unwrap_or_default(), spell(field.ty.ty)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut tables = InstanceTables::default();
     let mut plans = Vec::new();
+    let mut enums = Vec::new();
+    let mut needs = HashMap::new();
+    let mut record_fields = HashMap::new();
+    let mut args_builtin = HashSet::new();
     for (key, ty) in &lowerer.record_instances {
+        let name = spell(*ty);
+        needs.insert(
+            crate::c::names::split(&name).0,
+            layout_needs(types, *ty, &spell),
+        );
+        record_fields.insert(crate::c::names::split(&name).0, fields(*ty));
         plans.push(InstancePlan {
             name: key.name.clone(),
             args: key.args.iter().map(text).collect(),
-            type_name: Some(spell(*ty)),
-            layout: Some(crate::export_instances::layout_text(
-                &lowerer.types,
-                c_types,
-                *ty,
-            )),
+            type_name: Some(name),
+            layout: Some(crate::export_instances::layout_text(types, c_types, *ty)),
             symbol: None,
             receiver: None,
             impl_name: None,
             trait_name: None,
         });
+    }
+    for (key, ty) in &lowerer.enum_instances {
+        let name = spell(*ty);
+        let layout = if types.is_niche_enum(*ty) {
+            // The niche value is its payload, so the instance is a typedef of
+            // the representation the compiler gave it.
+            let underlying = types
+                .enum_underlying(*ty)
+                .expect("niche enum underlying type");
+            format!(
+                "typedef {} {name};",
+                crate::export_instances::type_text(types, c_types, underlying)
+            )
+        } else {
+            crate::export_instances::layout_text(types, c_types, *ty)
+        };
+        if let Some(plan) = payload_enum(*ty, &name) {
+            enums.push(plan);
+        }
+        needs.insert(
+            crate::c::names::split(&name).0,
+            layout_needs(types, *ty, &spell),
+        );
+        plans.push(InstancePlan {
+            name: key.name.clone(),
+            args: key.args.iter().map(text).collect(),
+            type_name: Some(name),
+            layout: Some(layout),
+            symbol: None,
+            receiver: None,
+            impl_name: None,
+            trait_name: None,
+        });
+    }
+    // A hand-written payload enum keeps its tag as its C name, which is the
+    // name the C printer declares it under. Every file-scope type also says
+    // which types its definition needs complete, so the C output can order the
+    // definitions it prints.
+    if let Some(scope) = lowerer.type_scopes.first() {
+        for (tag, ty) in &scope.tags {
+            if let Some(plan) = payload_enum(*ty, tag) {
+                enums.push(plan);
+            }
+            needs.insert(tag.clone(), layout_needs(types, *ty, &spell));
+            if matches!(types.kind(*ty), TypeKind::Record { .. }) {
+                record_fields.insert(tag.clone(), fields(*ty));
+            }
+            if types.is_args_builtin(*ty) {
+                args_builtin.insert(tag.clone());
+            }
+        }
     }
     for (key, instance) in &lowerer.function_instances {
         plans.push(InstancePlan {
@@ -159,7 +327,80 @@ fn instance_plans(
     plans.dedup_by(|left, right| {
         left.name == right.name && left.args == right.args && left.receiver == right.receiver
     });
-    plans
+    tables.plans = plans;
+    tables.payload_enums = enums;
+    tables.record_fields = record_fields;
+    tables.layout_needs = needs;
+    tables.args_builtin = args_builtin;
+    tables
+}
+
+/// The C names of the types a definition of `ty` needs complete before it.
+///
+/// A member or payload is stored inside the object, so its type has to be
+/// complete first; a pointer only needs a declaration. A niche stores its
+/// payload, so its typedef needs whatever the stored type needs.
+fn layout_needs(types: &TypeStore, ty: TypeId, spell: &impl Fn(TypeId) -> String) -> Vec<String> {
+    let mut needs = Vec::new();
+    match types.kind(ty) {
+        TypeKind::Record { .. } => {
+            if let Some(info) = types.record_info(ty) {
+                for field in &info.fields {
+                    collect_dependencies(types, field.ty.ty, true, spell, &mut needs);
+                }
+            }
+        }
+        TypeKind::PayloadEnum(_) => {
+            if let Some(underlying) = types.enum_underlying(ty)
+                && types.is_niche_enum(ty)
+            {
+                collect_dependencies(types, underlying, true, spell, &mut needs);
+            }
+            if let Some(info) = types.enum_info(ty) {
+                for variant in &info.variants {
+                    if let Some(payload) = variant.payload {
+                        collect_dependencies(types, payload, true, spell, &mut needs);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    needs.sort();
+    needs.dedup();
+    needs
+}
+
+/// Collect the C names of the types one member position needs.
+///
+/// `by_value` says whether the position stores the type inside the object. A
+/// typedef name is needed even behind a pointer, because the typedef has to be
+/// declared before it can be used at all.
+fn collect_dependencies(
+    types: &TypeStore,
+    ty: TypeId,
+    by_value: bool,
+    spell: &impl Fn(TypeId) -> String,
+    needs: &mut Vec<String>,
+) {
+    match types.kind(ty) {
+        TypeKind::Record { .. } | TypeKind::Enum(_) | TypeKind::PayloadEnum(_) => {
+            let name = spell(ty);
+            let declarable = name.starts_with("struct ")
+                || name.starts_with("union ")
+                || name.starts_with("enum ");
+            if by_value || !declarable {
+                needs.push(crate::c::names::split(&name).0);
+            }
+        }
+        TypeKind::Array { element, .. } => {
+            collect_dependencies(types, element.ty, by_value, spell, needs);
+        }
+        TypeKind::Pointer { pointee } => {
+            collect_dependencies(types, pointee.ty, false, spell, needs);
+        }
+        _ => {}
+    }
 }
 
 /// One specialization the compiler materialized.
@@ -224,6 +465,8 @@ pub struct Options {
     /// `#![disable_default_static]`: keep the C linkage default, so only
     /// `static` gives a file-local symbol.
     pub disable_default_static: bool,
+    /// `#![allow(defer_copy)]`: no by-value copy warning in this unit.
+    pub allow_defer_copy: bool,
     /// Concrete generic instances the explicit instance table exports. Each
     /// one is instantiated even when the unit never uses it, and its functions
     /// get a public C symbol.
@@ -240,6 +483,7 @@ impl Default for Options {
             disable_nonexhaustive_switch: false,
             disable_rustic_mut: false,
             disable_default_static: false,
+            allow_defer_copy: false,
             exports: Vec::new(),
         }
     }
@@ -255,7 +499,11 @@ pub fn lower(unit: &ast::TranslationUnit, options: &Options) -> Result<Lowered, 
     lowerer.lower_functions()?;
     let c_types = lowerer.c_type_names(&exports);
     let c_functions = lowerer.c_functions();
-    let instances = instance_plans(&lowerer, &c_types);
+    // A layout of an instance names the types the source declared, so the
+    // instance printer sees the same names the unit's own declarations use.
+    let mut instance_types = c_types.clone();
+    lowerer.add_source_type_names(&mut instance_types);
+    let tables = instance_plans(&lowerer, &instance_types);
     // The name table is complete once every body is lowered: a call to a
     // function declared nowhere else still registered it.
     let function_symbols = lowerer
@@ -269,14 +517,20 @@ pub fn lower(unit: &ast::TranslationUnit, options: &Options) -> Result<Lowered, 
         })
         .collect();
     Ok(Lowered {
-        instances,
+        instances: tables.plans,
+        payload_enums: tables.payload_enums,
+        record_fields: tables.record_fields,
+        layout_needs: tables.layout_needs,
+        args_builtin: tables.args_builtin,
         declaration_symbols: std::mem::take(&mut lowerer.declaration_symbols),
+        call_symbols: std::mem::take(&mut lowerer.call_symbols),
         function_symbols,
         module: lowerer.module,
         types: lowerer.types,
         exports,
         c_types,
         c_functions,
+        warnings: lowerer.warnings,
     })
 }
 
@@ -370,6 +624,9 @@ pub(super) struct TraitMethodSet {
     /// function when a call names concrete arguments or when they are inferred
     /// from the value arguments.
     pub generic_methods: HashMap<String, GenericMethod>,
+    /// Methods this unit only declared. A header may carry the prototype of a
+    /// concrete trait implementation and one source file defines the method.
+    pub prototypes: HashSet<String>,
 }
 
 pub(super) struct ImplInfo {
@@ -600,6 +857,10 @@ pub(super) struct Lowerer {
     /// a repeated lookup skips its own work while a second template with the
     /// same identity is still diagnosed.
     pub generic_impl_instances: HashMap<GenericImplInstanceKey, Span>,
+    /// Methods a materialized generic impl could not declare for its concrete
+    /// arguments, by receiver and method name, with the reason. A lookup of one
+    /// reports that reason instead of "no such method".
+    pub unavailable_methods: HashMap<(TypeId, String), Diagnostic>,
     /// Nesting level of the generic instantiation currently being resolved.
     pub instantiation_depth: u32,
     /// The source tag behind each record and enum type, so a C declaration can
@@ -610,6 +871,10 @@ pub(super) struct Lowerer {
     pub method_instances: Vec<MethodInstancePlan>,
     /// The symbol every function and method definition emits, by span.
     pub declaration_symbols: HashMap<Span, String>,
+    /// The symbol a call to a generic instance resolved to, by the call's span
+    /// and the callee's name. The two together identify the call even when a
+    /// macro expansion gives several calls one span.
+    pub call_symbols: HashMap<(Span, String), String>,
     /// Every trait declaration, by name. Registered before any `impl` is
     /// checked.
     pub traits: HashMap<String, TraitInfo>,
@@ -633,6 +898,9 @@ pub(super) struct Lowerer {
     pub disable_nonexhaustive_switch: bool,
     pub disable_rustic_mut: bool,
     pub disable_default_static: bool,
+    pub allow_defer_copy: bool,
+    /// Warnings collected while lowering; the driver prints them.
+    pub warnings: Vec<Diagnostic>,
     pub pending: Vec<PendingFunction>,
     string_counter: u32,
     static_counter: u32,
@@ -667,6 +935,7 @@ impl Lowerer {
             type_names: HashMap::new(),
             method_instances: Vec::new(),
             declaration_symbols: HashMap::new(),
+            call_symbols: HashMap::new(),
             record_instances: HashMap::new(),
             generic_enums: HashMap::new(),
             enum_instances: HashMap::new(),
@@ -674,6 +943,7 @@ impl Lowerer {
             function_instances: HashMap::new(),
             generic_impls: HashMap::new(),
             generic_impl_instances: HashMap::new(),
+            unavailable_methods: HashMap::new(),
             instantiation_depth: 0,
             traits: HashMap::new(),
             trait_impls: HashSet::new(),
@@ -686,6 +956,8 @@ impl Lowerer {
             disable_nonexhaustive_switch: options.disable_nonexhaustive_switch,
             disable_rustic_mut: options.disable_rustic_mut,
             disable_default_static: options.disable_default_static,
+            allow_defer_copy: options.allow_defer_copy,
+            warnings: Vec::new(),
             pending: Vec::new(),
             string_counter: 0,
             static_counter: 0,
@@ -768,7 +1040,11 @@ impl Lowerer {
         })
     }
 
-    pub(super) fn ir_signature(&self, function_ty: TypeId) -> ir::Signature {
+    /// The IR signature of one function type.
+    ///
+    /// With expand_args, a by-value #[args_builtin] parameter becomes its
+    /// fields one after another, matching the target ABI plan.
+    pub(super) fn ir_signature(&self, function_ty: TypeId, expand_args: bool) -> ir::Signature {
         let TypeKind::Function {
             result,
             params,
@@ -778,11 +1054,37 @@ impl Lowerer {
         else {
             return ir::Signature::new(ir::Type::Void, Vec::new());
         };
+        let mut ir_params = Vec::with_capacity(params.len());
+        for &param in params {
+            match self.args_builtin_fields(param).filter(|_| expand_args) {
+                Some(fields) => {
+                    for (field_ty, _) in fields {
+                        ir_params.push(self.ir_type(field_ty));
+                    }
+                }
+                None => ir_params.push(self.ir_type(param)),
+            }
+        }
         ir::Signature {
             ret: self.ir_type(*result),
-            params: params.iter().map(|&param| self.ir_type(param)).collect(),
+            params: ir_params,
             variadic: *variadic,
         }
+    }
+
+    /// The fields of an #[args_builtin] struct, in declaration order, with
+    /// their layout offsets. Other types have none.
+    pub(super) fn args_builtin_fields(&self, ty: TypeId) -> Option<Vec<(TypeId, u32)>> {
+        if !self.types.is_args_builtin(ty) {
+            return None;
+        }
+        let info = self.types.record_info(ty)?;
+        Some(
+            info.fields
+                .iter()
+                .map(|field| (field.ty.ty, field.offset))
+                .collect(),
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -824,6 +1126,14 @@ impl Lowerer {
             return Ok(Some(
                 self.queue_deferred_method(record, None, &name.text, method),
             ));
+        }
+        if !self.unavailable_methods.is_empty()
+            && let Some(error) = self
+                .unavailable_methods
+                .get(&(record, name.text.clone()))
+                .cloned()
+        {
+            return Err(error);
         }
         let mut matches = self.trait_methods_named(record, &name.text);
         match matches.len() {
@@ -1300,7 +1610,8 @@ pub(super) enum LocalBinding {
 
 pub(super) struct FnScope {
     pub id: u32,
-    pub drops: Vec<usize>,
+    /// Locals declared with `defer` in this scope, in declaration order.
+    pub defers: Vec<usize>,
     pub bindings: HashMap<String, LocalBinding>,
 }
 
@@ -1313,11 +1624,14 @@ pub(super) struct Local {
     /// checking flag, not a C `const` qualifier, so `&local` keeps the plain
     /// pointer type and aliases keep ordinary C semantics.
     pub readonly: bool,
+    /// The `drop` method of a `defer` local, or `None` for an ordinary one.
     pub drop_symbol: Option<String>,
     /// The `drop` method's function type, kept with the symbol so emitting the
     /// call does not look the method up again.
     pub drop_ty: Option<TypeId>,
-    pub drop_active: bool,
+    /// The slot holding this defer local's `moved` flag; `None` for an
+    /// ordinary local.
+    pub moved_slot: Option<ir::SlotId>,
 }
 
 pub(super) struct LoopContext {
@@ -1352,7 +1666,9 @@ pub(super) struct SwitchContext {
 #[derive(Clone)]
 pub(super) struct LabelInfo {
     pub block: ir::BlockId,
-    pub path: Vec<(u32, usize)>,
+    /// One entry per enclosing scope: its id and the defer locals declared in
+    /// it so far, in declaration order.
+    pub path: Vec<(u32, Vec<usize>)>,
 }
 
 pub(super) struct PendingGoto {
@@ -1360,7 +1676,8 @@ pub(super) struct PendingGoto {
     pub source: ir::BlockId,
     pub trampoline: ir::BlockId,
     pub span: Span,
-    pub path: Vec<(u32, usize)>,
+    /// The same scope path a label records, so the two can be compared.
+    pub path: Vec<(u32, Vec<usize>)>,
 }
 
 /// The value of an expression: already in the IR, or still an addressable
@@ -1409,6 +1726,8 @@ pub(super) struct FnLower<'a> {
     pub f: ir::Function,
     pub block: ir::BlockId,
     pub terminated: bool,
+    /// `#[allow(defer_copy)]` on this body or its impl block.
+    pub allow_defer_copy: bool,
     pub scopes: Vec<FnScope>,
     pub locals: Vec<Local>,
     pub labels: HashMap<String, LabelInfo>,
@@ -1435,9 +1754,11 @@ impl<'a> FnLower<'a> {
                 ));
             }
         };
-        let signature = l.ir_signature(function_type);
-        let abi = crate::abi_adapter::plan_target_function(&l.types, function_type, l.abi)
-            .map_err(|error| {
+        let expand_args = pending.symbol == "main";
+        let signature = l.ir_signature(function_type, expand_args);
+        let abi =
+            crate::abi_adapter::plan_target_function(&l.types, function_type, l.abi, expand_args)
+                .map_err(|error| {
                 Diagnostic::new(
                     pending.decl.declarator.span,
                     format!("cannot plan the target ABI: {error}"),
@@ -1465,14 +1786,16 @@ impl<'a> FnLower<'a> {
             })
             .collect();
         let block = f.entry;
+        let allow_defer_copy = pending.decl.allow_defer_copy || l.allow_defer_copy;
         let mut lowering = FnLower {
             l,
             f,
             block,
             terminated: false,
+            allow_defer_copy,
             scopes: vec![FnScope {
                 id: 0,
-                drops: Vec::new(),
+                defers: Vec::new(),
                 bindings: HashMap::new(),
             }],
             locals: Vec::new(),
@@ -1502,9 +1825,23 @@ impl<'a> FnLower<'a> {
             }
         }
         lowering.l.current_function_name = Some(symbol.clone());
+        // #[args_builtin]: main's parameter arrives as its fields, one per
+        // argument register; every other function keeps the struct as one value.
+        let mut ir_index = 0;
         for (index, ty) in params.iter().enumerate() {
-            let param = lowering.f.params[index];
-            lowering.bind_parameter(&names[index], *ty, param)?;
+            let fields = lowering.l.args_builtin_fields(*ty);
+            match fields {
+                Some(fields) if expand_args => {
+                    let ir_params = lowering.f.params[ir_index..ir_index + fields.len()].to_vec();
+                    lowering.bind_args_parameter(&names[index], *ty, &fields, &ir_params)?;
+                    ir_index += fields.len();
+                }
+                _ => {
+                    let param = lowering.f.params[ir_index];
+                    lowering.bind_parameter(&names[index], *ty, param)?;
+                    ir_index += 1;
+                }
+            }
         }
         // Inside an `impl`, the receiver is also reachable as `self`, the way
         // `int get(self) { return self.x; }` reads.
@@ -1525,7 +1862,6 @@ impl<'a> FnLower<'a> {
         self.lower_block(&body)?;
         self.patch_gotos()?;
         if !self.terminated {
-            self.emit_all_drops();
             self.finish_fallthrough();
         }
         self.l.pop_type_scope();

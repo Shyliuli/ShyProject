@@ -191,6 +191,9 @@ pub struct RecordSpec {
     pub tag: Option<Name>,
     /// Generic parameters of a record definition (`Vec<T>`), empty if none.
     pub generics: Vec<GenericParam>,
+    /// `#[args_builtin]`: this struct is the process argument block, so main's
+    /// by-value parameter of its type passes its fields as separate arguments.
+    pub args_builtin: bool,
     pub members: Option<Vec<MemberDecl>>,
 }
 

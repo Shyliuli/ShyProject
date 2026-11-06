@@ -6,8 +6,9 @@
 //! argument, so several traits and several parameterizations of one trait can
 //! implement the same method name. `self` in a method signature denotes the
 //! implemented record type, so `self *s` is an ordinary pointer parameter.
-//! Locals whose type has a `drop` method are dropped in reverse declaration
-//! order at scope exit, `return`, `break`, and `continue`.
+//! A local declared with `defer` is dropped in reverse declaration order at
+//! scope exit, `return`, `break`, `continue`, and `goto`, unless `.move()` or
+//! `return name` set its `moved` flag.
 //!
 //! A `trait` declares compile-time signatures and a transparent value shape.
 //! `impl Trait for Type` checks that the method set and every signature match
@@ -240,19 +241,6 @@ impl super::Lowerer {
                 } else {
                     self.resolve_generic_args(&trait_name.text, &info.params, &block.trait_args)?
                 };
-                if self
-                    .trait_impls
-                    .contains(&(trait_name.text.clone(), args.clone(), ty))
-                {
-                    return Err(Diagnostic::new(
-                        block.span,
-                        format!(
-                            "trait '{}' is already implemented for '{}'",
-                            trait_name.text, name
-                        ),
-                    ));
-                }
-                self.check_impl_method_names(block, trait_name, &info, &name)?;
                 Some((trait_name.clone(), info, args))
             }
             None => None,
@@ -263,6 +251,25 @@ impl super::Lowerer {
                 name: trait_name.text.clone(),
                 args: args.clone(),
             });
+        let original = trait_impl.as_ref().filter(|key| {
+            self.trait_impls
+                .contains(&(key.name.clone(), key.args.clone(), ty))
+        });
+        // A header may declare the methods of a trait implementation and one
+        // source file define them. The second block then continues the same
+        // implementation instead of adding another one.
+        let continuation = original.is_some_and(|key| self.continues_trait_impl(block, ty, key));
+        if let Some(key) = original
+            && !continuation
+        {
+            return Err(Diagnostic::new(
+                block.span,
+                format!("trait '{}' is already implemented for '{}'", key.name, name),
+            ));
+        }
+        if let Some((trait_name, info, _)) = &trait_info {
+            self.check_impl_method_names(block, trait_name, info, &name, ty, trait_impl.as_ref())?;
+        }
         let saved = self.impl_context.clone();
         self.impl_context = Some((ty, name.clone()));
         // The trait's concrete arguments are in scope while its method
@@ -273,7 +280,7 @@ impl super::Lowerer {
         }
         let result = (|| {
             for prototype in &block.prototypes {
-                self.collect_method_prototype(prototype, ty, &name)?;
+                self.collect_method_prototype(prototype, ty, &name, trait_impl.as_ref())?;
             }
             for method in &block.methods {
                 self.collect_function(
@@ -286,7 +293,7 @@ impl super::Lowerer {
                     }),
                 )?;
             }
-            if let Some((_, info, _)) = &trait_info {
+            if !continuation && let Some((_, info, _)) = &trait_info {
                 self.collect_default_methods(
                     block,
                     info,
@@ -313,6 +320,31 @@ impl super::Lowerer {
             self.register_from_conversion(trait_name, args, ty)?;
         }
         result
+    }
+
+    /// Whether `block` only defines methods an earlier block declared without
+    /// a body, so it continues that implementation instead of restating it.
+    fn continues_trait_impl(
+        &self,
+        block: &ast::ImplBlock,
+        receiver: TypeId,
+        trait_impl: &super::TraitImplKey,
+    ) -> bool {
+        let Some(set) = self
+            .impls
+            .get(&receiver)
+            .and_then(|info| info.trait_methods.get(trait_impl))
+        else {
+            return false;
+        };
+        !block.methods.is_empty()
+            && block.methods.iter().all(|method| {
+                method
+                    .declarator
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| set.prototypes.contains(&name.text))
+            })
     }
 
     /// Records the concrete `impl From<Source> for Target` method that `?`
@@ -367,14 +399,22 @@ impl super::Lowerer {
             let Some(body) = &trait_method.body else {
                 continue;
             };
-            let implemented = block.methods.iter().any(|method| {
+            // A method this block only declares is defined elsewhere, so it is
+            // not the trait's default body.
+            let declared = block.methods.iter().any(|method| {
                 method
                     .declarator
                     .name
                     .as_ref()
                     .is_some_and(|method_name| method_name.text == name.text)
+            }) || block.prototypes.iter().any(|prototype| {
+                prototype
+                    .declarator
+                    .name
+                    .as_ref()
+                    .is_some_and(|method_name| method_name.text == name.text)
             });
-            if implemented {
+            if declared {
                 continue;
             }
             // An inherited default is code this translation unit generated,
@@ -390,13 +430,14 @@ impl super::Lowerer {
                 specs,
                 declarator: trait_method.declarator.clone(),
                 body: body.clone(),
+                allow_defer_copy: false,
             };
             self.collect_function(&declaration, Some(target.clone()))?;
         }
         Ok(())
     }
 
-    /// Checks that the implementation defines exactly the trait's methods.
+    /// Checks that the implementation writes exactly the trait's methods.
     /// Signatures are checked later, after each method has a resolved type.
     pub(super) fn check_impl_method_names(
         &self,
@@ -404,14 +445,27 @@ impl super::Lowerer {
         trait_name: &ast::Name,
         info: &TraitInfo,
         type_name: &str,
+        receiver: TypeId,
+        trait_impl: Option<&super::TraitImplKey>,
     ) -> Result<(), Diagnostic> {
-        for method in &block.methods {
-            let Some(name) = &method.declarator.name else {
-                return Err(Diagnostic::new(
-                    method.span,
-                    "method definition needs a name",
-                ));
-            };
+        let written = block
+            .methods
+            .iter()
+            .filter_map(|method| {
+                method
+                    .declarator
+                    .name
+                    .as_ref()
+                    .map(|name| (name, method.span))
+            })
+            .chain(block.prototypes.iter().filter_map(|prototype| {
+                prototype
+                    .declarator
+                    .name
+                    .as_ref()
+                    .map(|name| (name, prototype.span))
+            }));
+        for (name, span) in written {
             let declared = info.methods.iter().any(|trait_method| {
                 trait_method
                     .declarator
@@ -421,7 +475,7 @@ impl super::Lowerer {
             });
             if !declared {
                 return Err(Diagnostic::new(
-                    name.span,
+                    span,
                     format!(
                         "method '{}' is not declared by trait '{}'",
                         name.text, trait_name.text
@@ -429,18 +483,34 @@ impl super::Lowerer {
                 ));
             }
         }
+        // Methods an earlier block declared count as written, so a block that
+        // only defines some of them is complete.
+        let existing = trait_impl.and_then(|key| {
+            self.impls
+                .get(&receiver)
+                .and_then(|info| info.trait_methods.get(key))
+        });
         for trait_method in &info.methods {
             let Some(trait_method_name) = &trait_method.declarator.name else {
                 continue;
             };
-            let implemented = block.methods.iter().any(|method| {
+            let written = block.methods.iter().any(|method| {
                 method
                     .declarator
                     .name
                     .as_ref()
                     .is_some_and(|name| name.text == trait_method_name.text)
+            }) || block.prototypes.iter().any(|prototype| {
+                prototype
+                    .declarator
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| name.text == trait_method_name.text)
+            }) || existing.is_some_and(|set| {
+                set.methods.contains_key(&trait_method_name.text)
+                    || set.generic_methods.contains_key(&trait_method_name.text)
             });
-            if !implemented {
+            if !written {
                 // A trait method with a default body is optional: the impl
                 // inherits it, lowered with `self` bound to this type.
                 if trait_method.body.is_some() {
@@ -1057,111 +1127,108 @@ impl FnLower<'_> {
         })
     }
 
-    /// Emit the `drop` call for one local and mark it moved.
-    pub(super) fn emit_drop(&mut self, local: usize) {
-        let (slot, drop_ty, symbol, active) = {
+    /// Give a local the `defer` treatment: it needs a `drop(self *value)`
+    /// method and a `moved` flag slot initialized to 0.
+    pub(super) fn make_defer_local(&mut self, local: usize, span: Span) -> Result<(), Diagnostic> {
+        let (ty, name) = {
             let local = &self.locals[local];
-            (
-                local.slot,
-                local.drop_ty,
-                local.drop_symbol.clone(),
-                local.drop_active,
-            )
+            (local.ty, local.name.clone())
         };
-        let Some(symbol) = symbol else {
-            return;
+        let Some(method) = self.l.drop_method(ty)? else {
+            return Err(Diagnostic::new(
+                span,
+                "a `defer` declaration needs a type with a `drop(self *value)` method",
+            ));
         };
-        if !active {
-            return;
+        let first_param = match self.l.types.kind(method.ty) {
+            TypeKind::Function { params, .. } => params.first().copied(),
+            _ => None,
+        };
+        let receiver = first_param.and_then(|param| self.l.pointee(param));
+        if !receiver.is_some_and(|pointee| self.l.types.is_compatible(pointee.ty, ty)) {
+            return Err(Diagnostic::new(
+                span,
+                "the `drop` method of a type used with `defer` needs a `self *value` parameter",
+            ));
         }
-        self.locals[local].drop_active = false;
-        let argument = self.address_value(ir::Address::slot(slot));
-        let (signature, abi) = match drop_ty {
-            Some(drop_ty) => {
-                let abi =
-                    crate::abi_adapter::plan_target_function(&self.l.types, drop_ty, self.l.abi)
-                        .unwrap_or_else(|_| {
-                            abi_plan::plan(
-                                self.l.abi,
-                                &abi_plan::FunctionSignature {
-                                    ret: abi_plan::AbiType::Void,
-                                    params: vec![abi_plan::AbiType::Pointer {
-                                        bits: (self.l.layout.pointer_bytes * 8) as u16,
-                                    }],
-                                    variadic: false,
-                                },
-                            )
-                            .expect("a pointer parameter always plans")
-                        });
-                (self.l.ir_signature(drop_ty), abi)
-            }
-            None => (
-                ir::Signature::new(ir::Type::Void, vec![ir::Type::Ptr]),
-                abi_plan::plan(
-                    self.l.abi,
-                    &abi_plan::FunctionSignature {
-                        ret: abi_plan::AbiType::Void,
-                        params: vec![abi_plan::AbiType::Pointer {
-                            bits: (self.l.layout.pointer_bytes * 8) as u16,
-                        }],
-                        variadic: false,
-                    },
-                )
-                .expect("a pointer parameter always plans"),
-            ),
+        let boolean = self.l.types.builtin(Builtin::Bool);
+        let moved = self
+            .f
+            .alloc_slot(format!("{name}.moved"), self.l.ir_type(boolean));
+        let zero = ir::Operand::Constant(ir::Constant::zero(ir::Type::I1));
+        self.store_value(
+            ir::Address::slot(moved),
+            zero,
+            boolean,
+            super::Qualifiers::NONE,
+        );
+        self.locals[local].drop_symbol = Some(method.symbol);
+        self.locals[local].drop_ty = Some(method.ty);
+        self.locals[local].moved_slot = Some(moved);
+        self.current_scope_mut().defers.push(local);
+        Ok(())
+    }
+
+    /// Emit `if (!moved) drop(&local)` for one defer local.
+    pub(super) fn emit_defer_drop(&mut self, local: usize) {
+        let Some(moved) = self.locals[local].moved_slot else {
+            return;
         };
+        let boolean = self.l.types.builtin(Builtin::Bool);
+        let flag = self.load_value(ir::Address::slot(moved), boolean, super::Qualifiers::NONE);
+        let zero = ir::Operand::Constant(ir::Constant::zero(ir::Type::I1));
+        let not_moved = self.emit_value(ir::InstKind::ICmp {
+            pred: ir::IntPredicate::Eq,
+            lhs: flag,
+            rhs: zero,
+            ty: ir::Type::I1,
+        });
+        let drop_block = self.f.alloc_block();
+        let skip_block = self.f.alloc_block();
+        self.terminate(ir::Terminator::branch(
+            ir::Operand::Value(not_moved),
+            drop_block,
+            skip_block,
+        ));
+        self.set_current(drop_block);
+        self.emit_drop_call(local);
+        self.jump_to(skip_block);
+        self.set_current(skip_block);
+    }
+
+    /// Emit the `drop` call for one defer local.
+    pub(super) fn emit_drop_call(&mut self, local: usize) {
+        let (slot, drop_ty, symbol) = {
+            let local = &self.locals[local];
+            (local.slot, local.drop_ty, local.drop_symbol.clone())
+        };
+        // A defer local always has both, and an ordinary local has neither.
+        let (Some(drop_ty), Some(symbol)) = (drop_ty, symbol) else {
+            return;
+        };
+        let argument = self.address_value(ir::Address::slot(slot));
+        let abi =
+            crate::abi_adapter::plan_target_function(&self.l.types, drop_ty, self.l.abi, false)
+                .unwrap_or_else(|_| {
+                    abi_plan::plan(
+                        self.l.abi,
+                        &abi_plan::FunctionSignature {
+                            ret: abi_plan::AbiType::Void,
+                            params: vec![abi_plan::AbiType::Pointer {
+                                bits: (self.l.layout.pointer_bytes * 8) as u16,
+                            }],
+                            variadic: false,
+                        },
+                    )
+                    .expect("a pointer parameter always plans")
+                });
+        let signature = self.l.ir_signature(drop_ty, false);
         let call = ir::Call::direct(symbol, vec![argument], signature, abi);
         if call.signature.ret.is_void() {
             self.emit_statement(ir::InstKind::Call(Box::new(call)));
         } else {
             self.emit_value(ir::InstKind::Call(Box::new(call)));
         }
-    }
-
-    /// Shy RAII assignment: drop the old value, move the right side, store it.
-    pub(super) fn raii_assign(
-        &mut self,
-        local: usize,
-        left: &ast::Expr,
-        right: &ast::Expr,
-        span: Span,
-    ) -> Result<ExprVal, Diagnostic> {
-        self.check_writable_local(local, span)?;
-        if let ast::Expr::Name(name) = right
-            && let Ok(Resolved::Local(other)) = self.resolve_name(&name.text, name.span)
-            && other == local
-        {
-            return Err(Diagnostic::new(
-                span,
-                "cannot move an object with a drop method into itself",
-            ));
-        }
-        let lhs_ty = self.locals[local].ty;
-        if self.locals[local].drop_active {
-            self.emit_drop(local);
-        }
-        let (operand, ty) = self.rvalue(right)?;
-        if !self.l.types.is_compatible(lhs_ty, ty) {
-            return Err(Diagnostic::new(
-                right.span(),
-                "assignment type does not match the destination",
-            ));
-        }
-        self.deactivate_if_local(right);
-        let slot = self.locals[local].slot;
-        self.store_value(
-            ir::Address::slot(slot),
-            operand,
-            lhs_ty,
-            self.locals[local].qualifiers,
-        );
-        self.locals[local].drop_active = true;
-        let _ = left;
-        Ok(ExprVal {
-            ty: lhs_ty,
-            qualifiers: super::Qualifiers::NONE,
-            kind: ExprKind::Value(operand),
-        })
     }
 
     pub(super) fn lower_asm(&mut self, asm: &ast::AsmStmt) -> Result<(), Diagnostic> {
@@ -1199,7 +1266,15 @@ impl FnLower<'_> {
                             ),
                         ));
                     }
-                    let bytes = self.l.size_of(ty, operand.span)?;
+                    // A ShyISA register holds an address as one 32-bit
+                    // word, whatever the data model says a pointer object
+                    // is; the other ABIs bind the object itself.
+                    let bytes =
+                        if self.l.abi == abi_plan::AbiKind::ShyV1 && self.l.types.is_pointer(ty) {
+                            4
+                        } else {
+                            self.l.size_of(ty, operand.span)?
+                        };
                     let access = if address_form {
                         ir::AsmAccess::AddressOnly
                     } else if value_form {

@@ -564,9 +564,22 @@ impl Lowerer {
             }
         };
         let fields = self.resolve_members(members)?;
+        if spec.args_builtin {
+            for field in &fields {
+                if !self.types.is_scalar(field.ty.ty) {
+                    return Err(Diagnostic::new(
+                        spec.span,
+                        "`#[args_builtin]` struct fields must be scalar types",
+                    ));
+                }
+            }
+        }
         self.types.complete_record(ty, fields).map_err(|error| {
             Diagnostic::new(spec.span, format!("invalid record layout: {error}"))
         })?;
+        if spec.args_builtin {
+            self.types.mark_args_builtin(ty);
+        }
         // The C export spells a parameter type the way the source declared it,
         // so the tag behind a type is worth keeping.
         if let Some(tag) = &tag {
@@ -898,7 +911,7 @@ impl Lowerer {
             }
             self.declare_tag(&tag.text, ty, spec.span)?;
         }
-        self.define_enum(
+        let defined = self.define_enum(
             ty,
             underlying,
             enumerators,
@@ -906,7 +919,13 @@ impl Lowerer {
             false,
             spec.result_niche,
             spec.option_niche,
-        )
+        )?;
+        // The C export spells a type the way the source declared it, so the tag
+        // behind an enum is worth keeping, exactly as for a record.
+        if let Some(tag) = &spec.tag {
+            self.type_names.insert(ty, tag.text.clone());
+        }
+        Ok(defined)
     }
 
     /// Defines an enum's variants and constants.

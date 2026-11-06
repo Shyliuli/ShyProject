@@ -76,6 +76,22 @@ impl Layout {
         long_bytes: 4,
         endian: Endian::Little,
     };
+
+    /// The data model of an architecture this compiler lowers to, or `None`
+    /// when it has none.
+    ///
+    /// `shy` is ShyISA itself; the others are the LLVM targets. The Shy backend
+    /// emits ShyISA code for any of them, so its data model is not tied to the
+    /// target's instruction set: a probe image runs on ShyISA but has to agree
+    /// with the program's `sizeof`, so it is lowered with the program's arch.
+    pub fn for_arch(arch: &str) -> Option<Layout> {
+        match arch {
+            "shy" => Some(Layout::SHY),
+            "riscv32" => Some(Layout::ILP32),
+            "x86_64" | "riscv64" | "loongarch64" | "aarch64" => Some(Layout::LP64),
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

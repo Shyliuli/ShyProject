@@ -3,7 +3,7 @@ int marker;
 int main(void) {
   marker = 0;
   {
-    Guard g = Guard::new(11);
+    defer Guard g = Guard::new(11);
     if (g.value != 11)
       return 1;
   }

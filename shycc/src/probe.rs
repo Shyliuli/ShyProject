@@ -60,6 +60,8 @@ use emu::probe::{
     ResultFrame, Stop,
 };
 #[cfg(feature = "constfn-probe")]
+use shyc::ir::Layout;
+#[cfg(feature = "constfn-probe")]
 use shyc::lexer;
 #[cfg(feature = "constfn-probe")]
 use shyc::lexer::TokenKind;
@@ -107,9 +109,19 @@ const HOST_OP_PROVIDE_IMPL: u32 = 9;
 /// eof).
 #[cfg(feature = "constfn-probe")]
 const LAST_TOKEN_KIND: u32 = 6;
-/// `sizeof(struct Tokens)`: the count and the four parallel-array pointers.
+/// `sizeof(struct Tokens)` in `layout`, which is also where its arrays start:
+/// the count word, padded to the pointer alignment, then the four pointers.
 #[cfg(feature = "constfn-probe")]
-const TOKENS_HEADER_BYTES: usize = 20;
+fn tokens_bytes(layout: Layout) -> usize {
+    5 * layout.pointer_bytes as usize
+}
+
+/// Bytes one token takes in the four parallel arrays: the kind and length are
+/// `int`, the text is a pointer, and the span is two `int`.
+#[cfg(feature = "constfn-probe")]
+fn tokens_entry_bytes(layout: Layout) -> usize {
+    16 + layout.pointer_bytes as usize
+}
 
 /// Whether this build carries the probe runner.
 #[cfg(feature = "constfn-probe")]
@@ -371,11 +383,12 @@ pub fn run_answers(
     image: &[u8],
     requests: &[Request],
     options: ProbeOptions,
+    layout: Layout,
 ) -> Result<Vec<Answer>> {
     let outcomes: Vec<Result<(Answer, Vec<(String, String)>)>> = std::thread::scope(|scope| {
         let runs: Vec<_> = requests
             .iter()
-            .map(|request| scope.spawn(|| run_request(image, request, options.clone())))
+            .map(|request| scope.spawn(|| run_request(image, request, options.clone(), layout)))
             .collect();
         runs.into_iter()
             .map(|run| run.join().expect("a probe run thread does not panic"))
@@ -403,6 +416,7 @@ fn run_request(
     image: &[u8],
     request: &Request,
     options: ProbeOptions,
+    layout: Layout,
 ) -> Result<(Answer, Vec<(String, String)>)> {
     // A failed run is only actionable with the budget it ran under and the
     // request it was answering, so the error names both.
@@ -413,7 +427,7 @@ fn run_request(
     );
     let mut provided = Vec::new();
     let run = run_round(image, options, request.id, |host, emu| {
-        answer_host_request(host, emu, &mut provided)
+        answer_host_request(host, emu, &mut provided, layout)
     })
     .with_context(|| {
         format!(
@@ -767,6 +781,7 @@ pub fn answer_host_request(
     request: &HostRequest,
     emu: &mut Emu,
     provided: &mut Vec<(String, String)>,
+    layout: Layout,
 ) -> Result<Vec<u8>> {
     let call = parse_host_call(request)?;
     match call.op {
@@ -781,7 +796,7 @@ pub fn answer_host_request(
             // The bytes are not decoded yet; op 3 will lex them.
             Ok((text.len() as u32).to_be_bytes().to_vec())
         }
-        HOST_OP_TOKENS_FROM_TEXT => answer_tokens_from_text(&call, emu),
+        HOST_OP_TOKENS_FROM_TEXT => answer_tokens_from_text(&call, emu, layout),
         HOST_OP_TRY => answer_try(&call, emu, provided),
         HOST_OP_IMPLEMENTS | HOST_OP_DECLARED => answer_world_query(&call, emu),
         HOST_OP_PROVIDE_IMPL => answer_provide_impl(&call, emu, provided),
@@ -861,17 +876,20 @@ fn answer_world_query(call: &HostCall, emu: &mut Emu) -> Result<Vec<u8>> {
 /// Lex the text of one op 3 request and write its `struct Tokens` value into
 /// the guest scratch buffer.
 ///
-/// The scratch layout is the one `core/comptime.shyh` declares, all fields
-/// big-endian `u32`:
+/// The scratch layout is the one `core/comptime.shyh` declares, every number
+/// big-endian and every field at its place in the target's data model:
 ///
 /// ```text
-/// +0  count
-/// +4  kinds   -> count words
-/// +8  texts   -> count words, each pointing at a NUL-terminated spelling
-/// +12 lens    -> count words, the spelling byte count without the NUL
-/// +16 spans   -> 2 * count words, start and end offset
-/// ... kinds[count], texts[count], lens[count], spans[2 * count], spellings
+/// +0             count
+/// +align(4, ptr) kinds   -> count ints
+///               texts   -> count pointers, each to a NUL-terminated spelling
+///               lens    -> count ints, the spelling byte count without the NUL
+///               spans   -> 2 * count ints, start and end offset
+/// ... kinds, texts, lens, spans, spellings
 /// ```
+///
+/// A pointer object is `layout.pointer_bytes` wide and holds a 32-bit ShyISA
+/// address, so the address goes in its first word and the rest stays zero.
 ///
 /// A token's spelling is `shyc::lexer::spelling`, so the bytes match the guest
 /// image's own baking. Spans are zero for now: the compiler has not decided
@@ -881,7 +899,7 @@ fn answer_world_query(call: &HostCall, emu: &mut Emu) -> Result<Vec<u8>> {
 /// `capacity`, guest memory is left untouched and the reply is 1; the required
 /// size goes to stderr because the reply is only one word.
 #[cfg(feature = "constfn-probe")]
-fn answer_tokens_from_text(call: &HostCall, emu: &mut Emu) -> Result<Vec<u8>> {
+fn answer_tokens_from_text(call: &HostCall, emu: &mut Emu, layout: Layout) -> Result<Vec<u8>> {
     let [text_address, text_length, scratch, capacity] = call.args;
     let bytes = emu
         .debug_read_mem(text_address, text_length as usize)
@@ -915,7 +933,7 @@ fn answer_tokens_from_text(call: &HostCall, emu: &mut Emu) -> Result<Vec<u8>> {
         .iter()
         .map(|token| lexer::spelling(token).into_bytes())
         .collect();
-    let total = tokens_scratch_bytes(&spellings);
+    let total = tokens_scratch_bytes(&spellings, layout);
     // A probe cannot read this reply and recover: the generated guest stub
     // hands the scratch buffer back as the result as soon as the call returns.
     // Too small is therefore a compiler limit, not a value the generator could
@@ -931,7 +949,7 @@ fn answer_tokens_from_text(call: &HostCall, emu: &mut Emu) -> Result<Vec<u8>> {
             "host op {HOST_OP_TOKENS_FROM_TEXT}: scratch at 0x{scratch:08X} plus {total} byte(s) leaves the guest address space"
         );
     }
-    let image = tokens_image(scratch, &tokens, &spellings);
+    let image = tokens_image(scratch, &tokens, &spellings, layout);
     emu.debug_write_mem(scratch, &image).with_context(|| {
         format!(
             "host op {HOST_OP_TOKENS_FROM_TEXT}: cannot write {total} byte(s) at guest address 0x{scratch:08X}"
@@ -940,16 +958,24 @@ fn answer_tokens_from_text(call: &HostCall, emu: &mut Emu) -> Result<Vec<u8>> {
     Ok(0u32.to_be_bytes().to_vec())
 }
 
-/// Bytes needed for a `struct Tokens` over `spellings`: the header, five
-/// words per token for the arrays (spans take two), and one NUL per spelling.
+/// Bytes needed for a `struct Tokens` over `spellings`: the header, one
+/// entry per token for the arrays, and one NUL per spelling.
 #[cfg(feature = "constfn-probe")]
-fn tokens_scratch_bytes(spellings: &[Vec<u8>]) -> usize {
-    TOKENS_HEADER_BYTES
-        + spellings.len() * 20
+fn tokens_scratch_bytes(spellings: &[Vec<u8>], layout: Layout) -> usize {
+    tokens_bytes(layout)
+        + spellings.len() * tokens_entry_bytes(layout)
         + spellings
             .iter()
             .map(|spelling| spelling.len() + 1)
             .sum::<usize>()
+}
+
+/// Append one pointer object: the 32-bit address, then the padding the data
+/// model leaves after it.
+#[cfg(feature = "constfn-probe")]
+fn push_pointer(image: &mut Vec<u8>, address: u32, layout: Layout) {
+    image.extend_from_slice(&address.to_be_bytes());
+    image.resize(image.len() + layout.pointer_bytes as usize - 4, 0);
 }
 
 /// Build the whole `struct Tokens` image, spellings included.
@@ -957,24 +983,34 @@ fn tokens_scratch_bytes(spellings: &[Vec<u8>]) -> usize {
 /// `spellings` is parallel to `tokens`. The caller has already checked that
 /// the image fits the offered scratch, so every offset stays inside it.
 #[cfg(feature = "constfn-probe")]
-fn tokens_image(base: u32, tokens: &[lexer::Token], spellings: &[Vec<u8>]) -> Vec<u8> {
+fn tokens_image(
+    base: u32,
+    tokens: &[lexer::Token],
+    spellings: &[Vec<u8>],
+    layout: Layout,
+) -> Vec<u8> {
     let count = tokens.len();
-    let kinds_ptr = base + TOKENS_HEADER_BYTES as u32;
+    let pointer = layout.pointer_bytes;
+    let arrays = base + tokens_bytes(layout) as u32;
+    let kinds_ptr = arrays;
     let texts_ptr = kinds_ptr + 4 * count as u32;
-    let lens_ptr = texts_ptr + 4 * count as u32;
+    let lens_ptr = texts_ptr + pointer * count as u32;
     let spans_ptr = lens_ptr + 4 * count as u32;
     let data_ptr = spans_ptr + 8 * count as u32;
 
-    let mut image = Vec::with_capacity(tokens_scratch_bytes(spellings));
-    for word in [count as u32, kinds_ptr, texts_ptr, lens_ptr, spans_ptr] {
-        image.extend_from_slice(&word.to_be_bytes());
+    let mut image = Vec::with_capacity(tokens_scratch_bytes(spellings, layout));
+    image.extend_from_slice(&(count as u32).to_be_bytes());
+    // The count is one word; a wider pointer pads it to its own alignment.
+    image.resize(pointer as usize, 0);
+    for word in [kinds_ptr, texts_ptr, lens_ptr, spans_ptr] {
+        push_pointer(&mut image, word, layout);
     }
     for token in tokens {
         image.extend_from_slice(&token_kind_number(&token.kind).to_be_bytes());
     }
     let mut text_ptr = data_ptr;
     for spelling in spellings {
-        image.extend_from_slice(&text_ptr.to_be_bytes());
+        push_pointer(&mut image, text_ptr, layout);
         text_ptr += (spelling.len() + 1) as u32;
     }
     for spelling in spellings {

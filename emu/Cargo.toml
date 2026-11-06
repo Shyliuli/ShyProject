@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "emu"
 path = "src/main.rs"
 
+[[bin]]
+name = "shyemu-user"
+path = "src/user_main.rs"
+
 [dependencies]
 anyhow = "1.0.103"
 shy_isa_lib = { path = "../shy_isa_lib" }

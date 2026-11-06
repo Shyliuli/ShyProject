@@ -1,0 +1,69 @@
+// shyemu-user 的平台调用：每个 POSIX 调用都是一条直接透传到宿主的系统调用。
+// 系统调用约定见 ABI.md：0x 是号码，1x..6x 是参数，1x 返回结果，
+// 失败时返回负的 errno。
+
+#include <stddef.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+// Linux asm-generic 编号，riscv64 使用同一套。
+#define SYS_OPENAT 56
+#define SYS_CLOSE 57
+#define SYS_READ 63
+#define SYS_WRITE 64
+#define SYS_EXIT 93
+#define SYS_BRK 214
+
+#define AT_FDCWD -100
+
+// 0x 放号码，1x..3x 放参数，结果从 1x 写回 result。
+static int syscall3(int number, int a0, int a1, int a2) {
+  int result = 0;
+  asm!(number, a0, a1, a2, result) {
+    "seta 0x {number}\n"
+    "seta 1x {a0}\n"
+    "seta 2x {a1}\n"
+    "seta 3x {a2}\n"
+    "syscall\n"
+    "seta {result} 1x"
+  };
+  return result;
+}
+
+ssize_t read(int fd, void *buf, size_t count) {
+  return (ssize_t)syscall3(SYS_READ, fd, (int)buf, (int)count);
+}
+
+ssize_t write(int fd, const void *buf, size_t count) {
+  return (ssize_t)syscall3(SYS_WRITE, fd, (int)buf, (int)count);
+}
+
+int open(const char *path, int flags, ...) {
+  return syscall3(SYS_OPENAT, AT_FDCWD, (int)path, flags);
+}
+
+int close(int fd) {
+  return syscall3(SYS_CLOSE, fd, 0, 0);
+}
+
+void _exit(int status) {
+  syscall3(SYS_EXIT, status, 0, 0);
+  for (;;)
+    ;
+}
+
+// brk 失败时返回当前堆顶，sbrk 据此报告 (void *)-1。
+extern char _end[];
+static char *heap_end = NULL;
+
+void *sbrk(intptr_t increment) {
+  if (!heap_end)
+    heap_end = _end;
+  char *next = heap_end + increment;
+  if (syscall3(SYS_BRK, (int)next, 0, 0) != (int)next)
+    return (void *)-1;
+  char *old = heap_end;
+  heap_end = next;
+  return old;
+}

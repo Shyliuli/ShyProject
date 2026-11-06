@@ -2,8 +2,7 @@
 
 The language is at version **0.1.0**: the first release boundary, still open to
 change before 1.0. This document records that boundary. The independent `shyc`
-frontend is the main implementation; the chibicc fork remains an early
-bootstrap and ShyOS compatibility validator.
+frontend is the only implementation.
 
 ## C compatibility
 
@@ -19,8 +18,10 @@ ShyC keeps C's direct memory model:
 - `const` keeps its C meaning and may appear in the usual C positions;
 - structures, integer types, pointer types, and ABI-visible layouts remain
   transparent;
-- `drop` is deterministic scope cleanup, like C++ RAII, and does not imply
-  ownership;
+- `defer` is explicit scope cleanup: a local declared `defer` calls its type's
+  `drop(self *value)` when the scope ends, in reverse declaration order.
+  Ordinary locals are never dropped, and `defer` implies no ownership, borrow
+  checking, or move checking;
 - every advanced type has a concrete C ABI representation or must be wrapped
   explicitly before crossing a C boundary.
 
@@ -52,7 +53,10 @@ fn identity<T>(T value) -> T { return value; }
 `impl Vec<T>` binds `T` for every method of the block; a method may add type
 parameters of its own. A generic impl is instantiated in each translation unit
 that uses it, so its methods are always written with their bodies, usually in a
-header. `const N` is a compile-time integer parameter:
+header. A trait implementation whose receiver is concrete has one definition
+site, so its methods may be declared in a header and defined in a source file,
+like a plain method of an inherent impl. `const N` is a compile-time integer
+parameter:
 
 ```c
 struct Array<T, const N> {
@@ -218,7 +222,10 @@ Visibility is written per declaration, not per block: an `impl` block marks each
 method it exports, and a file lists the fields it exports next to the fields it
 keeps to itself. A trait implementation follows the same rule as an inherent
 one: its methods are file-local unless they say `pub`, so a header may carry a
-whole `impl Trait for T` block without exporting anything.
+whole `impl Trait for T` block without exporting anything. The methods of a
+concrete `impl Trait for T` may also be declared without a body; the definition
+in one source file adopts the symbol the declaration gave it. A generic impl is
+instantiated where it is used, so its methods keep their bodies.
 
 ```c
 // bare Shy: 默认私有
@@ -664,6 +671,13 @@ format survives into the program, so there is no format string to parse and no
 per-arity wrapper to call. The expansion is a GNU statement expression, so it
 works wherever an expression does.
 
+`writeln!(writer, ...)` is the same expansion with a destination: the format
+string follows the writer, the finished line is written through it, and the
+temporary `String` is freed. The writer is one ordinary expression of a type
+implementing `Writer`; the compiler stores it in a local, so it is evaluated
+once. A temporary endpoint (`stdout_writer()`) or a writer's address
+(`writeln!(&text, ...)` for a `String`) both work.
+
 `scanln!` is different: it hands its string to `sscanf`, so the compiler only
 counts C conversions and calls a wrapper, up to eight arguments:
 `scanln!("%d %d", &a, &b)`. An argument must implement the trait its
@@ -792,7 +806,5 @@ unchanged.
 
 ## Backend boundary
 
-`shyc` owns the language frontend and the typed IR. Its Shy and LLVM backends
-consume the same IR and ABI plans. The chibicc fork is retained only for the
-pre-release bootstrap and existing ShyOS validation path; it is not a target for
-new Rustic language features.
+`shyc` owns the language frontend and the typed IR. Its Shy, LLVM, and C
+backends consume the same frontend and ABI plans.

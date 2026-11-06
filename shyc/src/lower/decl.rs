@@ -358,17 +358,16 @@ impl Lowerer {
                         // A method follows the same rule as a free function:
                         // `pub` exports it, everything else stays file-local, so
                         // a header can define a trait implementation without
-                        // duplicating the symbol in every translation unit.
-                        if self.file_local(
+                        // duplicating the symbol in every translation unit. A
+                        // prototype declared it already, and then the definition
+                        // adopts the symbol the header gave it.
+                        self.method_symbol(
+                            symbol,
                             declaration.specs.storage,
                             declaration.specs.is_shy_fn,
                             declaration.specs.is_pub,
                             true,
-                        ) {
-                            self.internal_symbol(&symbol)
-                        } else {
-                            symbol
-                        }
+                        )
                     }
                     (None, None) => self.inherent_method_symbol(
                         &target.name,
@@ -436,7 +435,13 @@ impl Lowerer {
             match &target.trait_impl {
                 Some(trait_impl) => {
                     let set = info.trait_methods.entry(trait_impl.clone()).or_default();
-                    if set.methods.contains_key(&name) || set.generic_methods.contains_key(&name) {
+                    // A definition replaces the prototype that declared it; a
+                    // second definition was already rejected by
+                    // declare_function_symbol.
+                    let was_prototype = set.prototypes.remove(&name);
+                    if set.generic_methods.contains_key(&name)
+                        || (set.methods.contains_key(&name) && !was_prototype)
+                    {
                         return Err(Diagnostic::new(
                             declaration.span,
                             format!("redefinition of method '{name}'"),
@@ -507,7 +512,20 @@ impl Lowerer {
             Self::sanitize_ident(type_name),
             Self::sanitize_ident(method)
         );
-        // 头文件里的原型先登记过：定义沿用原型定下的符号，两边才一致。
+        self.method_symbol(symbol, storage, is_shy_fn, is_pub, defined)
+    }
+
+    /// The symbol a method declaration or definition emits.
+    ///
+    /// 头文件里的原型先登记过：定义沿用原型定下的符号，两边才一致。
+    fn method_symbol(
+        &self,
+        symbol: String,
+        storage: Option<ast::StorageClass>,
+        is_shy_fn: bool,
+        is_pub: bool,
+        defined: bool,
+    ) -> String {
         if let Some(GlobalRef::Function(index)) = self.global_ref(&symbol) {
             return self.function(index).symbol.clone();
         }
@@ -518,16 +536,23 @@ impl Lowerer {
         }
     }
 
-    /// Registers a bodiless method of an inherent impl: the method table gets
-    /// its signature and the symbol is declared but not defined, exactly like
-    /// a C prototype. The definition may follow in this unit or another one.
+    /// Registers a bodiless method of an inherent or trait impl: the method
+    /// table gets its signature and the symbol is declared but not defined,
+    /// exactly like a C prototype. The definition may follow in this unit or
+    /// another one.
     pub(super) fn collect_method_prototype(
         &mut self,
         prototype: &ast::MethodPrototype,
         ty: TypeId,
         type_name: &str,
+        trait_impl: Option<&super::TraitImplKey>,
     ) -> Result<(), Diagnostic> {
-        self.reject_generic_declarator(&prototype.declarator)?;
+        if generic_declarator(&prototype.declarator).is_some() {
+            return Err(Diagnostic::new(
+                prototype.span,
+                "a generic method must have a body: each call instantiates it",
+            ));
+        }
         let ResolvedSpecs {
             ty: base,
             qualifiers,
@@ -545,14 +570,26 @@ impl Lowerer {
                 "declarator is not a function",
             ));
         }
-        let symbol = self.inherent_method_symbol(
-            type_name,
-            &name,
-            prototype.specs.storage,
-            prototype.specs.is_shy_fn,
-            prototype.specs.is_pub,
-            false,
-        );
+        let symbol = match trait_impl {
+            Some(trait_impl) => {
+                let symbol = self.trait_impl_method_symbol(trait_impl, type_name, &name);
+                self.method_symbol(
+                    symbol,
+                    prototype.specs.storage,
+                    prototype.specs.is_shy_fn,
+                    prototype.specs.is_pub,
+                    false,
+                )
+            }
+            None => self.inherent_method_symbol(
+                type_name,
+                &name,
+                prototype.specs.storage,
+                prototype.specs.is_shy_fn,
+                prototype.specs.is_pub,
+                false,
+            ),
+        };
         self.declare_function_symbol(&symbol, &symbol, resolved.ty, false, prototype.span)?;
         // The C export declares this method under the same symbol a call prints.
         self.declaration_symbols
@@ -561,7 +598,7 @@ impl Lowerer {
             name: name.clone(),
             record: ty,
             impl_name: type_name.to_string(),
-            trait_name: None,
+            trait_name: trait_impl.map(|key| key.name.clone()),
             args: Vec::new(),
             symbol: symbol.clone(),
         });
@@ -569,22 +606,36 @@ impl Lowerer {
             .impls
             .entry(ty)
             .or_insert_with(|| super::ImplInfo::new(type_name.to_string()));
-        if info.generic_methods.contains_key(&name)
-            || info
-                .methods
-                .get(&name)
-                .is_some_and(|previous| previous.symbol != symbol)
-        {
+        let generic_conflict = match trait_impl {
+            Some(trait_impl) => {
+                let set = info.trait_methods.entry(trait_impl.clone()).or_default();
+                set.prototypes.insert(name.clone());
+                set.methods
+                    .entry(name.clone())
+                    .or_insert(super::MethodInfo {
+                        symbol,
+                        ty: resolved.ty,
+                        deferred: None,
+                    });
+                set.generic_methods.contains_key(&name)
+            }
+            None => {
+                info.methods
+                    .entry(name.clone())
+                    .or_insert(super::MethodInfo {
+                        symbol,
+                        ty: resolved.ty,
+                        deferred: None,
+                    });
+                info.generic_methods.contains_key(&name)
+            }
+        };
+        if generic_conflict {
             return Err(Diagnostic::new(
                 prototype.span,
                 format!("conflicting declaration of method '{name}'"),
             ));
         }
-        info.methods.entry(name).or_insert(super::MethodInfo {
-            symbol,
-            ty: resolved.ty,
-            deferred: None,
-        });
         Ok(())
     }
 
@@ -1477,6 +1528,12 @@ impl FnLower<'_> {
     ) -> Result<(), Diagnostic> {
         let ResolvedSpecs { ty, qualifiers } = self.l.resolve_specs(&declaration.specs)?;
         let storage = declaration.specs.storage;
+        if declaration.is_defer && storage.is_some() {
+            return Err(Diagnostic::new(
+                declaration.span,
+                "a `defer` declaration needs an automatic local",
+            ));
+        }
         if storage == Some(ast::StorageClass::Typedef) {
             for init in &declaration.declarators {
                 if init.init.is_some() {
@@ -1590,10 +1647,6 @@ impl FnLower<'_> {
             let ir_ty = self.l.ir_type(resolved.ty);
             let align = self.l.types.align_of(resolved.ty).unwrap_or(1);
             let slot = self.f.alloc_slot_aligned(&name, ir_ty, align);
-            let drop = self.l.drop_method(resolved.ty)?;
-            let drop_symbol = drop.as_ref().map(|method| method.symbol.clone());
-            let drop_ty = drop.map(|method| method.ty);
-            let active = drop_symbol.is_some();
             let local = self.locals.len();
             self.locals.push(Local {
                 name: name.clone(),
@@ -1601,19 +1654,16 @@ impl FnLower<'_> {
                 ty: resolved.ty,
                 qualifiers: resolved.qualifiers,
                 readonly: false,
-                drop_symbol,
-                drop_ty,
-                drop_active: active,
+                drop_symbol: None,
+                drop_ty: None,
+                moved_slot: None,
             });
             self.bind(name.clone(), super::LocalBinding::Local(local));
-            if active {
-                self.current_scope_mut().drops.push(local);
+            if declaration.is_defer {
+                self.make_defer_local(local, init.span)?;
             }
             if let Some(init) = &init.init {
                 self.init_local_at(ir::Address::slot(slot), resolved.ty, init)?;
-                if self.locals[local].drop_symbol.is_some() {
-                    self.deactivate_if_local_expr(init);
-                }
             }
         }
         Ok(())
@@ -1641,10 +1691,6 @@ impl FnLower<'_> {
         let ir_ty = self.l.ir_type(ty);
         let align = self.l.types.align_of(ty).unwrap_or(1);
         let slot = self.f.alloc_slot_aligned(&name, ir_ty, align);
-        let drop = self.l.drop_method(ty)?;
-        let drop_symbol = drop.as_ref().map(|method| method.symbol.clone());
-        let drop_ty = drop.map(|method| method.ty);
-        let active = drop_symbol.is_some();
         let local = self.locals.len();
         self.locals.push(Local {
             name: name.clone(),
@@ -1652,13 +1698,13 @@ impl FnLower<'_> {
             ty,
             qualifiers: Qualifiers::NONE,
             readonly: !decl.is_mut && !self.l.disable_rustic_mut,
-            drop_symbol,
-            drop_ty,
-            drop_active: active,
+            drop_symbol: None,
+            drop_ty: None,
+            moved_slot: None,
         });
         self.bind(name, super::LocalBinding::Local(local));
-        if active {
-            self.current_scope_mut().drops.push(local);
+        if decl.is_defer {
+            self.make_defer_local(local, span)?;
         }
         if self.l.types.is_aggregate(ty) {
             self.copy_aggregate(ir::Address::slot(slot), value, ty, span)?;
@@ -1666,9 +1712,6 @@ impl FnLower<'_> {
             let (operand, operand_ty) = self.rvalue_val(value, span)?;
             let operand = self.convert(operand, operand_ty, ty, span, false)?;
             self.store_value(ir::Address::slot(slot), operand, ty, Qualifiers::NONE);
-        }
-        if self.locals[local].drop_symbol.is_some() {
-            self.deactivate_if_local(&decl.init);
         }
         Ok(())
     }
@@ -1865,8 +1908,10 @@ impl FnLower<'_> {
         span: Span,
     ) -> Result<(), Diagnostic> {
         let size = self.l.size_of(ty, span)?;
+        let source_ty = value.ty;
         match value.kind {
             super::ExprKind::Place(source) => {
+                self.warn_defer_copy_address(&source, source_ty, span);
                 self.emit_statement(ir::InstKind::MemCpy {
                     dst: address,
                     src: source,
@@ -1906,6 +1951,41 @@ impl FnLower<'_> {
         if name.is_empty() {
             return Ok(());
         }
+        let (slot, _) = self.alloc_parameter(name, ty);
+        self.store_value(
+            ir::Address::slot(slot),
+            ir::Operand::Value(param),
+            ty,
+            Qualifiers::NONE,
+        );
+        Ok(())
+    }
+
+    /// Bind main's #[args_builtin] parameter: the struct object is one local,
+    /// and each field is stored from the argument register that carried it.
+    pub(super) fn bind_args_parameter(
+        &mut self,
+        name: &str,
+        ty: TypeId,
+        fields: &[(TypeId, u32)],
+        params: &[ir::ValueId],
+    ) -> Result<(), Diagnostic> {
+        if name.is_empty() {
+            return Ok(());
+        }
+        let (slot, _) = self.alloc_parameter(name, ty);
+        for ((field_ty, offset), param) in fields.iter().zip(params) {
+            self.store_value(
+                ir::Address::slot(slot).offset_by(i64::from(*offset)),
+                ir::Operand::Value(*param),
+                *field_ty,
+                Qualifiers::NONE,
+            );
+        }
+        Ok(())
+    }
+
+    fn alloc_parameter(&mut self, name: &str, ty: TypeId) -> (ir::SlotId, usize) {
         let ir_ty = self.l.ir_type(ty);
         let align = self.l.types.align_of(ty).unwrap_or(1);
         let slot = self.f.alloc_slot_aligned(name, ir_ty, align);
@@ -1918,16 +1998,10 @@ impl FnLower<'_> {
             readonly: false,
             drop_symbol: None,
             drop_ty: None,
-            drop_active: false,
+            moved_slot: None,
         });
         self.bind(name.to_string(), super::LocalBinding::Local(local));
-        self.store_value(
-            ir::Address::slot(slot),
-            ir::Operand::Value(param),
-            ty,
-            Qualifiers::NONE,
-        );
-        Ok(())
+        (slot, local)
     }
 
     pub(super) fn declare_va_area(&mut self) -> Result<(), Diagnostic> {
@@ -1958,7 +2032,7 @@ impl FnLower<'_> {
             readonly: false,
             drop_symbol: None,
             drop_ty: None,
-            drop_active: false,
+            moved_slot: None,
         });
         self.bind("__va_area__".to_string(), super::LocalBinding::Local(local));
         Ok(())

@@ -71,6 +71,7 @@
 
 use crate::abi::{Location, Passing, ReturnPlan, ValuePart};
 use crate::ast;
+use crate::ir::Layout;
 use crate::lexer::{self, Token};
 use crate::lower;
 use crate::parser::{Arguments, ConstFn, ParseOutput, Place, ProbeRequest, TrySite, WorldSnapshot};
@@ -122,11 +123,11 @@ pub const STACK: u32 = 0x0100_0000;
 /// below the stack, where the image never reaches, and the trampoline reads it
 /// to decide which call the run makes.
 pub const SELECTOR: u32 = STACK - 4;
-/// Width of `long` in the layout a probe unit is lowered with: ShyISA's 64-bit
-/// one. Argument literals are decoded against it.
-const LONG_BITS: u32 = crate::ir::Layout::SHY.long_bytes * 8;
-/// `sizeof(struct Tokens)`: the count plus its four parallel arrays.
-const TOKENS_BYTES: u32 = 20;
+/// `sizeof(struct Tokens)` in `layout`: the count word, padded to the pointer
+/// alignment, followed by the four array pointers.
+fn tokens_bytes(layout: Layout) -> u32 {
+    layout.pointer_bytes.max(4) + 4 * layout.pointer_bytes
+}
 /// Symbol of the static `struct Tokens` a Tokens result is written through.
 /// The trampoline puts its address in the hidden return pointer's register.
 const OUT: &str = "__shy_probe_out";
@@ -409,6 +410,7 @@ fn generated_items(
     try_runs: &[&TrySite],
     world: &WorldSnapshot,
     site: Span,
+    layout: Layout,
 ) -> Result<Vec<ast::Item>, String> {
     if baked.is_empty()
         && baked_text.is_empty()
@@ -460,7 +462,7 @@ fn generated_items(
         );
     }
     if needs.tokens_from_text {
-        source.push_str(TOKENS_FROM_TEXT);
+        source.push_str(&tokens_from_text(layout));
     }
     if needs.builds_tokens() {
         if needs.tokens_from_int {
@@ -688,6 +690,17 @@ static struct Tokens __shy_probe_no_tokens(void) {
 /// copying the used prefix and shifting every pointer by the same delta makes
 /// a self-contained copy. If the image does not fit, the host rejects the
 /// probe run rather than accepting an empty expansion.
+///
+/// The image is the one the driver writes, so its sizes follow `layout`:
+/// `tokens_bytes` is the value itself and `entry_bytes` the four array words
+/// one token takes.
+fn tokens_from_text(layout: Layout) -> String {
+    TOKENS_FROM_TEXT
+        .replace("{tokens_bytes}", &tokens_bytes(layout).to_string())
+        .replace("{entry_bytes}", &(16 + layout.pointer_bytes).to_string())
+}
+
+/// The generated source; the two sizes are filled in for the layout.
 const TOKENS_FROM_TEXT: &str = r#"static int __shy_probe_text_len(const char *text) {
     int length = 0;
     while (text[length] != 0) { length = length + 1; }
@@ -728,7 +741,7 @@ struct Tokens tokens_from_text(const char *text) {
         "seta 5x ax\n"
     };
     staging = *(struct Tokens *)__shy_probe_scratch;
-    size = 20 + staging.count * 20;
+    size = {tokens_bytes} + staging.count * {entry_bytes};
     index = 0;
     while (index < staging.count) {
         size = size + staging.lens[index] + 1;
@@ -1312,7 +1325,7 @@ fn method_names(
 /// [`ParseOutput::requests`] and never another round's list. A request that
 /// would run a body still holding a declaration-stage placeholder is left out
 /// of the round, so the requests it does not reach are still answered.
-pub fn build(parsed: &mut ParseOutput) -> Outcome {
+pub fn build(parsed: &mut ParseOutput, layout: Layout) -> Outcome {
     if parsed.requests.is_empty() {
         return Outcome::Nothing;
     }
@@ -1411,7 +1424,8 @@ pub fn build(parsed: &mut ParseOutput) -> Outcome {
                 {
                     return unsupported(request, "the call passes values to a Tokens parameter");
                 }
-                let mut arguments = match constants(expressions, &parameters) {
+                let long_bits = layout.long_bytes * 8;
+                let mut arguments = match constants(expressions, &parameters, long_bits) {
                     Ok(values) => values,
                     Err(reason) => return unsupported(request, reason),
                 };
@@ -1509,6 +1523,7 @@ pub fn build(parsed: &mut ParseOutput) -> Outcome {
         &try_runs,
         &parsed.world,
         parsed.requests[0].site,
+        layout,
     ) {
         Ok(generated) => items.extend(generated),
         Err(reason) => return unsupported(&parsed.requests[0], reason),
@@ -1516,7 +1531,7 @@ pub fn build(parsed: &mut ParseOutput) -> Outcome {
     let unit = ast::TranslationUnit { items };
     // A unit that does not lower has no answer to give, and a narrower unit
     // would answer from a body whose helpers are missing.
-    if let Err(reason) = lowers(&unit) {
+    if let Err(reason) = lowers(&unit, layout) {
         return unsupported(&parsed.requests[0], reason);
     }
     Outcome::Unit(ProbeUnit { unit, calls })
@@ -1886,9 +1901,9 @@ fn statement_names(statement: &ast::Stmt, names: &mut Vec<String>) {
             }
             statement_names(stmt, names);
         }
-        ast::Stmt::Default { stmt, .. } | ast::Stmt::Label { stmt, .. } => {
-            statement_names(stmt, names)
-        }
+        ast::Stmt::Default { stmt, .. }
+        | ast::Stmt::Label { stmt, .. }
+        | ast::Stmt::AllowDeferCopy { stmt, .. } => statement_names(stmt, names),
         ast::Stmt::Return { value, .. } => {
             if let Some(value) = value {
                 expression_names(value, names);
@@ -2022,7 +2037,11 @@ fn string_literal(expression: &ast::Expr) -> Option<String> {
 /// Append the returned text to [`crate::shy::emit`]'s output before
 /// assembling. Only scalar register arguments, a scalar register return, and a
 /// Tokens result are accepted; the builder already rejected everything else.
-pub fn emit_probe_asm(lowered: &lower::Lowered, calls: &[ProbeCall]) -> Result<String, String> {
+pub fn emit_probe_asm(
+    lowered: &lower::Lowered,
+    calls: &[ProbeCall],
+    layout: Layout,
+) -> Result<String, String> {
     if calls.is_empty() {
         return Err("a probe trampoline needs at least one call".to_string());
     }
@@ -2116,7 +2135,7 @@ pub fn emit_probe_asm(lowered: &lower::Lowered, calls: &[ProbeCall]) -> Result<S
             // The aggregate result travels through the hidden pointer the ABI
             // reserves, so the callee copies it into the trampoline's own
             // storage and the serializer turns it into the COMMIT bytes.
-            let sret = sret_register(plan, call.id)?;
+            let sret = sret_register(plan, call.id, layout)?;
             out.push_str(&format!("setn {sret} {OUT}\n"));
             out.push_str(&format!("calln {}\n", call.symbol));
             // The serializer returns the blob length, which the COMMIT call
@@ -2159,7 +2178,11 @@ pub fn emit_probe_asm(lowered: &lower::Lowered, calls: &[ProbeCall]) -> Result<S
 /// The plan owns the register slot, so this reads it instead of assuming the
 /// trampoline's `4x`. The pointer must name the static `struct Tokens` the
 /// whole round shares, so the size has to be that struct's.
-fn sret_register(plan: &crate::abi::CallPlan, id: usize) -> Result<&'static str, String> {
+fn sret_register(
+    plan: &crate::abi::CallPlan,
+    id: usize,
+    layout: Layout,
+) -> Result<&'static str, String> {
     let ReturnPlan::Indirect {
         pointer: Location::Register(register),
         size,
@@ -2170,9 +2193,10 @@ fn sret_register(plan: &crate::abi::CallPlan, id: usize) -> Result<&'static str,
             "call {id}: a Tokens result is not returned through a hidden pointer"
         ));
     };
-    if *size != TOKENS_BYTES {
+    let tokens_bytes = tokens_bytes(layout);
+    if *size != tokens_bytes {
         return Err(format!(
-            "call {id}: the Tokens result is {size} bytes, not {TOKENS_BYTES}"
+            "call {id}: the Tokens result is {size} bytes, not {tokens_bytes}"
         ));
     }
     match ARGUMENT_REGISTERS.get(register.index as usize) {
@@ -2364,6 +2388,116 @@ pub fn result_kind(function: &ConstFn) -> Result<ResultKind, String> {
     signature(function).map(|(_, result)| result)
 }
 
+/// Why a `const fn` declaration's result is an address, as a phrase that
+/// follows "const fn 'name'", or None.
+///
+/// A probe cannot fold an address into the program: a call whose result is a
+/// pointer, or a record holding one, stays an ordinary function call, and an
+/// address the probe image computes only exists in that image. Reported at the
+/// declaration, which is where the result type is decided.
+pub fn declared_address(function: &ConstFn, unit: &ast::TranslationUnit) -> Option<&'static str> {
+    // The declarator builds the result type outward from the function: a
+    // pointer after it is a pointer result.
+    let returns_pointer = function.declarator.derived.get(1..).is_some_and(|result| {
+        result
+            .iter()
+            .any(|builder| matches!(builder, ast::DerivedDeclarator::Pointer(_)))
+    });
+    if returns_pointer {
+        return Some(
+            "returns a pointer, which a probe cannot fold into the program: the value \
+             is not a compile-time constant, and an address the probe image computes \
+             means nothing in this program",
+        );
+    }
+    if specs_hold_pointers(&function.specs, unit) {
+        return Some(
+            "returns a value that holds pointers, which a probe cannot fold into the \
+             program: the value is not a compile-time constant, and an address the \
+             probe image computes means nothing in this program",
+        );
+    }
+    None
+}
+
+/// Whether a specifier list is a record that holds pointers.
+///
+/// A record written in place is read directly; a named one is a reference, so
+/// its definition is looked up among the unit's declarations.
+fn specs_hold_pointers(specs: &ast::DeclSpecs, unit: &ast::TranslationUnit) -> bool {
+    specs.type_specs.iter().any(|specifier| {
+        let ast::TypeSpecifier::Record(record) = specifier else {
+            return false;
+        };
+        match &record.members {
+            Some(members) => members_hold_pointers(members, unit),
+            None => record
+                .tag
+                .as_ref()
+                .is_some_and(|tag| record_definition_holds_pointers(&tag.text, unit)),
+        }
+    })
+}
+
+fn members_hold_pointers(members: &[ast::MemberDecl], unit: &ast::TranslationUnit) -> bool {
+    members.iter().any(|member| {
+        // A pointer declarator ends the search: a record that points at
+        // itself must not be followed.
+        member.declarators.iter().any(|declarator| {
+            declarator
+                .declarator
+                .derived
+                .iter()
+                .any(|builder| matches!(builder, ast::DerivedDeclarator::Pointer(_)))
+        }) || specs_hold_pointers(&member.specs, unit)
+    })
+}
+
+fn record_definition_holds_pointers(tag: &str, unit: &ast::TranslationUnit) -> bool {
+    unit.items.iter().any(|item| {
+        let ast::Item::Decl(declaration) = item else {
+            return false;
+        };
+        declaration.specs.type_specs.iter().any(|specifier| {
+            let ast::TypeSpecifier::Record(record) = specifier else {
+                return false;
+            };
+            record.tag.as_ref().is_some_and(|name| name.text == tag)
+                && record
+                    .members
+                    .as_ref()
+                    .is_some_and(|members| members_hold_pointers(members, unit))
+        })
+    })
+}
+
+/// Whether the cloned body of a const fn converts an address to an integer.
+///
+/// The body runs in the probe image, so the integer it computes is an address
+/// there, and the answer is folded into the program as a plain number.
+pub fn converts_address(lowered: &lower::Lowered, index: usize) -> bool {
+    let symbol = clone_symbol(index);
+    let Some(function) = lowered
+        .module
+        .functions
+        .iter()
+        .find(|function| function.name == symbol)
+    else {
+        return false;
+    };
+    function.blocks.iter().flatten().any(|block| {
+        block.insts.iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                crate::ir::InstKind::Cast {
+                    op: crate::ir::CastOp::PtrToInt,
+                    ..
+                }
+            )
+        })
+    })
+}
+
 /// Whether a const fn is a plain function a call can reach at run time.
 ///
 /// The trampoline carries fewer shapes than this: [`result_kind`] decides what
@@ -2438,6 +2572,7 @@ fn scalar(specs: &ast::DeclSpecs) -> Option<ResultKind> {
 fn constants(
     expressions: &[ast::Expr],
     parameters: &[ParameterKind],
+    long_bits: u32,
 ) -> Result<Vec<ProbeArgument>, String> {
     if expressions.len() != parameters.len() {
         return Err(format!(
@@ -2461,7 +2596,7 @@ fn constants(
                 continue;
             }
             ParameterKind::Scalar(kind) => {
-                let Some(value) = constant(expression) else {
+                let Some(value) = constant(expression, long_bits) else {
                     return Err(format!(
                         "argument {} is not a compile-time integer",
                         index + 1
@@ -2488,22 +2623,22 @@ fn constants(
 /// The spelling is decoded by [`crate::literal::integer`], the parser the
 /// evaluator and lowering use, so a suffix or a hex digit at the end reads the
 /// way the rest of the compiler reads it.
-fn constant(expression: &ast::Expr) -> Option<i64> {
+fn constant(expression: &ast::Expr, long_bits: u32) -> Option<i64> {
     match expression {
         ast::Expr::Number(number) => {
-            let integer = crate::literal::integer(&number.text, LONG_BITS, number.span).ok()?;
+            let integer = crate::literal::integer(&number.text, long_bits, number.span).ok()?;
             i64::try_from(integer.bits).ok()
         }
         ast::Expr::Unary {
             op: ast::UnaryOp::Plus,
             operand,
             ..
-        } => constant(operand),
+        } => constant(operand, long_bits),
         ast::Expr::Unary {
             op: ast::UnaryOp::Minus,
             operand,
             ..
-        } => constant(operand)?.checked_neg(),
+        } => constant(operand, long_bits)?.checked_neg(),
         _ => None,
     }
 }
@@ -2524,9 +2659,10 @@ fn fits(kind: ResultKind, value: i64) -> bool {
 /// A const fn body may reach for a construct only the evaluator understands,
 /// and a kept declaration may too. A failure here is a reason to skip the
 /// round, never a reason to guess.
-fn lowers(unit: &ast::TranslationUnit) -> Result<(), String> {
+fn lowers(unit: &ast::TranslationUnit, layout: Layout) -> Result<(), String> {
     let options = lower::Options {
         module_name: "probe".to_string(),
+        layout,
         startup: lower::StartupMode::Manual,
         ..lower::Options::default()
     };

@@ -30,6 +30,13 @@ impl Vec<T> {
     fn last(self *v) -> T * {
         return &v.data[v.len - 1];
     }
+
+    fn drop(self *v) {
+        free(v.data);
+        v.data = 0;
+        v.len = 0;
+        v.cap = 0;
+    }
 }
 
 #endif

@@ -1,4 +1,4 @@
-// std: files and streams, built on the C library's FILE.
+// std: files and streams, built on the C library's file descriptor calls.
 
 #include <stdio.h>
 #include <std/io.shyh>
@@ -6,6 +6,70 @@
 
 static FileWriter global_out = {0};
 static FileReader global_in = {0};
+
+// The open/read/write/close calls below are the C library's; the File methods
+// have impl-prefixed symbols, so they do not shadow those free functions.
+impl File {
+    pub fn open(const char *path) -> Result<File, IoError> {
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            return Result<File, IoError>::Err(OpenFailed);
+        }
+        File file = {fd};
+        return Result<File, IoError>::Ok(file);
+    }
+
+    pub fn create(const char *path) -> Result<File, IoError> {
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            return Result<File, IoError>::Err(OpenFailed);
+        }
+        File file = {fd};
+        return Result<File, IoError>::Ok(file);
+    }
+
+    pub fn read(self *f, char *data, int max_len) -> int {
+        return (int)read(f.fd, data, (size_t)max_len);
+    }
+
+    pub fn read_to_string(self *f) -> Result<String, IoError> {
+        let mut text = String::new();
+        while (1) {
+            char chunk[256];
+            int n = f.read(chunk, 256);
+            if (n < 0) {
+                text.free();
+                return Result<String, IoError>::Err(ReadFailed);
+            }
+            if (n == 0) {
+                break;
+            }
+            for (int i = 0; i < n; i++) {
+                text.push(chunk[i]);
+            }
+        }
+        return Result<String, IoError>::Ok(text);
+    }
+
+    pub fn write_all(self *f, Str text) -> Result<void, IoError> {
+        int done = 0;
+        while (done < text.len) {
+            int n = (int)write(f.fd, text.data + done, (size_t)(text.len - done));
+            if (n <= 0) {
+                return Result<void, IoError>::Err(WriteFailed);
+            }
+            done = done + n;
+        }
+        return Result<void, IoError>::Ok;
+    }
+
+    pub fn close(self *f) {
+        if (f.fd >= 0) {
+            close(f.fd);
+            f.fd = -1;
+        }
+    }
+}
 
 impl StrReader {
     pub fn new(Str source) -> StrReader {
@@ -56,28 +120,29 @@ pub fn getc(void) -> int {
     return input.getc();
 }
 
-pub fn read_to_string(FILE *f) -> String {
-    let mut s = String::new();
+pub fn read_stream(FILE *f) -> String {
+    let mut text = String::new();
     let mut c = fgetc(f);
     while (c != EOF) {
-        s.push(c);
+        text.push(c);
         c = fgetc(f);
     }
-    return s;
+    return text;
 }
 
-pub fn read_file(const char *path) -> Option<String> {
-    let f = fopen(path, "r");
-    if (!f) {
-        return Option<String>::None;
-    }
-    let s = read_to_string(f);
-    fclose(f);
-    return Option<String>::Some(s);
+/* A Str is not NUL-terminated and the C library wants a C string, so copy the
+   path into one; `defer` frees it on every return, including the `?`. */
+pub fn read_to_string(Str path) -> Result<String, IoError> {
+    defer String cpath = String::from_str(path);
+    let mut file = File::open(cpath.as_cstr())?;
+    let text = file.read_to_string();
+    file.close();
+    return text;
 }
 
-pub fn write_file(const char *path, Str text) -> int {
-    let f = fopen(path, "w");
+pub fn write_file(Str path, Str text) -> int {
+    defer String cpath = String::from_str(path);
+    let f = fopen(cpath.as_cstr(), "w");
     if (!f) {
         return 0;
     }

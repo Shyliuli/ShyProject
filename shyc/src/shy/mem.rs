@@ -1,7 +1,7 @@
 //! Memory and operand access for the Shy backend.
 
 use super::fallback_span;
-use super::frame::is_64;
+use super::frame::{is_64, scalar_bytes};
 use super::function::FnWriter;
 use super::inst::result;
 use crate::ir::{Address, AddressBase, AtomicOrder, Inst, Operand, Type};
@@ -36,7 +36,7 @@ impl FnWriter<'_> {
             self.store_value_word(result, "1x");
             return Ok(());
         }
-        match ty.size(layout).unwrap_or(0) {
+        match scalar_bytes(ty, layout) {
             1 => {
                 self.line("get8a 1x 3x");
                 self.store_value_word(result, "1x");
@@ -84,7 +84,7 @@ impl FnWriter<'_> {
             self.load_operand(value, "1x", None)?;
             return self.copy_bytes("3x", "1x", bytes);
         }
-        let size = ty.size(self.function.layout).unwrap_or(0);
+        let size = scalar_bytes(ty, self.function.layout);
         self.store_scalar_at(ty, value, size, "3x")
     }
 

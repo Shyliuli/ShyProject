@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-OUT="$ROOT/target/chibicc-shy-tests"
+OUT="$ROOT/target/shyc-tests"
 mkdir -p "$OUT"
 
 run_case() {
@@ -16,11 +16,11 @@ run_case() {
   local sfs="$OUT/$name.sfs"
 
   printf 'compile %-28s' "$src"
-  (cd "$ROOT" && cargo run -q -p shycc -- "test/chibicc-shy/cases/$src" "$@" -o "$sfs")
+  (cd "$ROOT" && cargo run -q -p shycc -- "test/shyc/cases/$src" "$@" -o "$sfs")
 
   set +e
   local output
-  output=$(cd "$ROOT" && cargo run -q -p emu -- "$sfs" 2>&1)
+  output=$(cd "$ROOT" && cargo run -q -p emu --bin emu -- "$sfs" 2>&1)
   local status=$?
   set -e
 
@@ -43,7 +43,7 @@ run_case c_64bit_casts.c 0
 run_case c_float_ops.c 0 -lfloat
 run_case shyc_impl_methods.shyc 0
 run_case shyc_asm_and_defer.shyc 0
-run_case shyc_small_sret_raii.shyc 0
-run_case shyc_default_static.shyc 0 test/chibicc-shy/cases/shyc_default_static_lib.shyc
-run_case shyc_pub.shyc 0 test/chibicc-shy/cases/shyc_pub_lib.shyc
-run_case shyc_comment_attr.shyc 0 test/chibicc-shy/cases/shyc_pub_lib.shyc
+run_case shyc_small_sret_defer.shyc 0
+run_case shyc_default_static.shyc 0 test/shyc/cases/shyc_default_static_lib.shyc
+run_case shyc_pub.shyc 0 test/shyc/cases/shyc_pub_lib.shyc
+run_case shyc_comment_attr.shyc 0 test/shyc/cases/shyc_pub_lib.shyc

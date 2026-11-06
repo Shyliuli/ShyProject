@@ -104,6 +104,8 @@ pub struct Attributes {
     /// `static` gives a file-local symbol. Without it a Shy `fn` or method is
     /// file-local by default.
     pub disable_default_static: bool,
+    /// `#![allow(defer_copy)]`: no by-value copy warning for this unit.
+    pub allow_defer_copy: bool,
 }
 
 /// One `#include` directive written in the main input file.

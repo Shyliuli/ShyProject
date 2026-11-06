@@ -146,6 +146,7 @@ impl Analysis {
                     disable_nonexhaustive_switch: attributes.disable_nonexhaustive_switch,
                     disable_rustic_mut: attributes.disable_rustic_mut,
                     disable_default_static: attributes.disable_default_static,
+                    allow_defer_copy: attributes.allow_defer_copy,
                     exports: Vec::new(),
                 };
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

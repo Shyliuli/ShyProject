@@ -913,6 +913,7 @@ impl Collector<'_> {
                     }
                 }
             }
+            ast::Stmt::AllowDeferCopy { stmt, .. } => self.walk_stmt(stmt),
         }
     }
 

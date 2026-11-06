@@ -6,7 +6,7 @@
 //! hidden runtime, trait, or allocation: the tag is loaded from offset 0, the
 //! success payload is copied out of the union, and a failure builds the
 //! enclosing function's failure variant and returns it. The caller's ordinary
-//! RAII drops run on that early return.
+//! defer drops run on that early return.
 //!
 //! `Result<void, E>` has two forms. When `E` takes the zero-value niche, the
 //! loaded value is the error code and `0` is `Ok`; a payload-free `Ok` yields
@@ -94,7 +94,7 @@ impl FnLower<'_> {
         ));
 
         // Failure: rebuild the enclosing function's failure variant and return
-        // it. This is an early return, so the regular drop path runs first.
+        // it. This is an early return, so the scope's defer drops run first.
         self.set_current(failure_block);
         let error_payload = match (source.failure, target.failure) {
             (Some(source_error), Some(target_error)) => {
@@ -118,7 +118,7 @@ impl FnLower<'_> {
         let failure =
             self.build_payload_enum(target_ty, target.failure_tag, error_payload, span)?;
         let (failure_operand, _) = self.rvalue_val(failure, span)?;
-        self.emit_drops_on_exit(0);
+        self.emit_defers_from(0);
         self.terminate(ir::Terminator::ret(Some(failure_operand)));
 
         // Success: copy the payload into a temporary and hand it back as a

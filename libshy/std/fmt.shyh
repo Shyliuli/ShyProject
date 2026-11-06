@@ -17,6 +17,15 @@
    so nothing is parsed at run time. The names the expansion lands on are
    below; they are trivial on purpose.
 
+   writeln!(writer, "x = {}", value) is the same expansion, except that the
+   finished line goes to the Writer expression instead of the global writer
+   and the temporary String is freed afterwards. The writer is one ordinary
+   expression of a type implementing Writer; the expansion stores it in a
+   local, so it is evaluated once. A temporary endpoint such as
+   stdout_writer() works, and an existing String is written through its
+   address (writeln!(&text, ...)), because passing the owner by value would
+   copy it.
+
    scanln! is the exception: it hands its string to sscanf, which reads the C
    conversions at run time, so it keeps one wrapper per argument count. Those
    wrappers are generated at the end of this file. */

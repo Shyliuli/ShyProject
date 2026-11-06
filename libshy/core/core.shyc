@@ -100,4 +100,85 @@ impl Str {
         Str result = {s.data + start, len};
         return result;
     }
+
+    pub fn trim(const self *s) -> Str {
+        int start = 0;
+        int end = s.len;
+        while (start < end && str_is_space(s.data[start])) {
+            start = start + 1;
+        }
+        while (end > start && str_is_space(s.data[end - 1])) {
+            end = end - 1;
+        }
+        return s.slice(start, end - start);
+    }
+
+    pub fn split(const self *s, int separator) -> StrSplit {
+        StrSplit split;
+        split.rest = *s;
+        split.separator = separator;
+        split.done = 0;
+        return split;
+    }
+
+    pub fn parse_int(const self *s) -> Option<int> {
+        int i = 0;
+        int negative = 0;
+        if (s.len > 0 && (s.data[0] == '+' || s.data[0] == '-')) {
+            negative = s.data[0] == '-';
+            i = 1;
+        }
+        if (i == s.len) {
+            return Option<int>::None;
+        }
+        unsigned int value = 0;
+        while (i < s.len) {
+            if (s.data[i] < '0' || s.data[i] > '9') {
+                return Option<int>::None;
+            }
+            unsigned int digit = (unsigned int)(s.data[i] - '0');
+            // 214748364 is INT_MAX / 10, so this rejects a value that the
+            // next multiply would overflow before the range check below.
+            if (value > (unsigned int)214748364) {
+                return Option<int>::None;
+            }
+            value = value * 10 + digit;
+            unsigned int limit = (unsigned int)2147483647;
+            if (negative) {
+                limit = (unsigned int)2147483648;
+            }
+            if (value > limit) {
+                return Option<int>::None;
+            }
+            i = i + 1;
+        }
+        if (negative) {
+            return Option<int>::Some((int)(0 - value));
+        }
+        return Option<int>::Some((int)value);
+    }
+}
+
+impl StrSplit {
+    pub fn next(self *s) -> Option<Str> {
+        if (s.done) {
+            return Option<Str>::None;
+        }
+        int start = 0;
+        while (start < s.rest.len && s.rest.data[start] != (char)s.separator) {
+            start = start + 1;
+        }
+        Str piece = s.rest.slice(0, start);
+        if (start == s.rest.len) {
+            s.done = 1;
+        } else {
+            s.rest = s.rest.slice(start + 1, s.rest.len - start - 1);
+        }
+        return Option<Str>::Some(piece);
+    }
+}
+
+/* ASCII whitespace, the bytes trim() drops. */
+fn str_is_space(char c) -> int {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
 }

@@ -117,6 +117,7 @@ impl FnLower<'_> {
         span: Span,
     ) -> Result<(ir::Operand, TypeId), Diagnostic> {
         let ty = value.ty;
+        self.warn_defer_copy_value(&value, span);
         match value.kind {
             ExprKind::Value(operand) => Ok((operand, ty)),
             ExprKind::Void => Err(Diagnostic::new(
@@ -431,17 +432,7 @@ impl FnLower<'_> {
                 continue;
             };
             return match binding {
-                LocalBinding::Local(index) => {
-                    let local = &self.locals[*index];
-                    if local.drop_symbol.is_some() && !local.drop_active {
-                        Err(Diagnostic::new(
-                            span,
-                            format!("use of moved value '{name}'"),
-                        ))
-                    } else {
-                        Ok(Resolved::Local(*index))
-                    }
-                }
+                LocalBinding::Local(index) => Ok(Resolved::Local(*index)),
                 LocalBinding::Object {
                     symbol,
                     ty,
@@ -614,6 +605,9 @@ impl FnLower<'_> {
                 span,
             } => {
                 if let Some(variant) = self.l.scoped_variant(qualifier, name) {
+                    if variant.payload.is_some() && !self.l.types.is_niche_enum(variant.ty) {
+                        return self.variant_tag_value(&variant, *span);
+                    }
                     return self.construct_payload_enum(qualifier, name, variant, &[], *span);
                 }
                 let method = self.l.scoped_method(qualifier, name)?;
@@ -631,6 +625,9 @@ impl FnLower<'_> {
             } => {
                 let ty = self.l.generic_qualifier_type(qualifier, args)?;
                 if let Some(variant) = self.l.variant_of(ty, name) {
+                    if variant.payload.is_some() && !self.l.types.is_niche_enum(variant.ty) {
+                        return self.variant_tag_value(&variant, *span);
+                    }
                     return self.construct_payload_enum(qualifier, name, variant, &[], *span);
                 }
                 let method = self.l.method_on(ty, name)?;
@@ -1701,9 +1698,13 @@ impl FnLower<'_> {
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
         if op == ast::AssignOp::Assign
-            && let Some(local) = self.local_drop_target(left)
+            && let ast::Expr::Name(name) = left
+            && let Ok(Resolved::Local(local)) = self.resolve_name(&name.text, name.span)
+            && self.locals[local].moved_slot.is_some()
         {
-            return self.raii_assign(local, left, right, span);
+            // A new value replaces the old one without dropping it; the copy is
+            // still dropped at scope exit. C value semantics, plus a warning.
+            self.warn_defer_copy(local, left.span());
         }
         if let ast::Expr::Member { object, name, .. } = left
             && self
@@ -1724,7 +1725,9 @@ impl FnLower<'_> {
                 "writing a bit-field is not supported yet",
             ));
         }
-        let left_value = self.lower_expr(left)?;
+        // The destination is lowered in write mode, so a projected field takes
+        // the mutable DerefMut path rather than the const Deref one.
+        let left_value = self.lower_expr_for_write(left)?;
         let (address, ty, qualifiers) = self.place_of(left_value, span)?;
         if qualifiers.is_const {
             return Err(Diagnostic::new(span, "cannot assign to a const object"));
@@ -1780,31 +1783,72 @@ impl FnLower<'_> {
         }
     }
 
-    pub(super) fn local_drop_target(&mut self, expr: &ast::Expr) -> Option<usize> {
-        let ast::Expr::Name(name) = expr else {
-            return None;
+    /// Read a defer local's value and set its moved flag: the builtin
+    /// `.move()`, and what `return name` means.
+    pub(super) fn move_defer_local(&mut self, local: usize) -> ExprVal {
+        let (slot, ty, qualifiers, moved) = {
+            let local = &self.locals[local];
+            (
+                local.slot,
+                local.ty,
+                local.qualifiers,
+                local.moved_slot.expect("defer local"),
+            )
         };
-        match self.resolve_name(&name.text, name.span) {
-            Ok(Resolved::Local(index)) if self.locals[index].drop_symbol.is_some() => Some(index),
-            _ => None,
+        let operand = self.load_value(ir::Address::slot(slot), ty, qualifiers);
+        let boolean = self.l.types.builtin(Builtin::Bool);
+        let one = ir::Operand::Constant(ir::Constant::int(ir::Type::I1, 1));
+        self.store_value(ir::Address::slot(moved), one, boolean, Qualifiers::NONE);
+        ExprVal {
+            ty,
+            qualifiers,
+            kind: ExprKind::Value(operand),
         }
     }
 
-    pub(super) fn deactivate_if_local_expr(&mut self, init: &ast::Initializer) {
-        let ast::InitializerKind::Expr(expr) = &init.kind else {
+    /// Warn that one defer local is used by value.
+    pub(super) fn warn_defer_copy(&mut self, local: usize, span: Span) {
+        if self.allow_defer_copy {
             return;
-        };
-        self.deactivate_if_local(expr);
+        }
+        let name = self.locals[local].name.clone();
+        let message = format!(
+            "'{name}' is a defer variable copied by value; it is still dropped at scope exit, so the copy may dangle. Write {name}.move(), {name}.clone() or &{name}. To silence, add #[allow(defer_copy)] to the statement, fn or impl, or #![allow(defer_copy)] to the file."
+        );
+        self.l.warnings.push(Diagnostic::new(span, message));
     }
 
-    pub(super) fn deactivate_if_local(&mut self, expr: &ast::Expr) {
-        let ast::Expr::Name(name) = expr else {
+    /// Warn when `value` is a whole defer local read by value.
+    fn warn_defer_copy_value(&mut self, value: &ExprVal, span: Span) {
+        if let ExprKind::Place(address) = &value.kind {
+            let address = address.clone();
+            let ty = value.ty;
+            self.warn_defer_copy_address(&address, ty, span);
+        }
+    }
+
+    /// Warn when `address` holds a whole defer local of type `ty`.
+    ///
+    /// The type check keeps a field at offset 0 (which starts at the same
+    /// address) from counting as a copy of the object.
+    pub(super) fn warn_defer_copy_address(
+        &mut self,
+        address: &ir::Address,
+        ty: TypeId,
+        span: Span,
+    ) {
+        if address.offset != 0 {
+            return;
+        }
+        let ir::AddressBase::Slot(slot) = &address.base else {
             return;
         };
-        if let Ok(Resolved::Local(index)) = self.resolve_name(&name.text, name.span)
-            && self.locals[index].drop_symbol.is_some()
-        {
-            self.locals[index].drop_active = false;
+        let local = self
+            .locals
+            .iter()
+            .position(|local| local.moved_slot.is_some() && local.slot == *slot && local.ty == ty);
+        if let Some(local) = local {
+            self.warn_defer_copy(local, span);
         }
     }
 
@@ -1847,7 +1891,6 @@ impl FnLower<'_> {
         mutable: bool,
     ) -> Result<MemberTarget, Diagnostic> {
         let object_ty = object_value.ty;
-        let object_volatile = object_value.qualifiers.is_volatile;
         if op == ast::MemberOp::Arrow && !self.l.types.is_pointer(object_ty) {
             return Err(Diagnostic::new(
                 span,
@@ -1855,25 +1898,64 @@ impl FnLower<'_> {
             ));
         }
         // ShyC dereferences automatically: `p.field` on a pointer means
-        // `(*p).field`, the same as `p->field`.
-        let (record, address, object_qualifiers) = self.record_and_address(object_value, span)?;
-        let (field_ty, offset) = self.l.field_of(record, &name.text, name.span)?;
-        let field_qualifiers = self.l.field_qualifiers(record, &name.text);
-        let qualifiers = Qualifiers {
-            is_const: field_qualifiers.is_const || object_qualifiers.is_const,
-            is_volatile: field_qualifiers.is_volatile || object_volatile,
-            is_restrict: false,
-            is_atomic: false,
-        };
-        let address = address.offset_by(i64::from(offset));
-        if mutable {
-            self.check_writable(&address, span)?;
+        // `(*p).field`, the same as `p->field`. A `Deref`/`DerefMut`
+        // implementation projects one more step, so `e.len` reads the target's
+        // field after calling the projection method.
+        let mut object_value = object_value;
+        let mut last_error = None;
+        for _ in 0..super::deref::MAX_AUTO_DEREF {
+            let object_volatile = object_value.qualifiers.is_volatile;
+            let (record, address, object_qualifiers) =
+                self.record_and_address(object_value, span)?;
+            let (field_ty, offset) = match self.l.field_of(record, &name.text, name.span) {
+                Ok(found) => found,
+                Err(error) => {
+                    let Some(step) = self.l.deref_step(record, mutable, span)? else {
+                        if mutable && self.l.deref_step(record, false, span)?.is_some() {
+                            return Err(Diagnostic::new(
+                                span,
+                                "cannot assign through Deref; implement DerefMut for the field",
+                            ));
+                        }
+                        return Err(error);
+                    };
+                    let receiver = ExprVal {
+                        ty: record,
+                        qualifiers: object_qualifiers,
+                        kind: ExprKind::Place(address),
+                    };
+                    let step_name = ast::Name::new(step.name, name.span);
+                    object_value = self.lower_method_call_value(
+                        receiver,
+                        &step_name,
+                        ast::MemberOp::Dot,
+                        step.method,
+                        &[],
+                        span,
+                    )?;
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+            let field_qualifiers = self.l.field_qualifiers(record, &name.text);
+            let qualifiers = Qualifiers {
+                is_const: field_qualifiers.is_const || object_qualifiers.is_const,
+                is_volatile: field_qualifiers.is_volatile || object_volatile,
+                is_restrict: false,
+                is_atomic: false,
+            };
+            let address = address.offset_by(i64::from(offset));
+            if mutable {
+                self.check_writable(&address, span)?;
+            }
+            return Ok(MemberTarget {
+                address,
+                ty: field_ty,
+                qualifiers,
+            });
         }
-        Ok(MemberTarget {
-            address,
-            ty: field_ty,
-            qualifiers,
-        })
+        Err(last_error
+            .unwrap_or_else(|| Diagnostic::new(span, format!("no member named '{}'", name.text))))
     }
 
     pub(super) fn object_address(

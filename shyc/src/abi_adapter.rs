@@ -26,8 +26,12 @@ pub fn plan_target_function(
     types: &TypeStore,
     function_ty: TypeId,
     kind: AbiKind,
+    expand_args: bool,
 ) -> Result<CallPlan, AbiError> {
-    abi_plan::plan(kind, &function_signature(types, function_ty)?)
+    abi_plan::plan(
+        kind,
+        &function_signature(types, function_ty, kind, expand_args)?,
+    )
 }
 
 /// Plan a call, including arguments the signature does not name.
@@ -41,8 +45,9 @@ pub fn plan_target_call(
     extras: &[crate::ir::Type],
     layout: crate::ir::Layout,
     kind: AbiKind,
+    expand_args: bool,
 ) -> Result<CallPlan, AbiError> {
-    let mut signature = function_signature(types, function_ty)?;
+    let mut signature = function_signature(types, function_ty, kind, expand_args)?;
     for extra in extras {
         signature.params.push(ir_abi_type(*extra, layout));
     }
@@ -73,9 +78,15 @@ fn ir_abi_type(ty: crate::ir::Type, layout: crate::ir::Layout) -> AbiType {
 }
 
 /// Convert one ShyC function type without classifying it.
+///
+/// With `expand_args`, a by-value parameter of an `#[args_builtin]` struct
+/// becomes its fields, one after another, which is how `main(Args)` turns into
+/// `main(int argc, char **argv)`.
 pub fn function_signature(
     types: &TypeStore,
     function_ty: TypeId,
+    kind: AbiKind,
+    expand_args: bool,
 ) -> Result<FunctionSignature, AbiError> {
     let TypeKind::Function {
         result,
@@ -86,18 +97,28 @@ pub fn function_signature(
     else {
         return Err(invalid("expected a function type"));
     };
+    let mut abi_params = Vec::with_capacity(params.len());
+    for &param in params {
+        if expand_args && types.is_args_builtin(param) {
+            let info = types
+                .record_info(param)
+                .ok_or_else(|| invalid("arguments struct has no layout"))?;
+            for field in &info.fields {
+                abi_params.push(abi_type(types, field.ty.ty, kind)?);
+            }
+        } else {
+            abi_params.push(abi_type(types, param, kind)?);
+        }
+    }
     Ok(FunctionSignature {
-        ret: abi_type(types, *result)?,
-        params: params
-            .iter()
-            .map(|&param| abi_type(types, param))
-            .collect::<Result<_, _>>()?,
+        ret: abi_type(types, *result, kind)?,
+        params: abi_params,
         variadic: *variadic,
     })
 }
 
 /// Convert one source type to its ABI shape.
-pub fn abi_type(types: &TypeStore, ty: TypeId) -> Result<AbiType, AbiError> {
+pub fn abi_type(types: &TypeStore, ty: TypeId, kind: AbiKind) -> Result<AbiType, AbiError> {
     match types.kind(ty) {
         TypeKind::Void => Ok(AbiType::Void),
         TypeKind::Bool => Ok(AbiType::Bool),
@@ -107,30 +128,36 @@ pub fn abi_type(types: &TypeStore, ty: TypeId) -> Result<AbiType, AbiError> {
         }),
         TypeKind::Float32 => Ok(AbiType::Float { bits: 32 }),
         TypeKind::Float64 => Ok(AbiType::Float { bits: 64 }),
+        // ShyISA moves an address as one 32-bit word, whatever the data
+        // model says a pointer object is: a probe image runs on ShyISA but
+        // lays its objects out with the program's model.
         TypeKind::Pointer { .. } => Ok(AbiType::Pointer {
-            bits: (types.pointer_width() * 8) as u16,
+            bits: match kind {
+                AbiKind::ShyV1 => 32,
+                _ => (types.pointer_width() * 8) as u16,
+            },
         }),
         TypeKind::Array {
             element,
             len: Some(count),
         } => Ok(AbiType::Array {
-            element: Box::new(abi_type(types, element.ty)?),
+            element: Box::new(abi_type(types, element.ty, kind)?),
             count: *count,
         }),
         TypeKind::Array { len: None, .. } => Err(invalid("incomplete array type has no ABI shape")),
         TypeKind::Enum(_) => match types.enum_underlying(ty) {
-            Some(underlying) => abi_type(types, underlying),
+            Some(underlying) => abi_type(types, underlying, kind),
             None => Err(invalid("enum type has no underlying type")),
         },
         // The `Result<void, E>` niche is `E`'s integer, not an aggregate.
         TypeKind::PayloadEnum(_) if types.is_niche_enum(ty) => match types.enum_underlying(ty) {
-            Some(underlying) => abi_type(types, underlying),
+            Some(underlying) => abi_type(types, underlying, kind),
             None => Err(invalid("niche Result has no underlying type")),
         },
         // A payload enum is a visible aggregate in the ABI: a tag followed by
         // one union holding every payload.
-        TypeKind::PayloadEnum(_) => payload_enum_type(types, ty),
-        TypeKind::Record { kind, .. } => record_type(types, ty, *kind),
+        TypeKind::PayloadEnum(_) => payload_enum_type(types, ty, kind),
+        TypeKind::Record { kind: record, .. } => record_type(types, ty, kind, *record),
         TypeKind::Function { .. } => Err(invalid("function type has no object ABI shape")),
     }
 }
@@ -142,7 +169,7 @@ pub fn abi_type(types: &TypeStore, ty: TypeId) -> Result<AbiType, AbiError> {
 /// merges its members' classes instead, so a float-only payload is not
 /// register-compatible with an equivalent C struct (the same limitation
 /// already applies to a source-level union member).
-fn payload_enum_type(types: &TypeStore, ty: TypeId) -> Result<AbiType, AbiError> {
+fn payload_enum_type(types: &TypeStore, ty: TypeId, kind: AbiKind) -> Result<AbiType, AbiError> {
     let info = types
         .enum_info(ty)
         .ok_or_else(|| invalid("payload enum has no layout"))?;
@@ -158,7 +185,7 @@ fn payload_enum_type(types: &TypeStore, ty: TypeId) -> Result<AbiType, AbiError>
         if let Some(payload) = variant.payload {
             variants.push(AbiField::new(
                 variant.name.clone(),
-                abi_type(types, payload)?,
+                abi_type(types, payload, kind)?,
                 0,
             ));
         }
@@ -166,7 +193,7 @@ fn payload_enum_type(types: &TypeStore, ty: TypeId) -> Result<AbiType, AbiError>
 
     Ok(AbiType::Struct {
         fields: vec![
-            AbiField::new("tag", abi_type(types, info.underlying)?, 0),
+            AbiField::new("tag", abi_type(types, info.underlying, kind)?, 0),
             AbiField::new(
                 "payload",
                 AbiType::Union {
@@ -182,7 +209,12 @@ fn payload_enum_type(types: &TypeStore, ty: TypeId) -> Result<AbiType, AbiError>
     })
 }
 
-fn record_type(types: &TypeStore, ty: TypeId, kind: RecordKind) -> Result<AbiType, AbiError> {
+fn record_type(
+    types: &TypeStore,
+    ty: TypeId,
+    kind: AbiKind,
+    record: RecordKind,
+) -> Result<AbiType, AbiError> {
     let info = types
         .record_info(ty)
         .ok_or_else(|| invalid("record type has no layout"))?;
@@ -207,7 +239,7 @@ fn record_type(types: &TypeStore, ty: TypeId, kind: RecordKind) -> Result<AbiTyp
                     align: align as u16,
                 }
             }
-            _ => abi_type(types, field.ty.ty)?,
+            _ => abi_type(types, field.ty.ty, kind)?,
         };
         fields.push(AbiField {
             name: field.name.clone(),
@@ -216,7 +248,7 @@ fn record_type(types: &TypeStore, ty: TypeId, kind: RecordKind) -> Result<AbiTyp
         });
     }
 
-    Ok(match kind {
+    Ok(match record {
         RecordKind::Struct => AbiType::Struct {
             fields,
             size,

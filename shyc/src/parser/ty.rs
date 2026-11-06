@@ -287,6 +287,8 @@ impl Parser {
     // -- structs, unions, enums ------------------------------------------
 
     fn record_spec(&mut self, kind: RecordKind) -> Result<RecordSpec, Diagnostic> {
+        let args_builtin = self.pending_args_builtin;
+        self.pending_args_builtin = false;
         let start = self.bump().span;
         let tag = if self.ident_here().is_some() {
             Some(self.expect_ident()?)
@@ -330,11 +332,18 @@ impl Parser {
             self.pop_scope();
         }
         let (generics, members) = parsed?;
+        if args_builtin && (kind != RecordKind::Struct || !generics.is_empty()) {
+            return Err(Diagnostic::new(
+                start,
+                "`#[args_builtin]` applies to a non-generic struct definition",
+            ));
+        }
         Ok(RecordSpec {
             span: self.finish(start),
             kind,
             tag,
             generics,
+            args_builtin,
             members,
         })
     }

@@ -1,10 +1,8 @@
 # ShyC
 
 ShyC is the current bare-metal C ABI and language subset for ShyISA. The
-frontend is the local chibicc fork under `third_party/chibicc`.
-
-Implementation notes for maintaining the local fork are in
-`third_party/chibicc/SHY_FORK.md`.
+frontend is the independent `shyc` compiler in this repository, driven by
+`shycc`.
 
 ## Goals
 
@@ -16,19 +14,19 @@ Implementation notes for maintaining the local fork are in
 The intended pipeline is:
 
 ```sh
-third_party/chibicc/chibicc --target=shy -S -o file.shy file.c
+shycc --target=shy -S file.c -o file.shy
 cargo run -q -p asm -- file.shy -o file.sobj
 cargo run -q -p linker -- file.sobj other.sobj -o program.sfs --sym program.sym
 ```
 
 ## Target Mode
 
-Use `--target=shy` when invoking chibicc. This selects the Shy backend and
-defines `__shy__`.
+`shycc` compiles for the Shy target by default. That target defines
+`__shy__` and emits ShyISA assembly.
 
-The compiler emits assembly only for this target. Runtime support is not linked
-implicitly. If compiler helper functions are needed, compile and link the
-runtime source explicitly.
+Runtime support is not linked implicitly except through the driver's default
+libraries. If compiler helper functions are needed, link the float runtime
+explicitly with `-lfloat`.
 
 ## Source Line Annotations
 
@@ -37,7 +35,6 @@ mapping in generated `.shy` files:
 
 ```sh
 cargo run -q -p shycc -- --shy-emit-source-lines -S file.shyc -o file.shy
-third_party/chibicc/chibicc --target=shy --shy-emit-source-lines -S -o file.shy file.shyc
 ```
 
 When enabled, the Shy backend emits comment lines before the function symbol and
@@ -59,7 +56,7 @@ The format is:
 
 These lines are ordinary Shy assembly comments, so existing assembly and linking
 behavior is unchanged. They are consumed by `shy-dwarf` (via the `.shy.debug.json`
-sidecar produced by `chibicc`) to generate DWARF debug info for GDB.
+sidecar produced by `shyc`) to generate DWARF debug info for GDB.
 
 To produce a debug ELF alongside the `.sfs` image, use:
 
@@ -181,8 +178,7 @@ Rust-style aliases:
 
 ## Calling Convention (ABI v1)
 
-This is the host chibicc backend's ABI and the contract for the independent
-Rust backend under development.
+This is the ABI `shyc` implements.
 The stack grows upward; stack pointers and argument blocks are 4-byte aligned.
 Object layout and padding inside a struct or union are unchanged by argument
 passing. Memory representation is big-endian.
@@ -300,7 +296,7 @@ implementation.
 Currently supported or partially supported:
 
 - integer, pointer, array, struct, and union frontend constructs handled by
-  chibicc;
+  `shyc`;
 - globals and local variables;
 - `if`, `while`, `for`, `do`, `switch`, `case`, and `default`;
 - labels and `goto`;
@@ -443,6 +439,37 @@ or lifetime checking, and the returned pointer must designate a live target for
 the duration of the access. A record may implement each trait once; a second
 `Deref` implementation makes that projection ambiguous.
 
+### Process arguments
+
+`#[args_builtin]` marks the struct that carries the process arguments. The
+attribute changes only `main`'s signature: a by-value parameter of that type is
+passed as the struct's fields, one after another. `int main(Args args)`
+therefore has exactly the ABI of `int main(int argc, char **argv)`, so the
+Shy runtime and the host C runtime can start it directly. Any other function
+keeps receiving `Args` as an ordinary struct.
+
+The attribute is written on the struct definition, and the object layout stays
+the declared one:
+
+```c
+#[args_builtin]
+struct Args {
+    int argc;
+    char **argv;
+};
+
+int main(Args args) {
+    for (int i = 0; i < args.argc; i++)
+        printf("%s\n", args.argv[i]);
+    return 0;
+}
+```
+
+`<std/env.shyh>` provides this declaration as `Args`, together with `len`,
+`get(i)`, `iter`, `has_flag`, and `value_of`. On bare Shy the process has no
+arguments, so `argc` is 0; `shyemu-user` fills the stack described in
+[ABI.md](ABI.md).
+
 ### Linkage
 
 ShyC declarations are **file-local by default**, the same shape as `let` being
@@ -485,8 +512,9 @@ fn helper(void) -> int;      // 对外
 static fn local(void) -> int { return 1; }   // 只在本文件
 ```
 
-A method of an inherent impl may be declared without a body, like a C
-prototype. A header declares the methods and one translation unit defines them:
+A method of an inherent impl or of a concrete `impl Trait for Type` may be
+declared without a body, like a C prototype. A header declares the methods and
+one translation unit defines them:
 
 ```c
 // str.shyh
@@ -502,22 +530,324 @@ impl Str {
 }
 ```
 
+A declared trait implementation works the same way. Its block in the source file
+continues the implementation the header declared, and the definition adopts the
+symbol the declaration gave it:
+
+```c
+// pass.shyh
+trait Pass {
+  fn run(self *p);
+}
+
+struct D { int x; };
+
+impl Pass for D {
+  fn run(self *p);
+}
+
+// pass.shyc
+#include "pass.shyh"
+impl Pass for D {
+  fn run(self *p) { p.x = 7; }
+}
+```
+
 A header can define a helper or a whole trait implementation without a
 duplicate symbol in every unit that includes it: a `fn` is already file-local,
 so nothing has to be written for the private case, and `pub` is the only way to
 export one. `static` stays available as the explicit spelling of the same
 linkage, which is what a file under `#![disable_default_static]` needs.
-Methods of a generic or trait impl always have bodies; a generic impl is
-compiled where it is used. A trait declaration may give a method a default
-body, and an `impl` that omits the method inherits it.
 
-If a type implements `drop(self *s)`, local values of that type are treated as
-RAII values. ShyC inserts `drop` at scope exits, `return`, `break`, and
-`continue`. Passing or assigning such a value by value moves it; using a moved
-value is an error. Calling `.drop()` manually disables the automatic drop for
-that local value.
+A generic impl has no single definition site: it is instantiated in each
+translation unit that uses it, so its methods always carry their bodies, usually
+in a header. A bodiless method in a generic impl is rejected for that reason. A
+receiver named by a typedef is a concrete type, so its implementation declares
+and defines separately like any other:
 
-`goto` out of a scope containing active RAII locals is rejected.
+```c
+// pass.shyh
+struct Vec<T> { T *data; int len; };
+typedef Vec<int> IntVec;
+
+impl Pass for IntVec {
+  fn run(self *p);
+}
+
+// pass.shyc
+#include "pass.shyh"
+impl Pass for IntVec {
+  fn run(self *p) { /* ... */ }
+}
+```
+
+A trait declaration may give a method a default body, and an `impl` that omits
+the method inherits it. A method the impl only declares is not inherited: the
+declaration points at the definition in the translation unit that has it.
+
+### Payload enums
+
+An `enum` variant may carry one payload. The enum then becomes a transparent
+tagged object: the tag is the underlying integer at offset 0, and every payload
+starts at the same offset after it, aligned for the widest payload. A variant
+with a payload is built as `Enum::Variant(value)` and read as
+`value.payload.Variant`; `.tag` is the variant's own integer. `switch` on the
+enum compares the tag, and `?` propagates `Option` (`None`/`Some`) and
+`Result` (`Err`/`Ok`) values.
+
+```c
+#include <stdio.h>
+#include <core/option.shyh>
+
+enum Shape {
+    Point,
+    Circle(int)
+};
+
+int main(void) {
+    Shape s = Shape::Circle(3);
+    printf("%d %d\n", s.tag, s.payload.Circle);
+
+    Option<int> value = Option<int>::Some(7);
+    printf("%d %d %d %d\n", value.is_some(), value.is_none(), value.unwrap(), value.unwrap_or(9));
+
+    switch (value) {
+    case Some:
+        printf("%d\n", value.payload.Some);
+        break;
+    default:
+        printf("none\n");
+    }
+
+    Option<int> none = Option<int>::None;
+    printf("%d %d\n", value.tag != Option<int>::Some, none.tag == Option<int>::None.tag);
+    printf("%d\n", (int)sizeof(Option<int *>) == (int)sizeof(int *));
+    return 0;
+}
+```
+
+```text
+1 3
+1 0 7 7
+7
+0 1
+1
+```
+
+#### Niche representations
+
+A generic payload enum may ask for a C-compatible representation:
+
+- `#[option_niche]` on `Option<T>`: when `T` is a pointer, the object is that
+  pointer. `NULL` is `None` and any other value is `Some`, so `Some(NULL)`
+  is `None`.
+- `#[result_niche]` on `Result<T, E>`: when `T` is `void` and `E` is a
+  payload-free enum with no zero enumerator, the object is `E`'s integer. Zero
+  is `Ok` and any other value is `Err`.
+
+Both apply only to an instantiated generic enum; a hand-written enum keeps the
+tagged layout. A niche enum stores no tag, so `.tag` is the raw stored value
+(the pointer or the error integer); compare variants through `switch`, `?`, or
+the methods the header provides.
+
+#### Bare variant names
+
+A variant name on its own is the value when the variant has no payload, and its
+tag when it has one, because a payload variant cannot be built without one:
+`value.tag != Option<int>::Some` compares against the tag, while
+`Option<int>::None` is the value itself.
+
+Reading `value.payload.Variant` of a payload-free variant is a `void`
+expression: it holds nothing. That is how a `-> T` method returns nothing when
+its `T` is `void`.
+
+#### Generic impls
+
+`impl<T> Name<T>` works for a generic record and for a generic enum, so a
+header can carry the methods of `Option<T>` or `Result<T, E>`. The instance is
+materialized on first use, and only the methods it uses are lowered.
+
+A method whose signature cannot be expressed for one instantiation is left out
+of that instance instead of making the whole impl unusable: `Result<void, E>`
+has no `unwrap_or`, because its fallback would be a `void` parameter. Looking
+it up reports the reason.
+
+#### `case` shorthand
+
+When the switch value is a payload enum, a bare variant name is a case label:
+`case Some:` stands for `case Option<Str>::Some:`, resolved against the type of
+the value being switched on. A bare name that is already a C constant or
+enumerator keeps C's meaning, so the shorthand never changes an existing label.
+
+### Deferred drop
+
+A local declaration may be marked `defer`. The type must implement
+`drop(self *value)`, and the local is dropped when its scope ends. An ordinary
+declaration never drops anything, whether or not its type has a `drop` method.
+Both spellings are accepted: `defer Type name = ...;` and
+`defer let mut name = ...;`.
+
+```c
+#include <stdio.h>
+
+struct Guard {
+  int id;
+};
+
+impl Guard {
+  void drop(self *g) {
+    printf("drop %d\n", g.id);
+  }
+
+  Guard make(int id) {
+    Guard g;
+    g.id = id;
+    return g;
+  }
+}
+
+int main(void) {
+  {
+    defer Guard a = Guard::make(1);
+    defer let mut b = Guard::make(2);
+    printf("leaving the block\n");
+  }
+  printf("after\n");
+  return 0;
+}
+```
+
+```text
+leaving the block
+drop 2
+drop 1
+after
+```
+
+Each deferred local has a `moved` flag in the stack frame, initially 0. Every
+exit drops the deferred locals in reverse declaration order as
+`if (!moved) value.drop();`: the end of the block, `return`, `break`,
+`continue`, and a `goto` that leaves the scope. `longjmp` bypasses them. A
+`goto` that jumps into a scope past a `defer` declaration is rejected.
+
+A `defer` declaration written as the single statement of a brace-less `if`,
+`else`, `while`, `for`, `do`, or `switch` body owns only that statement: it is
+dropped as soon as the statement ends, exactly as if the body had been written
+in braces.
+
+`value.move()` is a compiler builtin: the expression yields the value and sets
+that local's `moved` flag, so the exit drops skip it. `.move()` on a variable
+that is not declared `defer` is an error. `return value;` where `value` is a
+bare deferred local means `return value.move();`. There is no check for use
+after a move.
+
+```c
+#include <stdio.h>
+
+struct Guard {
+  int id;
+};
+
+impl Guard {
+  void drop(self *g) {
+    printf("drop %d\n", g.id);
+  }
+
+  Guard make(int id) {
+    Guard g;
+    g.id = id;
+    return g;
+  }
+}
+
+Guard pass_through(void) {
+  defer Guard a = Guard::make(7);
+  return a;
+}
+
+int main(void) {
+  defer Guard a = Guard::make(1);
+  defer Guard b = Guard::make(2);
+  Guard moved = a.move();
+  printf("moved %d\n", moved.id);
+  Guard given = pass_through();
+  printf("given %d\n", given.id);
+  return 0;
+}
+```
+
+```text
+moved 1
+given 7
+drop 2
+```
+
+Any other by-value use of a deferred local keeps C value semantics: the copy is
+taken, the `moved` flag is not set, and the local is still dropped at exit, so
+the copy may dangle. That covers passing it to a by-value parameter, assigning
+it to another variable or field, putting it into an enum payload, and assigning
+it a new value. The compiler warns. Taking the address (`&a`), reading a field
+(`a.id`), and calling a `self *` method (`a.get()`, `a.clone()`, `a.move()`)
+are not by-value uses and do not warn. Temporary values are never dropped;
+only a named `defer` local is.
+
+The warning can be silenced for one statement, for a whole function or `impl`
+block, or for the whole file:
+
+```c
+#include <stdio.h>
+
+struct Guard {
+  int id;
+};
+
+impl Guard {
+  void drop(self *g) {
+    printf("drop %d\n", g.id);
+  }
+
+  Guard make(int id) {
+    Guard g;
+    g.id = id;
+    return g;
+  }
+}
+
+void consume(Guard g) {
+  printf("got %d\n", g.id);
+}
+
+void copied(void) {
+  defer Guard a = Guard::make(3);
+  consume(a);                        /* warning */
+  #[allow(defer_copy)] consume(a);   /* silent */
+}
+
+#[allow(defer_copy)]                 /* the whole function */
+void silent(void) {
+  defer Guard a = Guard::make(4);
+  consume(a);
+}
+
+int main(void) {
+  copied();
+  silent();
+  return 0;
+}
+```
+
+```text
+warning: app.shyc:25:11: 'a' is a defer variable copied by value; ...
+got 3
+got 3
+drop 3
+got 4
+drop 4
+```
+
+`#![allow(defer_copy)]` at the top level of the main input file, before or
+after other top-level items, silences the whole translation unit. The same form
+covers an `impl` block: `#[allow(defer_copy)] impl Guard { ... }`.
 
 ### Imports
 
@@ -558,7 +888,7 @@ Floating point is implemented through software helper calls where needed. The
 current runtime source is:
 
 ```text
-third_party/chibicc/shy_runtime_softfloat.c
+third_party/shy_runtime_softfloat.c
 ```
 
 The runtime is intentionally approximate for now. It is good enough for basic
@@ -580,7 +910,7 @@ model need either stronger ISA support or runtime conventions.
 
 Two inline assembly forms are supported.
 
-Raw chibicc-style assembly:
+Raw assembly:
 
 ```c
 asm("oututfa 4x");

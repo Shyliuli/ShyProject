@@ -1,0 +1,8 @@
+// shyemu-user 的启动代码：模拟器按 ABI 把 argc 放在 4x、argv 放在 5x，
+// sp 指向初始栈块上方的空闲栈底。main 的返回值就是进程退出码。
+
+#![no_main]
+
+void _start(void) {
+    asm("calln main\nsetn 0x 94\nsyscall");
+}

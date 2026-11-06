@@ -11,26 +11,30 @@
 //! - a trait becomes a structure of function pointers, and `Trait::from<T>()`
 //!   becomes the constructor that fills one;
 //! - `value?` becomes a statement expression that returns the failure variant;
-//! - `asm!` becomes a GCC extended asm statement.
+//! - `asm!` becomes a GCC extended asm statement;
+//! - a payload enum reads and builds its `.tag` and `.payload.Variant`, and a
+//!   niche enum stores its payload directly, as the compiler laid it out.
 //!
 //! Everything else is ordinary C and prints as written. A generic function or
 //! record prints nothing: C has no template, and an instance of one is a
-//! separate symbol with its own name (`Vec_int`).
+//! separate symbol with its own name (`Vec_int`). The compiler decided which
+//! instances exist and what each one is called, so this module never invents a
+//! name for a call, a member, or a variant.
 
 use std::collections::HashMap;
 
 use crate::ast::{
     self, AsmStmt, AssignOp, BinaryOp, Block, DeclSpecs, Declaration, Declarator,
-    DerivedDeclarator, Expr, ForInit, FunctionDecl, GenericArg, GenericArgKind, ImplBlock,
-    Initializer, InitializerKind, Item, MemberOp, Name, PostfixOp, RecordSpec, Stmt, TraitDecl,
-    TranslationUnit, TypeName, TypeSpecifier, UnaryOp,
+    DerivedDeclarator, EnumSpec, Expr, ForInit, FunctionDecl, GenericArg, GenericArgKind,
+    ImplBlock, Initializer, InitializerKind, Item, MemberOp, Name, PostfixOp, RecordSpec, Stmt,
+    TraitDecl, TranslationUnit, TypeName, TypeSpecifier, UnaryOp,
 };
 use crate::c::names;
 use crate::c::types::{
-    Mention, Spelling, declarator_text_in, generic_spec_text, record_instance_text, specs_text_in,
-    trait_value_possible, trait_value_text, type_name_text, type_name_text_with,
+    Spelling, declarator_text_in, generic_spec_text, specs_text_in, trait_value_possible,
+    trait_value_text, type_name_text, type_name_text_with,
 };
-use crate::lower::{InstancePlan, Lowered};
+use crate::lower::{InstancePlan, Lowered, PayloadEnumPlan, VariantPlan};
 use crate::source::{Diagnostic, Span};
 
 /// Render the whole unit as one C translation unit.
@@ -78,7 +82,9 @@ struct Backend<'a> {
     functions: HashMap<String, Ty>,
     /// The fields of every record with a definition, by base name.
     records: HashMap<String, Vec<(String, Ty)>>,
-    /// The enumerators of every enum with a definition, by base name.
+    /// The enumerators of every plain C enum with a definition, by base name.
+    /// A payload enum has no C enumerator, so it is described by
+    /// `payload_enums` instead.
     enums: HashMap<String, Vec<String>>,
     /// The impl blocks of every receiver type, by base name.
     impls: HashMap<String, Vec<&'a ImplBlock>>,
@@ -94,10 +100,24 @@ struct Backend<'a> {
     templates: HashMap<String, &'a FunctionDecl>,
     /// Generic record definitions, by name.
     generic_records: HashMap<String, &'a RecordSpec>,
+    /// Generic enum definitions, by name.
+    generic_enums: HashMap<String, &'a EnumSpec>,
+    /// The payload enums the compiler lowered, by base name. A hand-written
+    /// payload enum is declared under its tag and a generic one under the name
+    /// the instance plan gave it.
+    payload_enums: HashMap<String, &'a PayloadEnumPlan>,
+    /// The fields of every record the compiler lowered, by base name. A member
+    /// read of an instantiated record resolves its type through this table.
+    record_fields: HashMap<String, &'a [(String, String)]>,
+    /// The C name of each `#[args_builtin]` struct.
+    args_builtin: std::collections::HashSet<String>,
+    /// Every symbol the C output names, in any pass. A definition, prototype,
+    /// or declaration this set does not hold is not part of the output: nothing
+    /// uses it, and a file-local function nothing uses is dead code the C
+    /// compiler warns about.
+    used: std::cell::RefCell<std::collections::HashSet<String>>,
     /// The impl blocks of a generic record, by the record's name.
     generic_impls: HashMap<String, Vec<&'a ImplBlock>>,
-    /// Generic uses seen while printing: the work list of specializations.
-    mentions: std::cell::RefCell<Vec<Mention>>,
     /// Specializations already queued, so one instance prints once.
     instances: std::cell::RefCell<Vec<Instance>>,
 }
@@ -138,6 +158,16 @@ impl<'a> Backend<'a> {
                 type_names.insert(instance_key(&plan.name, &plan.args), name.clone());
             }
         }
+        // A payload enum is found by the type name C spells it with, which is a
+        // tag for a hand-written enum and the plan's name for a generic one.
+        let mut payload_enums = HashMap::new();
+        for plan in &lowered.payload_enums {
+            payload_enums.insert(names::split(&plan.name).0, plan);
+        }
+        let mut record_fields = HashMap::new();
+        for (name, fields) in &lowered.record_fields {
+            record_fields.insert(names::split(name).0, fields.as_slice());
+        }
         let mut backend = Backend {
             objects: HashMap::new(),
             functions: HashMap::new(),
@@ -149,8 +179,16 @@ impl<'a> Backend<'a> {
             type_names,
             templates: HashMap::new(),
             generic_records: HashMap::new(),
+            generic_enums: HashMap::new(),
+            payload_enums,
+            record_fields,
+            args_builtin: lowered
+                .args_builtin
+                .iter()
+                .map(|name| names::split(name).0)
+                .collect(),
+            used: std::cell::RefCell::new(std::collections::HashSet::new()),
             generic_impls: HashMap::new(),
-            mentions: std::cell::RefCell::new(Vec::new()),
             instances: std::cell::RefCell::new(Vec::new()),
         };
         for item in &unit.items {
@@ -175,14 +213,32 @@ impl<'a> Backend<'a> {
             }
         }
         // The compiler already decided which specializations exist, so the work
-        // list is its plan rather than a search of the source.
+        // list is its plan rather than a search of the source: one instance per
+        // generic function, and one per generic method. A record or enum instance
+        // is a type, printed from its plan instead.
         for plan in &lowered.instances {
-            let specialized = plan.layout.is_some()
-                || (plan.receiver.is_none() && plan.symbol.is_some())
-                // A generic method is a template too: its plan carries the
-                // method's own type arguments.
-                || (plan.receiver.is_some() && !plan.args.is_empty());
-            if specialized {
+            if plan.receiver.is_none() {
+                if plan.type_name.is_none() && plan.symbol.is_some() {
+                    backend.instances.borrow_mut().push(Instance {
+                        name: plan.name.clone(),
+                        args: plan.args.clone(),
+                        receiver: None,
+                    });
+                }
+                continue;
+            }
+            // A concrete impl block prints its own methods, inherited defaults
+            // included; only a template's methods and a generic method of a
+            // concrete impl are printed from an instance.
+            let Some((_, declarator, _)) = backend.method_template(plan) else {
+                continue;
+            };
+            let from_template = plan.impl_name.as_deref().is_some_and(|name| {
+                backend
+                    .generic_impls
+                    .contains_key(name.split('<').next().unwrap_or(name))
+            });
+            if from_template || !generic_parameters(declarator).is_empty() {
                 backend.instances.borrow_mut().push(Instance {
                     name: plan.name.clone(),
                     args: plan.args.clone(),
@@ -200,7 +256,6 @@ impl<'a> Backend<'a> {
             instances: Some(&self.type_names),
             bindings: None,
             generics: true,
-            mentions: Some(&self.mentions),
         }
     }
 
@@ -250,10 +305,23 @@ impl<'a> Backend<'a> {
         self.records.insert(tag.text.clone(), fields);
     }
 
-    fn enumeration(&mut self, enumeration: &ast::EnumSpec) {
+    fn enumeration(&mut self, enumeration: &'a EnumSpec) {
         let (Some(tag), Some(enumerators)) = (&enumeration.tag, &enumeration.enumerators) else {
             return;
         };
+        if !enumeration.generics.is_empty() {
+            // A template: each use names an instance, which the plan describes.
+            self.generic_enums.insert(tag.text.clone(), enumeration);
+            return;
+        }
+        // A payload enum has no C enumerators: its variants are tags and
+        // payloads, which the compiler's plan describes.
+        if enumerators
+            .iter()
+            .any(|enumerator| enumerator.payload.is_some())
+        {
+            return;
+        }
         let names = enumerators
             .iter()
             .map(|enumerator| enumerator.name.text.clone())
@@ -332,17 +400,34 @@ impl<'a> Backend<'a> {
     }
 
     /// The field of a record, following one implicit pointer dereference.
+    ///
+    /// A record the unit declared answers from its own definition; one the
+    /// compiler instantiated answers from the plan, so a member of a generic
+    /// instance resolves too.
     fn field(&self, ty: &Ty, name: &str) -> Option<Ty> {
-        self.records
+        if let Some(fields) = self.records.get(&ty.base) {
+            return fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, ty)| ty.clone());
+        }
+        self.record_fields
             .get(&ty.base)?
             .iter()
             .find(|(field, _)| field == name)
-            .map(|(_, ty)| ty.clone())
+            .map(|(_, ty)| Ty::from_text(ty))
     }
 
     /// Whether one plan describes the method of this receiver.
+    ///
+    /// A receiver is named by its type, so `struct shyc_E41` and the C base
+    /// name the printer resolved both answer for the same type.
     fn names_receiver(plan: &InstancePlan, receiver: &str) -> bool {
-        plan.impl_name.as_deref() == Some(receiver) || plan.receiver.as_deref() == Some(receiver)
+        let base = names::split(receiver).0;
+        [&plan.impl_name, &plan.receiver]
+            .into_iter()
+            .flatten()
+            .any(|name| names::split(name).0 == base)
     }
 
     /// The compiler's plan for one method of one receiver.
@@ -392,6 +477,55 @@ impl<'a> Backend<'a> {
         // Neither: a method the compiler never lowered, which only happens for a
         // construct it rejected, so the plain name is enough to report it in C.
         name.to_string()
+    }
+
+    /// The linkage a method is printed with.
+    ///
+    /// The compiler gives a file-local method an internal symbol, and that is
+    /// exactly what C's `static` means; a method that adopted a header
+    /// prototype keeps the external symbol the header declared.
+    fn linkage(&self, span: Span, is_pub: bool) -> &'static str {
+        let file_local = self
+            .lowered
+            .declaration_symbols
+            .get(&span)
+            .map_or(!is_pub, |symbol| symbol.starts_with(".L."));
+        if file_local { "static " } else { "" }
+    }
+
+    /// Record that the C output names one symbol.
+    fn mark_used(&self, symbol: &str) {
+        self.used.borrow_mut().insert(symbol.to_string());
+    }
+
+    /// Whether the C output names one symbol, so its declaration belongs here.
+    fn used_symbol(&self, symbol: &str) -> bool {
+        self.used.borrow().contains(symbol)
+    }
+
+    /// Whether the C output has to print one definition.
+    ///
+    /// An externally visible definition stays, because another unit may be the
+    /// one that uses it; a file-local one that nothing names is dead code, and
+    /// the C compiler reports it. A file-local symbol is `.L.module.name` before
+    /// the C spelling, and `_L_module_name` after it.
+    fn declares(&self, symbol: &str) -> bool {
+        let file_local = symbol.starts_with(".L.") || symbol.starts_with("_L_");
+        !file_local || self.used_symbol(symbol)
+    }
+
+    /// The symbol a call to one generic function instance resolved to.
+    ///
+    /// A template has one symbol per instance, so the callee's name alone cannot
+    /// name the call. The compiler resolved it to a concrete instance, and this
+    /// table is that answer, kept for the tuple that identifies the call: its
+    /// span, which the source wrote, and the callee's name, which tells two
+    /// calls one macro expansion produced apart.
+    fn call_symbol(&self, span: Span, name: &str) -> Option<String> {
+        self.lowered
+            .call_symbols
+            .get(&(span, name.to_string()))
+            .map(|symbol| names::symbol(symbol))
     }
 
     /// The C name of one file-scope function: the compiler's symbol for it.
@@ -478,30 +612,43 @@ impl<'a> Backend<'a> {
         None
     }
 
-    /// The C type and tag value of one payload-enum variant.
+    /// The payload enum a C type names, from the compiler's plan.
+    fn enum_plan(&self, ty: &Ty) -> Option<&'a PayloadEnumPlan> {
+        self.payload_enums.get(&ty.base).copied()
+    }
+
+    /// The C name of the payload enum a qualifier names.
+    ///
+    /// A hand-written enum is named by its tag; a generic one by the instance
+    /// plan, whose name the type printer already uses for that type.
+    fn enum_name(
+        &self,
+        qualifier: &Name,
+        args: &[GenericArg],
+        spelling: Spelling,
+    ) -> Option<String> {
+        if args.is_empty() {
+            return self
+                .payload_enums
+                .contains_key(&names::split(&qualifier.text).0)
+                .then(|| qualifier.text.clone());
+        }
+        let key = instance_key(&qualifier.text, &generic_argument_text(args, spelling));
+        self.type_names.get(&key).cloned()
+    }
+
+    /// The payload enum and the variant one `Enum::Variant` names.
     fn variant(
         &self,
         qualifier: &Name,
         args: &[GenericArg],
+        spelling: Spelling,
         name: &str,
-    ) -> Option<(String, usize)> {
-        let enumerators = self.enums.get(&qualifier.text)?;
-        let tag = enumerators
-            .iter()
-            .position(|enumerator| enumerator == name)?;
-        let mut parts = Vec::new();
-        for arg in args {
-            let GenericArgKind::Type(type_name) = &arg.kind else {
-                return None;
-            };
-            parts.push(type_name_text(type_name));
-        }
-        // The payload enum's C name is the compiler's, like any other instance.
-        let ty = self
-            .plan(&qualifier.text, &parts, None)
-            .and_then(|plan| plan.type_name.clone())
-            .unwrap_or_else(|| qualifier.text.clone());
-        Some((ty, tag))
+    ) -> Option<(&'a PayloadEnumPlan, &'a VariantPlan)> {
+        let enum_name = self.enum_name(qualifier, args, spelling)?;
+        let plan = self.payload_enums.get(&names::split(&enum_name).0)?;
+        let variant = plan.variants.iter().find(|variant| variant.name == name)?;
+        Some((plan, variant))
     }
 
     /// The return type of one trait method.
@@ -518,23 +665,29 @@ impl<'a> Backend<'a> {
     }
 
     fn render(&self, unit: &TranslationUnit) -> Result<String, Diagnostic> {
-        // A specialization is printed by the same code as the unit, and a
-        // specialization can need another one, so the instance list is
-        // discovered on a discarded run and then printed for real.
-        let mut scratch = String::new();
-        self.emit(unit, &mut scratch)?;
+        // A definition is printed only when something names it, and printing it
+        // can name more, so the unit is printed until the set of named symbols
+        // stops growing; the last pass is the output.
         let mut output = String::new();
-        self.emit(unit, &mut output)?;
-        Ok(output)
+        loop {
+            output.clear();
+            let before = self.used.borrow().len();
+            self.emit(unit, &mut output)?;
+            if self.used.borrow().len() == before {
+                return Ok(std::mem::take(&mut output));
+            }
+        }
     }
 
     /// Print the unit, its declarations, and every specialization it needs.
     fn emit(&self, unit: &TranslationUnit, output: &mut String) -> Result<(), Diagnostic> {
         output.push_str("/* Generated by shyc --emit=c. */\n\n");
         // A record's tag is also its type name in ShyC, so every C record gets
-        // the typedef a caller needs before anything mentions it; the definition
-        // itself stays in place below. This comes first because a trait method
-        // signature may name a record.
+        // the typedef a caller needs before anything mentions it, and every
+        // instance the plans named gets the struct tag a pointer may use. The
+        // definitions themselves follow below, once their members can be
+        // complete. This comes first because a trait method signature may name a
+        // record.
         let mut records = String::new();
         for item in &unit.items {
             if let Item::Decl(declaration) = item {
@@ -542,6 +695,14 @@ impl<'a> Backend<'a> {
                     records.push_str(&text);
                     records.push('\n');
                 }
+            }
+        }
+        for plan in &self.lowered.instances {
+            let Some(name) = &plan.type_name else {
+                continue;
+            };
+            if name.starts_with("struct ") || name.starts_with("union ") {
+                records.push_str(&format!("{name};\n"));
             }
         }
         if !records.is_empty() {
@@ -565,32 +726,19 @@ impl<'a> Backend<'a> {
             output.push_str(&traits);
             output.push('\n');
         }
-        // The generic instances the unit needs: a specialization is a record
-        // definition, a function, or one method per impl block.
-        self.drain();
+        // A prototype and a member both need their types complete, so every
+        // type definition comes before them, ordered so a type a definition
+        // stores by value is complete first.
+        let types = self.type_blocks(unit)?;
+        if !types.is_empty() {
+            output.push_str(&types);
+            output.push('\n');
+        }
+        // The generic instances the unit needs: one prototype per function and
+        // per method, before any body that calls one.
         let instances = self.instance_declarations()?;
         if !instances.is_empty() {
             output.push_str(&instances);
-            output.push('\n');
-        }
-        // A prototype has to name its types in C, so the type declarations the
-        // unit writes anywhere come before the prototypes, in source order.
-        let mut types = String::new();
-        for item in &unit.items {
-            let Item::Decl(declaration) = item else {
-                continue;
-            };
-            if !is_type_declaration(declaration) {
-                continue;
-            }
-            let text = self.item_declaration(declaration)?;
-            if !text.is_empty() {
-                types.push_str(&text);
-                types.push_str("\n\n");
-            }
-        }
-        if !types.is_empty() {
-            output.push_str(&types);
             output.push('\n');
         }
         // Methods and trait constructors are defined wherever their impl block
@@ -625,9 +773,56 @@ impl<'a> Backend<'a> {
                 output.push_str(text);
                 output.push_str("\n\n");
             }
-            self.drain();
         }
         self.instantiate(output)
+    }
+
+    /// Every C type definition the output prints, ordered so a type one stores
+    /// by value is complete before it.
+    fn type_blocks(&self, unit: &TranslationUnit) -> Result<String, Diagnostic> {
+        let mut blocks = Vec::new();
+        // An instance layout belongs to the compiler: it printed the header's
+        // types, so it prints this one too.
+        for plan in &self.lowered.instances {
+            let (Some(name), Some(layout)) = (&plan.type_name, &plan.layout) else {
+                continue;
+            };
+            let name = names::split(name).0;
+            blocks.push(TypeBlock {
+                needs: self
+                    .lowered
+                    .layout_needs
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default(),
+                name,
+                text: layout.clone(),
+            });
+        }
+        for item in &unit.items {
+            let Item::Decl(declaration) = item else {
+                continue;
+            };
+            if !is_type_declaration(declaration) {
+                continue;
+            }
+            let text = self.item_declaration(declaration)?;
+            if text.is_empty() {
+                continue;
+            }
+            let name = declared_type_name(declaration).unwrap_or_default();
+            blocks.push(TypeBlock {
+                needs: self
+                    .lowered
+                    .layout_needs
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default(),
+                name,
+                text,
+            });
+        }
+        Ok(order_type_blocks(blocks))
     }
 
     /// Print one file-scope declaration as a definition, initializer included.
@@ -636,8 +831,7 @@ impl<'a> Backend<'a> {
             return Ok(String::new());
         }
         let spelling = self.spelling("void");
-        let typedef = declaration.specs.storage == Some(ast::StorageClass::Typedef);
-        let prefix = if typedef { "typedef " } else { "" };
+        let prefix = storage_prefix(declaration.specs.storage);
         let specs = format!("{prefix}{}", specs_text_in(&declaration.specs, spelling));
         if declaration.declarators.is_empty() {
             // An enum's tag names its type too, and C has no forward enum
@@ -653,6 +847,19 @@ impl<'a> Backend<'a> {
         let mut globals = Body::new(self, None);
         let mut declarators = Vec::new();
         for declarator in &declaration.declarators {
+            // A declaration that defines nothing is only printed when this unit
+            // uses the name: an included header's declaration of a host library
+            // function would otherwise repeat, and possibly contradict, the
+            // declaration the C compiler already has.
+            if declarator.init.is_none()
+                && declaration.specs.storage != Some(ast::StorageClass::Typedef)
+                && (has_function(&declarator.declarator)
+                    || declaration.specs.storage == Some(ast::StorageClass::Extern))
+                && let Some(name) = &declarator.declarator.name
+                && !self.used_symbol(&self.symbol_of(&name.text))
+            {
+                continue;
+            }
             // A function reference in C names the symbol its definition does.
             let printed = match &declarator.declarator.name {
                 Some(name) => renamed(&declarator.declarator, &self.symbol_of(&name.text)),
@@ -664,6 +871,10 @@ impl<'a> Backend<'a> {
                 text.push_str(&globals.initializer(initializer)?);
             }
             declarators.push(text);
+        }
+        // Every declarator was a declaration this unit does not use.
+        if declarators.is_empty() {
+            return Ok(String::new());
         }
         Ok(format!("{specs} {};", declarators.join(", ")))
     }
@@ -678,7 +889,13 @@ impl<'a> Backend<'a> {
 
     /// The prototype a later definition needs, or nothing for a template.
     fn function_prototype(&self, function: &FunctionDecl) -> String {
-        if is_template(&function.declarator) || function.declarator.name.is_none() {
+        let Some(name) = &function.declarator.name else {
+            return String::new();
+        };
+        if is_template(&function.declarator)
+            || self.entry_main(function).is_some()
+            || !self.declares(&self.symbol_of(&name.text))
+        {
             return String::new();
         }
         format!(
@@ -694,21 +911,66 @@ impl<'a> Backend<'a> {
         if is_template(&function.declarator) {
             return Ok(String::new());
         }
+        if let Some(name) = &function.declarator.name
+            && !self.declares(&self.symbol_of(&name.text))
+        {
+            return Ok(String::new());
+        }
         let spelling = self.spelling("void");
         // The definition carries the symbol the compiler gave it, which is what
         // a call site prints.
         let declarator = self.function_declarator(function);
-        let signature = format!(
-            "{} {}",
-            specs_text_in(&function.specs, spelling),
-            declarator_text_in(&declarator, spelling)
-        );
+        let entry = self.entry_main(function);
+        let signature = match &entry {
+            // The C runtime starts a program at `int main(int argc, char **argv)`.
+            Some(_) => "int main(int argc, char **argv)".to_string(),
+            None => format!(
+                "{} {}",
+                specs_text_in(&function.specs, spelling),
+                declarator_text_in(&declarator, spelling)
+            ),
+        };
         let mut body = Body::new(
             self,
             Some(self.return_type_text(&function.specs, &function.declarator)),
         );
         body.parameters(&function.declarator);
-        Ok(format!("{signature} {}", body.block(&function.body, 0)?))
+        let mut text = body.render_block(&function.body)?;
+        if let Some((parameter, ty)) = &entry {
+            // A `#[args_builtin]` parameter receives the struct's fields one
+            // after another, so the body rebuilds the struct from the two C
+            // parameters the runtime passed.
+            let at = text.find('\n').map_or(1, |index| index + 1);
+            text.insert_str(at, &format!("    {ty} {parameter} = {{argc, argv}};\n"));
+        }
+        Ok(format!("{signature} {text}"))
+    }
+
+    /// The parameter of the program's entry point, when it takes the
+    /// `#[args_builtin]` struct by value.
+    fn entry_main(&self, function: &FunctionDecl) -> Option<(String, String)> {
+        let name = function.declarator.name.as_ref()?;
+        if name.text != "main" {
+            return None;
+        }
+        let position = function_position(&function.declarator)?;
+        let DerivedDeclarator::Function(declaration) = function.declarator.derived.get(position)?
+        else {
+            return None;
+        };
+        let [parameter] = &declaration.params[..] else {
+            return None;
+        };
+        let declarator = parameter.declarator.as_ref()?;
+        let parameter_name = declarator.name.as_ref()?.text.clone();
+        if !declarator.derived.is_empty() {
+            return None;
+        }
+        let spelling = specs_text_in(&parameter.specs, self.spelling("void"));
+        let ty = names::split(&spelling).0;
+        self.args_builtin
+            .contains(&ty)
+            .then_some((parameter_name, ty))
     }
 
     /// The declarations a call needs before the impl block's definitions.
@@ -724,8 +986,11 @@ impl<'a> Backend<'a> {
                 continue;
             };
             let symbol = self.symbol(&receiver, &name.text, trait_of(block), method.span);
+            if !self.declares(&symbol) {
+                continue;
+            }
             let declarator = renamed(method.declarator, &symbol);
-            let linkage = if method.specs.is_pub { "" } else { "static " };
+            let linkage = self.linkage(method.span, method.specs.is_pub);
             output.push_str(&format!(
                 "{linkage}{} {};\n",
                 specs_text_in(method.specs, spelling),
@@ -737,12 +1002,13 @@ impl<'a> Backend<'a> {
                 continue;
             };
             let symbol = self.symbol(&receiver, &name.text, trait_of(block), prototype.span);
+            if !self.declares(&symbol) {
+                continue;
+            }
             let declarator = renamed(&prototype.declarator, &symbol);
-            let linkage = if prototype.specs.is_pub {
-                ""
-            } else {
-                "static "
-            };
+            // A prototype names something defined elsewhere, so only `static`
+            // makes it file-local.
+            let linkage = self.linkage(prototype.span, prototype.specs.is_pub);
             output.push_str(&format!(
                 "{linkage}{} {};\n",
                 specs_text_in(&prototype.specs, spelling),
@@ -753,11 +1019,13 @@ impl<'a> Backend<'a> {
             && self.trait_value(trait_name)
         {
             let symbol = names::trait_value(&trait_name.text, &receiver);
-            let name = &trait_name.text;
-            output.push_str(&format!(
-                "static {name} {symbol}(void);
+            if self.used_symbol(&symbol) {
+                let name = &trait_name.text;
+                output.push_str(&format!(
+                    "static {name} {symbol}(void);
 "
-            ));
+                ));
+            }
         }
         Ok(output)
     }
@@ -782,8 +1050,11 @@ impl<'a> Backend<'a> {
                 continue;
             };
             let symbol = self.symbol(&receiver, &name.text, trait_of(block), method.span);
+            if !self.declares(&symbol) {
+                continue;
+            }
             let declarator = renamed(method.declarator, &symbol);
-            let linkage = if method.specs.is_pub { "" } else { "static " };
+            let linkage = self.linkage(method.span, method.specs.is_pub);
             let signature = format!(
                 "{linkage}{} {}",
                 specs_text_in(method.specs, spelling),
@@ -795,15 +1066,39 @@ impl<'a> Backend<'a> {
                 receiver.clone(),
             );
             body.parameters(method.declarator);
-            output.push_str(&format!("{signature} {}", body.block(method.body, 0)?));
+            output.push_str(&format!("{signature} {}", body.render_block(method.body)?));
             output.push_str("\n\n");
         }
         if let Some(trait_name) = &block.trait_name
             && self.trait_value(trait_name)
+            && self.first_trait_impl(block, &receiver, &trait_name.text)
         {
-            output.push_str(&self.trait_constructor(block, &receiver, &trait_name.text)?);
+            let symbol = names::trait_value(&trait_name.text, &receiver);
+            if self.used_symbol(&symbol) {
+                output.push_str(&self.trait_constructor(block, &receiver, &trait_name.text)?);
+            }
         }
         Ok(output)
+    }
+
+    /// Whether `block` is the first implementation of its trait for its
+    /// receiver.
+    ///
+    /// A declaration block and the definition block that continues it are two
+    /// blocks of one implementation; the trait-value constructor is printed
+    /// once, from the first of them.
+    fn first_trait_impl(&self, block: &ImplBlock, receiver: &str, trait_name: &str) -> bool {
+        self.impls
+            .get(receiver)
+            .and_then(|blocks| {
+                blocks.iter().find(|other| {
+                    other
+                        .trait_name
+                        .as_ref()
+                        .is_some_and(|name| name.text == trait_name)
+                })
+            })
+            .is_some_and(|first| first.span == block.span)
     }
 
     /// The constructor that fills a trait value with one implementation.
@@ -839,16 +1134,24 @@ impl<'a> Backend<'a> {
                 Some(implementation) => {
                     self.symbol(receiver, &name.text, Some(trait_name), implementation.span)
                 }
-                None => {
-                    return Err(Diagnostic::new(
-                        method.span,
-                        format!(
-                            "'impl {trait_name} for {receiver}' does not define '{}'",
-                            name.text
-                        ),
-                    ));
-                }
+                // A header may only declare the method; the constructor then
+                // names the same external symbol the definition uses.
+                None => match find_prototype(block, &name.text) {
+                    Some(prototype) => {
+                        self.symbol(receiver, &name.text, Some(trait_name), prototype.span)
+                    }
+                    None => {
+                        return Err(Diagnostic::new(
+                            method.span,
+                            format!(
+                                "'impl {trait_name} for {receiver}' does not define '{}'",
+                                name.text
+                            ),
+                        ));
+                    }
+                },
             };
+            self.mark_used(&implementation);
             output.push_str(&format!(
                 "    value.{} = (typeof(value.{})){implementation};\n",
                 name.text, name.text
@@ -856,6 +1159,21 @@ impl<'a> Backend<'a> {
         }
         output.push_str("    return value;\n}\n\n");
         Ok(output)
+    }
+}
+
+/// The storage class a declaration keeps in the C output.
+///
+/// `specs_text_in` prints the type only, so the prefix belongs here: without it
+/// an `extern FILE *stdout;` from a library header becomes a tentative
+/// definition, and the generated object file then defines a zeroed `stdout`
+/// that hides the stream the C library set up.
+fn storage_prefix(storage: Option<ast::StorageClass>) -> &'static str {
+    match storage {
+        Some(ast::StorageClass::Typedef) => "typedef ",
+        Some(ast::StorageClass::Extern) => "extern ",
+        Some(ast::StorageClass::Static) => "static ",
+        Some(ast::StorageClass::Auto) | Some(ast::StorageClass::Register) | None => "",
     }
 }
 
@@ -908,6 +1226,82 @@ fn is_type_declaration(declaration: &Declaration) -> bool {
             .all(|declarator| declarator.init.is_none())
 }
 
+/// One C type definition and the names of the types it stores by value.
+struct TypeBlock {
+    /// The C name the definition introduces.
+    name: String,
+    text: String,
+    /// The C names of the types it needs complete first.
+    needs: Vec<String>,
+}
+
+/// Print the type definitions so a type a definition stores by value is
+/// complete before it.
+///
+/// A pointer only needs the forward declarations printed first, so a cycle is
+/// not an error here: the definitions left over keep their own order, and the
+/// host compiler reports anything the cycle really leaves incomplete.
+fn order_type_blocks(blocks: Vec<TypeBlock>) -> String {
+    let defined: std::collections::HashSet<String> =
+        blocks.iter().map(|block| block.name.clone()).collect();
+    let mut remaining = blocks;
+    let mut done = std::collections::HashSet::new();
+    let mut output = String::new();
+    while !remaining.is_empty() {
+        let mut ready = Vec::new();
+        let mut index = 0;
+        while index < remaining.len() {
+            let unmet = {
+                let block = &remaining[index];
+                block.needs.iter().any(|need| {
+                    need != &block.name && defined.contains(need) && !done.contains(need)
+                })
+            };
+            if unmet {
+                index += 1;
+            } else {
+                ready.push(remaining.remove(index));
+            }
+        }
+        if ready.is_empty() {
+            // A cycle of by-value members: keep the order they came in.
+            ready = std::mem::take(&mut remaining);
+        }
+        for block in ready {
+            done.insert(block.name.clone());
+            output.push_str(&block.text);
+            output.push_str("\n\n");
+        }
+    }
+    output
+}
+
+/// The C name a type declaration introduces: its tag, or the name it declares.
+fn declared_type_name(declaration: &Declaration) -> Option<String> {
+    for specifier in &declaration.specs.type_specs {
+        match specifier {
+            TypeSpecifier::Record(record) => {
+                if let Some(tag) = &record.tag {
+                    return Some(tag.text.clone());
+                }
+            }
+            TypeSpecifier::Enum(enumeration) => {
+                if let Some(tag) = &enumeration.tag {
+                    return Some(tag.text.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    declaration.declarators.iter().find_map(|declarator| {
+        declarator
+            .declarator
+            .name
+            .as_ref()
+            .map(|name| name.text.clone())
+    })
+}
+
 /// The forward typedef of a record definition, if the specifier list is one.
 fn forward_record(specs: &DeclSpecs) -> Option<String> {
     let [TypeSpecifier::Record(record)] = &specs.type_specs[..] else {
@@ -924,9 +1318,30 @@ fn forward_record(specs: &DeclSpecs) -> Option<String> {
     Some(format!("typedef {keyword} {tag} {tag};", tag = tag.text))
 }
 
+/// The C value of one variant: a compound literal under its tag, or, for a
+/// niche, the stored representation the tag stands for.
+fn variant_text(plan: &PayloadEnumPlan, tag: i64) -> String {
+    if plan.niche {
+        format!("({}){tag}", plan.name)
+    } else {
+        format!("({}){{ .tag = {tag} }}", plan.name)
+    }
+}
+
 /// The key a generic use is looked up under: the source spelling.
 fn instance_key(name: &str, args: &[String]) -> String {
     format!("{name}<{}>", args.join(", "))
+}
+
+/// The concrete arguments of a generic use, spelled the way this output spells
+/// types: a type argument through the type printer, a `const` one as written.
+fn generic_argument_text(args: &[GenericArg], spelling: Spelling) -> Vec<String> {
+    args.iter()
+        .map(|arg| match &arg.kind {
+            GenericArgKind::Type(type_name) => type_name_text_with(type_name, spelling),
+            GenericArgKind::Const(value) => crate::c::types::const_argument_text(value),
+        })
+        .collect()
 }
 
 /// The record name of a generic impl block, if the block implements one.
@@ -942,31 +1357,10 @@ fn generic_receiver(block: &ImplBlock) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 impl<'a> Backend<'a> {
-    /// Queue the generic uses the printers reported.
-    fn drain(&self) {
-        let mentions = std::mem::take(&mut *self.mentions.borrow_mut());
-        for mention in mentions {
-            self.enqueue(Instance {
-                name: mention.name,
-                args: mention.args,
-                receiver: None,
-            });
-        }
-    }
-
-    /// Queue one specialization, once.
-    fn enqueue(&self, instance: Instance) {
-        if !self.is_template(&instance.name) {
-            return;
-        }
-        let mut instances = self.instances.borrow_mut();
-        if !instances.contains(&instance) {
-            instances.push(instance);
-        }
-    }
-
     fn is_template(&self, name: &str) -> bool {
-        self.templates.contains_key(name) || self.generic_records.contains_key(name)
+        self.templates.contains_key(name)
+            || self.generic_records.contains_key(name)
+            || self.generic_enums.contains_key(name)
     }
 
     /// The compiler's plan for one specialization.
@@ -985,6 +1379,13 @@ impl<'a> Backend<'a> {
     fn parameters(&self, name: &str) -> Vec<String> {
         if let Some(record) = self.generic_records.get(name) {
             return record
+                .generics
+                .iter()
+                .map(|param| param.name.text.clone())
+                .collect();
+        }
+        if let Some(enumeration) = self.generic_enums.get(name) {
+            return enumeration
                 .generics
                 .iter()
                 .map(|param| param.name.text.clone())
@@ -1015,35 +1416,24 @@ impl<'a> Backend<'a> {
             instances: Some(&self.type_names),
             bindings: Some(bindings),
             generics: false,
-            mentions: Some(&self.mentions),
         }
     }
 
-    /// The declarations a specialization contributes: record definitions, and
-    /// one prototype per function and method.
+    /// The prototype each specialization needs before its body: one per
+    /// generic function and one per method of a materialized impl.
     fn instance_declarations(&self) -> Result<String, Diagnostic> {
         let mut output = String::new();
         for instance in self.instances.borrow().clone() {
-            let bindings = self.bindings(&instance);
-            let name = instance.c_name(self);
             if let Some(receiver) = &instance.receiver {
                 output.push_str(&self.method_instance_declaration(&instance, receiver)?);
                 continue;
             }
-            if let Some(record) = self.generic_records.get(&instance.name) {
-                let spelling = self.instance_spelling("void", &bindings);
-                // The layout belongs to the compiler: it printed the header's
-                // types, so it prints this instance too.
-                match self
-                    .plan(&instance.name, &instance.args, instance.receiver.as_deref())
-                    .and_then(|plan| plan.layout.clone())
-                {
-                    Some(layout) => output.push_str(&layout),
-                    None => output.push_str(&record_instance_text(record, &name, spelling)),
+            if let Some(function) = self.templates.get(&instance.name) {
+                let bindings = self.bindings(&instance);
+                let name = instance.c_name(self);
+                if !self.used_symbol(&name) {
+                    continue;
                 }
-                output.push('\n');
-                output.push_str(&self.method_prototypes_of(&instance, &name));
-            } else if let Some(function) = self.templates.get(&instance.name) {
                 let spelling = self.instance_spelling("void", &bindings);
                 let declarator = renamed(&function.declarator, &name);
                 output.push_str(&format!(
@@ -1054,28 +1444,6 @@ impl<'a> Backend<'a> {
             }
         }
         Ok(output)
-    }
-
-    /// The prototypes of the methods a generic impl block gives one instance.
-    fn method_prototypes_of(&self, instance: &Instance, name: &str) -> String {
-        let mut output = String::new();
-        for block in self.generic_impls.get(&instance.name).into_iter().flatten() {
-            let bindings = self.block_bindings(block, instance);
-            let spelling = self.instance_spelling(name, &bindings);
-            for method in self.methods(block) {
-                let Some(method_name) = &method.declarator.name else {
-                    continue;
-                };
-                let symbol = self.symbol(name, &method_name.text, trait_of(block), method.span);
-                let declarator = renamed(method.declarator, &symbol);
-                output.push_str(&format!(
-                    "static {} {};\n",
-                    specs_text_in(method.specs, spelling),
-                    declarator_text_in(&declarator, spelling)
-                ));
-            }
-        }
-        output
     }
 
     /// The bodies of every specialization, and the ones they need in turn.
@@ -1091,9 +1459,13 @@ impl<'a> Backend<'a> {
             };
             index += 1;
             let name = instance.c_name(self);
+            // An instance is a file-local function: one the output never names
+            // is dead code, and the C compiler reports it.
+            if !self.used_symbol(&name) {
+                continue;
+            }
             if let Some(receiver) = &instance.receiver {
                 output.push_str(&self.method_instance_body(&instance, receiver)?);
-                self.drain();
                 continue;
             }
             if let Some(function) = self.templates.get(&instance.name) {
@@ -1117,56 +1489,11 @@ impl<'a> Backend<'a> {
                     "static {} {} {}\n\n",
                     specs_text_in(&function.specs, spelling),
                     declarator_text_in(&declarator, spelling),
-                    body.block(&function.body, 0)?
+                    body.render_block(&function.body)?
                 ));
             }
-            if let Some(blocks) = self.generic_impls.get(&instance.name).cloned() {
-                for block in blocks {
-                    let bindings = self.block_bindings(block, &instance);
-                    let spelling = self.instance_spelling(&name, &bindings);
-                    for method in self.methods(block) {
-                        let Some(method_name) = &method.declarator.name else {
-                            continue;
-                        };
-                        let symbol =
-                            self.symbol(&name, &method_name.text, trait_of(block), method.span);
-                        let declarator = renamed(method.declarator, &symbol);
-                        let mut body = Body::instance(
-                            self,
-                            Some(return_type_in(method.specs, method.declarator, spelling)),
-                            name.clone(),
-                            bindings.clone(),
-                        );
-                        body.parameters(method.declarator);
-                        output.push_str(&format!(
-                            "static {} {} {}\n\n",
-                            specs_text_in(method.specs, spelling),
-                            declarator_text_in(&declarator, spelling),
-                            body.block(method.body, 0)?
-                        ));
-                    }
-                }
-            }
-            self.drain();
         }
         Ok(())
-    }
-
-    /// The bindings of one generic impl block for one instance.
-    fn block_bindings(&self, block: &ImplBlock, instance: &Instance) -> HashMap<String, String> {
-        let parameters = if block.generics.is_empty() {
-            self.parameters(&instance.name)
-        } else {
-            block
-                .generics
-                .iter()
-                .map(|param| param.name.text.clone())
-                .collect()
-        };
-        parameters
-            .into_iter()
-            .zip(instance.args.iter().cloned())
-            .collect()
     }
 }
 
@@ -1241,16 +1568,21 @@ impl<'a> Backend<'a> {
                 bindings.insert(parameter.clone(), arg.clone());
             }
         }
+        // The receiver's instance binds the impl's own type parameters: the
+        // template may be written on a record or on an enum.
         if let Some(receiver) = &plan.receiver
-            && let Some(record_plan) = self
+            && let Some(type_plan) = self
                 .lowered
                 .instances
                 .iter()
                 .find(|other| other.type_name.as_deref() == Some(receiver.as_str()))
-            && let Some(record) = self.generic_records.get(&record_plan.name)
         {
-            for (parameter, arg) in record.generics.iter().zip(&record_plan.args) {
-                bindings.insert(parameter.name.text.clone(), arg.clone());
+            for (parameter, arg) in self
+                .parameters(&type_plan.name)
+                .into_iter()
+                .zip(&type_plan.args)
+            {
+                bindings.insert(parameter, arg.clone());
             }
         }
         bindings
@@ -1271,9 +1603,13 @@ impl<'a> Backend<'a> {
         let Some(symbol) = &plan.symbol else {
             return Ok(String::new());
         };
+        let name = names::symbol(symbol);
+        if !self.used_symbol(&name) {
+            return Ok(String::new());
+        }
         let bindings = self.method_bindings(plan);
         let spelling = self.instance_spelling(receiver, &bindings);
-        let declarator = renamed(declarator, &names::symbol(symbol));
+        let declarator = renamed(declarator, &name);
         Ok(format!(
             "static {} {};\n",
             specs_text_in(specs, spelling),
@@ -1307,7 +1643,7 @@ impl<'a> Backend<'a> {
             "static {} {} {}\n\n",
             specs_text_in(specs, spelling),
             declarator_text_in(&declarator, spelling),
-            printed.block(body, 0)?
+            printed.render_block(body)?
         ))
     }
 }
@@ -1335,6 +1671,20 @@ fn function_position(declarator: &Declarator) -> Option<usize> {
 
 fn has_function(declarator: &Declarator) -> bool {
     function_position(declarator).is_some()
+}
+
+/// Whether C can take the address of an expression.
+fn is_lvalue(expression: &Expr) -> bool {
+    matches!(
+        expression,
+        Expr::Name(_)
+            | Expr::Member { .. }
+            | Expr::Index { .. }
+            | Expr::Unary {
+                op: UnaryOp::Dereference,
+                ..
+            }
+    )
 }
 
 /// The bodiless declaration of one method, if the block has one.
@@ -1386,6 +1736,19 @@ struct Body<'a, 'b> {
     instance: bool,
     /// The names visible in the body, innermost scope last.
     scopes: Vec<HashMap<String, Ty>>,
+    /// The `defer` variables of each block, innermost block last: the name and
+    /// the receiver type its `drop` call needs.
+    defers: Vec<Vec<(String, Ty)>>,
+    /// `defers.len()` at the statement a `break` leaves.
+    breaks: Vec<usize>,
+    /// `defers.len()` at the loop a `continue` reaches.
+    continues: Vec<usize>,
+    /// The defer variables each `goto` leaves: keyed by the statement's span and
+    /// label, innermost scope and last declaration first.
+    goto_drops: HashMap<(Span, String), Vec<String>>,
+    /// The payload enum each enclosing `switch` selects, innermost last. A
+    /// `case` label reads its variant names from here.
+    switch_enums: Vec<Option<PayloadEnumPlan>>,
 }
 
 impl<'a, 'b> Body<'a, 'b> {
@@ -1405,6 +1768,11 @@ impl<'a, 'b> Body<'a, 'b> {
             bindings: HashMap::new(),
             instance: false,
             scopes: vec![HashMap::new()],
+            defers: vec![Vec::new()],
+            breaks: Vec::new(),
+            continues: Vec::new(),
+            goto_drops: HashMap::new(),
+            switch_enums: Vec::new(),
         }
     }
 
@@ -1422,6 +1790,11 @@ impl<'a, 'b> Body<'a, 'b> {
             bindings,
             instance: true,
             scopes: vec![HashMap::new()],
+            defers: vec![Vec::new()],
+            breaks: Vec::new(),
+            continues: Vec::new(),
+            goto_drops: HashMap::new(),
+            switch_enums: Vec::new(),
         }
     }
 
@@ -1432,7 +1805,6 @@ impl<'a, 'b> Body<'a, 'b> {
             instances: Some(&self.backend.type_names),
             bindings: Some(&self.bindings),
             generics: !self.instance,
-            mentions: Some(&self.backend.mentions),
         }
     }
 
@@ -1481,16 +1853,84 @@ impl<'a, 'b> Body<'a, 'b> {
     fn identifier(&self, name: &Name) -> String {
         match self.local(&name.text) {
             Some(_) => name.text.clone(),
-            None => self.backend.symbol_of(&name.text),
+            None => {
+                let symbol = self.backend.symbol_of(&name.text);
+                self.backend.mark_used(&symbol);
+                symbol
+            }
         }
+    }
+
+    /// The guard flag of one defer variable.
+    fn defer_flag(name: &str) -> String {
+        format!("__shy_moved_{name}")
+    }
+
+    /// Whether a name here is a defer variable.
+    fn is_defer(&self, name: &str) -> bool {
+        self.defers
+            .iter()
+            .rev()
+            .any(|scope| scope.iter().any(|(declared, _)| declared == name))
+    }
+
+    /// The guarded drop calls for every defer variable from block 'depth'
+    /// outward, innermost block and last declaration first.
+    fn scope_drops(&self, depth: usize) -> String {
+        let mut output = String::new();
+        for scope in self.defers[depth..].iter().rev() {
+            for (name, ty) in scope.iter().rev() {
+                let Some(symbol) = self.backend.method(&ty.base, "drop") else {
+                    continue;
+                };
+                self.backend.mark_used(&symbol);
+                output.push_str(&format!(
+                    "if (!{}) {symbol}(&{name}); ",
+                    Body::defer_flag(name)
+                ));
+            }
+        }
+        output
+    }
+
+    /// The move flag of the defer objects one declaration introduced.
+    fn defer_declarations(&mut self, names: &[&Name], indent: &str) -> String {
+        let mut output = String::new();
+        let mut declared = Vec::new();
+        for name in names {
+            let Some(ty) = self.local(&name.text) else {
+                continue;
+            };
+            output.push_str(&format!(
+                "{indent}_Bool {} = 0;\n",
+                Body::defer_flag(&name.text)
+            ));
+            declared.push((name.text.clone(), ty));
+        }
+        if let Some(scope) = self.defers.last_mut() {
+            scope.extend(declared);
+        }
+        output
+    }
+
+    /// Render one function body, with the defer drops each goto in it leaves.
+    fn render_block(&mut self, block: &Block) -> Result<String, Diagnostic> {
+        self.goto_drops = collect_goto_drops(block);
+        self.block(block, 0)
     }
 
     fn block(&mut self, block: &Block, depth: usize) -> Result<String, Diagnostic> {
         self.scopes.push(HashMap::new());
+        self.defers.push(Vec::new());
         let mut output = String::from("{\n");
         for statement in &block.stmts {
             output.push_str(&self.statement(statement, depth + 1)?);
         }
+        let drops = self.scope_drops(self.defers.len() - 1);
+        if !drops.is_empty() {
+            output.push_str(&format!("{}{drops}\n", "    ".repeat(depth + 1)));
+        }
+        self.defers.pop();
         self.scopes.pop();
         output.push_str(&"    ".repeat(depth));
         output.push('}');
@@ -1509,6 +1949,14 @@ impl<'a, 'b> Body<'a, 'b> {
                 output.push_str(&indent);
                 output.push_str(&self.declaration(declaration)?);
                 output.push('\n');
+                if declaration.is_defer {
+                    let names: Vec<&Name> = declaration
+                        .declarators
+                        .iter()
+                        .filter_map(|declarator| declarator.declarator.name.as_ref())
+                        .collect();
+                    output.push_str(&self.defer_declarations(&names, &indent));
+                }
             }
             Stmt::Let(declaration) => {
                 let qualifier = if declaration.is_mut {
@@ -1524,6 +1972,9 @@ impl<'a, 'b> Body<'a, 'b> {
                     "{indent}{qualifier} {} = {};\n",
                     declaration.name.text, value
                 ));
+                if declaration.is_defer {
+                    output.push_str(&self.defer_declarations(&[&declaration.name], &indent));
+                }
             }
             Stmt::Block(block) => {
                 output.push_str(&indent);
@@ -1539,32 +1990,36 @@ impl<'a, 'b> Body<'a, 'b> {
                 output.push_str(&format!(
                     "{indent}if ({}) {}",
                     self.expr(condition)?,
-                    self.statement(then_branch, depth)?.trim_start()
+                    self.branch_statement(then_branch, depth)?.trim_start()
                 ));
                 if let Some(else_branch) = else_branch {
                     output.pop();
                     output.push_str(" else ");
-                    output.push_str(self.statement(else_branch, depth)?.trim_start());
+                    output.push_str(self.branch_statement(else_branch, depth)?.trim_start());
                 }
                 output.push('\n');
             }
             Stmt::While {
                 condition, body, ..
             } => {
-                output.push_str(&format!(
-                    "{indent}while ({}) {}",
-                    self.expr(condition)?,
-                    self.statement(body, depth)?.trim_start()
-                ));
+                let condition = self.expr(condition)?;
+                self.breaks.push(self.defers.len());
+                self.continues.push(self.defers.len());
+                let body = self.branch_statement(body, depth)?.trim_start().to_string();
+                self.continues.pop();
+                self.breaks.pop();
+                output.push_str(&format!("{indent}while ({condition}) {body}"));
                 output.push('\n');
             }
             Stmt::DoWhile {
                 body, condition, ..
             } => {
-                output.push_str(&format!(
-                    "{indent}do {} ",
-                    self.statement(body, depth)?.trim_start()
-                ));
+                self.breaks.push(self.defers.len());
+                self.continues.push(self.defers.len());
+                let body = self.branch_statement(body, depth)?.trim_start().to_string();
+                self.continues.pop();
+                self.breaks.pop();
+                output.push_str(&format!("{indent}do {body} "));
                 output.push_str(&format!("while ({});\n", self.expr(condition)?));
             }
             Stmt::For {
@@ -1597,26 +2052,49 @@ impl<'a, 'b> Body<'a, 'b> {
                     Some(step) => self.expr(step)?,
                     None => String::new(),
                 };
+                self.breaks.push(self.defers.len());
+                self.continues.push(self.defers.len());
+                let body = self.branch_statement(body, depth)?.trim_start().to_string();
+                self.continues.pop();
+                self.breaks.pop();
                 output.push_str(&format!(
-                    "{indent}for ({init_text}; {condition_text}; {step_text}) {}",
-                    self.statement(body, depth)?.trim_start()
+                    "{indent}for ({init_text}; {condition_text}; {step_text}) {body}"
                 ));
                 output.push('\n');
             }
             Stmt::Switch {
                 condition, body, ..
             } => {
-                output.push_str(&format!(
-                    "{indent}switch ({}) {}",
-                    self.expr(condition)?,
-                    self.statement(body, depth)?.trim_start()
-                ));
+                let plan = self
+                    .ty(condition)
+                    .and_then(|ty| self.backend.enum_plan(&ty))
+                    .cloned();
+                let condition = match &plan {
+                    // A niche stores the payload, so C switches on whether the
+                    // value is the failure one: zero is the payload-free variant.
+                    Some(plan) if plan.niche => format!("({}) != 0", self.expr(condition)?),
+                    Some(_) => {
+                        let ty = self.ty(condition).expect("payload enum type");
+                        format!("{}.tag", self.object_text(condition, &ty)?)
+                    }
+                    None => self.expr(condition)?,
+                };
+                self.breaks.push(self.defers.len());
+                self.switch_enums.push(plan);
+                let body = self.branch_statement(body, depth)?.trim_start().to_string();
+                self.switch_enums.pop();
+                self.breaks.pop();
+                output.push_str(&format!("{indent}switch ({condition}) {body}"));
                 output.push('\n');
             }
             Stmt::Case {
                 value, end, stmt, ..
             } => {
-                output.push_str(&format!("{indent}case {}", self.expr(value)?));
+                let label = match self.case_label(value)? {
+                    Some(label) => label,
+                    None => self.expr(value)?,
+                };
+                output.push_str(&format!("{indent}case {label}"));
                 if let Some(end) = end {
                     output.push_str(&format!(" ... {}", self.expr(end)?));
                 }
@@ -1631,24 +2109,128 @@ impl<'a, 'b> Body<'a, 'b> {
                 output.push_str(&format!("{indent}{}: ", name.text));
                 output.push_str(self.statement(stmt, depth)?.trim_start());
             }
-            Stmt::Goto { label, .. } => {
-                output.push_str(&format!("{indent}goto {};\n", label.text));
+            Stmt::Goto { label, span, .. } => {
+                // A goto that leaves defer scopes drops them first, the same
+                // way the IR backends do.
+                let mut drops = String::new();
+                if let Some(names) = self.goto_drops.get(&(*span, label.text.clone())) {
+                    for name in names.clone() {
+                        let Some(ty) = self.local(&name) else {
+                            continue;
+                        };
+                        let Some(symbol) = self.backend.method(&ty.base, "drop") else {
+                            continue;
+                        };
+                        self.backend.mark_used(&symbol);
+                        drops.push_str(&format!(
+                            "if (!{}) {symbol}(&{name}); ",
+                            Body::defer_flag(&name)
+                        ));
+                    }
+                }
+                output.push_str(&self.jump_statement(
+                    &indent,
+                    drops,
+                    &format!("goto {};", label.text),
+                ));
             }
-            Stmt::Break(_) => output.push_str(&format!("{indent}break;\n")),
-            Stmt::Continue(_) => output.push_str(&format!("{indent}continue;\n")),
-            Stmt::Return { value, .. } => match value {
-                Some(value) => output.push_str(&format!("{indent}return {};\n", self.expr(value)?)),
-                None => output.push_str(&format!("{indent}return;\n")),
-            },
+            Stmt::Break(_) => {
+                let depth = self.breaks.last().copied().unwrap_or(0);
+                output.push_str(&self.jump_statement(&indent, self.scope_drops(depth), "break;"));
+            }
+            Stmt::Continue(_) => {
+                let depth = self.continues.last().copied().unwrap_or(0);
+                output.push_str(&self.jump_statement(
+                    &indent,
+                    self.scope_drops(depth),
+                    "continue;",
+                ));
+            }
+            Stmt::Return { value, .. } => {
+                let value = match value {
+                    Some(value) => {
+                        let mut printed = self.expr(value)?;
+                        if let Expr::Name(name) = value
+                            && self.is_defer(&name.text)
+                        {
+                            printed = format!("({} = 1, {printed})", Body::defer_flag(&name.text));
+                        }
+                        Some(printed)
+                    }
+                    None => None,
+                };
+                output.push_str(&self.return_statement(value, depth));
+            }
             Stmt::Asm(asm) => {
                 output.push_str(&format!("{indent}{};\n", asm_text(asm)?));
+            }
+            Stmt::AllowDeferCopy { stmt, .. } => {
+                output.push_str(&self.statement(stmt, depth)?);
             }
         }
         Ok(output)
     }
 
+    /// One branch of an if, loop, or switch. A \`defer\` declaration written
+    /// there without braces owns only that statement, so it prints as a braced
+    /// block of its own and drops at the end of the block.
+    fn branch_statement(&mut self, statement: &Stmt, depth: usize) -> Result<String, Diagnostic> {
+        if !statement.is_defer_declaration() {
+            return self.statement(statement, depth);
+        }
+        let indent = "    ".repeat(depth);
+        let mut output = String::from("{\n");
+        self.scopes.push(HashMap::new());
+        self.defers.push(Vec::new());
+        output.push_str(&self.statement(statement, depth + 1)?);
+        let drops = self.scope_drops(self.defers.len() - 1);
+        if !drops.is_empty() {
+            output.push_str(&format!("{}{drops}\n", "    ".repeat(depth + 1)));
+        }
+        self.defers.pop();
+        self.scopes.pop();
+        output.push_str(&format!("{indent}}}"));
+        Ok(output)
+    }
+
+    /// One jump statement (goto, break, continue, return) that drops the defer
+    /// variables it leaves first. The braces keep the drops and the jump
+    /// together when the statement is a brace-less branch of an if, loop, or
+    /// case label.
+    fn jump_statement(&self, indent: &str, drops: String, text: &str) -> String {
+        if drops.is_empty() {
+            format!("{indent}{text}\n")
+        } else {
+            format!("{indent}{{ {drops}{text} }}\n")
+        }
+    }
+
+    /// A return that drops the defer variables still in scope first. The value
+    /// is evaluated into a temporary, so it is read before the drops run.
+    fn return_statement(&self, value: Option<String>, depth: usize) -> String {
+        let indent = "    ".repeat(depth);
+        let drops = self.scope_drops(0);
+        if drops.is_empty() {
+            return match value {
+                Some(value) => format!("{indent}return {value};\n"),
+                None => format!("{indent}return;\n"),
+            };
+        }
+        match (value, self.return_ty.clone()) {
+            (Some(value), Some(return_ty)) => format!(
+                "{indent}{{ {return_ty} __shy_return = {value}; {drops}return __shy_return; }}\n"
+            ),
+            (Some(value), None) => format!("{indent}{{ {drops}return {value}; }}\n"),
+            (None, _) => format!("{indent}{{ {drops}return; }}\n"),
+        }
+    }
+
     fn declaration(&mut self, declaration: &Declaration) -> Result<String, Diagnostic> {
-        let specs = specs_text_in(&declaration.specs, self.spelling());
+        let specs = format!(
+            "{}{}",
+            storage_prefix(declaration.specs.storage),
+            specs_text_in(&declaration.specs, self.spelling())
+        );
         // A block-scope function declaration names the same function the
         // file scope does, so it prints under the same symbol.
         let mut declarators = Vec::new();
@@ -1833,67 +2415,217 @@ impl<'a, 'b> Body<'a, 'b> {
             }
             Expr::Member {
                 object, name, op, ..
-            } => {
-                let arrow = self.arrow(object, *op);
-                Ok(format!(
-                    "({}){}{}",
-                    self.expr(object)?,
-                    if arrow { "->" } else { "." },
-                    name.text
-                ))
-            }
+            } => self.member(object, name, *op),
             Expr::Cast {
                 type_name, value, ..
             } => Ok(format!(
                 "(({}){})",
-                type_name_text(type_name),
+                type_name_text_with(type_name, self.spelling()),
                 self.expr(value)?
             )),
-            Expr::SizeofType { type_name, .. } => {
-                Ok(format!("sizeof({})", type_name_text(type_name)))
-            }
+            Expr::SizeofType { type_name, .. } => Ok(format!(
+                "sizeof({})",
+                type_name_text_with(type_name, self.spelling())
+            )),
             Expr::SizeofExpr { value, .. } => Ok(format!("sizeof({})", self.expr(value)?)),
-            Expr::AlignofType { type_name, .. } => {
-                Ok(format!("_Alignof({})", type_name_text(type_name)))
-            }
+            Expr::AlignofType { type_name, .. } => Ok(format!(
+                "_Alignof({})",
+                type_name_text_with(type_name, self.spelling())
+            )),
             Expr::AlignofExpr { value, .. } => Ok(format!("_Alignof({})", self.expr(value)?)),
-            Expr::StatementExpr { block, .. } => Ok(format!("({{ {} }})", self.block(block, 0)?)),
+            // A statement expression yields the value of its last expression
+            // statement, so the block's own braces are dropped: a block is a
+            // statement of its own and yields no value.
+            Expr::StatementExpr { block, .. } => {
+                let text = self.block(block, 0)?;
+                let inner = text
+                    .strip_prefix('{')
+                    .and_then(|text| text.strip_suffix('}'))
+                    .unwrap_or(&text);
+                Ok(format!("({{{inner}}})"))
+            }
             Expr::Try { value, span } => self.propagate(value, *span),
-            // A variant without a payload is a value: Option<String>::None.
+            // A variant with a payload cannot be built without one, so its name
+            // alone is its tag; a payload-free variant is a value.
             Expr::ScopedName {
                 qualifier,
                 name,
                 span,
-            } => match self.backend.variant(qualifier, &[], &name.text) {
-                Some((ty, tag)) => Ok(format!("({ty}){{ .tag = {tag} }}")),
-                None => Err(Diagnostic::new(
-                    *span,
-                    format!(
-                        "'{}::{}' has no C form as a value",
-                        qualifier.text, name.text
-                    ),
-                )),
-            },
+            } => self.variant_value(qualifier, &[], name, *span),
             Expr::GenericScopedName {
                 qualifier,
                 args: type_args,
                 name,
                 span,
-            } => match self.backend.variant(qualifier, type_args, &name.text) {
-                Some((ty, tag)) => Ok(format!("({ty}){{ .tag = {tag} }}")),
-                None => Err(Diagnostic::new(
-                    *span,
-                    format!(
-                        "'{}::{}' has no C form as a value",
-                        qualifier.text, name.text
-                    ),
-                )),
-            },
+            } => self.variant_value(qualifier, type_args, name, *span),
             other => Err(Diagnostic::new(
                 other.span(),
                 "this expression has no C form yet",
             )),
         }
+    }
+
+    /// Print one payload-enum variant used as a value.
+    ///
+    /// A variant with a payload cannot be built without one, so its name alone
+    /// is the tag it stores. A payload-free variant, and every variant of a
+    /// niche enum, is the stored value itself.
+    fn variant_value(
+        &mut self,
+        qualifier: &Name,
+        args: &[GenericArg],
+        name: &Name,
+        span: Span,
+    ) -> Result<String, Diagnostic> {
+        if let Some((plan, variant)) =
+            self.backend
+                .variant(qualifier, args, self.spelling(), &name.text)
+        {
+            if variant.payload.is_some() && !plan.niche {
+                return Ok(variant.tag.to_string());
+            }
+            return Ok(variant_text(plan, variant.tag));
+        }
+        // A plain C enum names its enumerator.
+        if self.backend.enums.contains_key(&qualifier.text) {
+            return Ok(name.text.clone());
+        }
+        Err(Diagnostic::new(
+            span,
+            format!(
+                "'{}::{}' has no C form as a value",
+                qualifier.text, name.text
+            ),
+        ))
+    }
+
+    /// Print a member read, resolving the transparent payload-enum members.
+    fn member(&mut self, object: &Expr, name: &Name, op: MemberOp) -> Result<String, Diagnostic> {
+        // `value.payload.Variant` is one access: the payload lives inside the
+        // value, and a niche stores it as the value itself.
+        if let Expr::Member {
+            object: base,
+            name: payload,
+            ..
+        } = object
+            && payload.text == "payload"
+            && let Some(text) = self.payload_value(base, name)?
+        {
+            return Ok(text);
+        }
+        // `value.tag` is the stored tag; a niche stores none, so its raw value
+        // is what `.tag` means there.
+        if name.text == "tag"
+            && let Some(text) = self.tag_value(object)?
+        {
+            return Ok(text);
+        }
+        let arrow = self.arrow(object, op);
+        Ok(format!(
+            "({}){}{}",
+            self.expr(object)?,
+            if arrow { "->" } else { "." },
+            name.text
+        ))
+    }
+
+    /// The payload of one variant, read from the value that stores it.
+    fn payload_value(&mut self, base: &Expr, name: &Name) -> Result<Option<String>, Diagnostic> {
+        let Some(ty) = self.ty(base) else {
+            return Ok(None);
+        };
+        let Some(plan) = self.backend.enum_plan(&ty) else {
+            return Ok(None);
+        };
+        let Some(variant) = plan
+            .variants
+            .iter()
+            .find(|variant| variant.name == name.text)
+        else {
+            return Ok(None);
+        };
+        // A payload-free variant stores nothing: the compiler reads its payload
+        // as a `void` expression, and so does C.
+        if variant.payload.is_none() {
+            return Ok(Some("((void)0)".to_string()));
+        }
+        let object = self.object_text(base, &ty)?;
+        if plan.niche {
+            return Ok(Some(object));
+        }
+        Ok(Some(format!("{object}.payload.{}", name.text)))
+    }
+
+    /// The tag of one payload enum object; a niche value is the object itself.
+    fn tag_value(&mut self, object: &Expr) -> Result<Option<String>, Diagnostic> {
+        let Some(ty) = self.ty(object) else {
+            return Ok(None);
+        };
+        let Some(plan) = self.backend.enum_plan(&ty) else {
+            return Ok(None);
+        };
+        let text = self.object_text(object, &ty)?;
+        if plan.niche {
+            return Ok(Some(text));
+        }
+        Ok(Some(format!("{text}.tag")))
+    }
+
+    /// The object one access goes through: ShyC's dot reads through every
+    /// pointer, so C needs one dereference per pointer.
+    fn object_text(&mut self, object: &Expr, ty: &Ty) -> Result<String, Diagnostic> {
+        let mut text = format!("({})", self.expr(object)?);
+        for _ in 0..ty.pointers {
+            text = format!("(*{text})");
+        }
+        Ok(text)
+    }
+
+    /// The integer a `case` label denotes when the switch value is a payload
+    /// enum: a bare variant name is one of that enum's variants, and
+    /// `Enum::Variant` is its tag.
+    fn case_label(&mut self, value: &Expr) -> Result<Option<String>, Diagnostic> {
+        let Some(plan) = self.switch_enums.last().cloned().flatten() else {
+            return Ok(None);
+        };
+        let tag = match value {
+            Expr::Name(name) => {
+                // A bare name that already means something keeps its meaning:
+                // C's own constants are never reinterpreted as a variant.
+                if self.local(&name.text).is_some()
+                    || self.backend.objects.contains_key(&name.text)
+                    || self.backend.functions.contains_key(&name.text)
+                    || self
+                        .backend
+                        .enums
+                        .values()
+                        .any(|enumerators| enumerators.contains(&name.text))
+                {
+                    return Ok(None);
+                }
+                plan.variants
+                    .iter()
+                    .find(|variant| variant.name == name.text)
+                    .map(|variant| variant.tag)
+            }
+            Expr::ScopedName {
+                qualifier, name, ..
+            } => self
+                .backend
+                .variant(qualifier, &[], self.spelling(), &name.text)
+                .map(|(_, variant)| variant.tag),
+            Expr::GenericScopedName {
+                qualifier,
+                args,
+                name,
+                ..
+            } => self
+                .backend
+                .variant(qualifier, args, self.spelling(), &name.text)
+                .map(|(_, variant)| variant.tag),
+            _ => None,
+        };
+        Ok(tag.map(|tag| tag.to_string()))
     }
 
     /// Print a call, resolving a method name to the function its impl block
@@ -1905,17 +2637,54 @@ impl<'a, 'b> Body<'a, 'b> {
         type_args: &[GenericArg],
         span: Span,
     ) -> Result<String, Diagnostic> {
+        // x.move() reads a defer variable and sets its moved flag.
+        if let Expr::Member {
+            object, name, op, ..
+        } = callee
+            && name.text == "move"
+        {
+            let _ = op;
+            if !args.is_empty() {
+                return Err(Diagnostic::new(span, "move() takes no arguments"));
+            }
+            let Expr::Name(object_name) = object.as_ref() else {
+                return Err(Diagnostic::new(
+                    object.span(),
+                    "move() needs a variable declared with defer",
+                ));
+            };
+            if !self.is_defer(&object_name.text) {
+                return Err(Diagnostic::new(
+                    object_name.span,
+                    format!(
+                        "'{}' is not a defer variable; .move() only applies to one",
+                        object_name.text
+                    ),
+                ));
+            }
+            let value = self.expr(object)?;
+            return Ok(format!(
+                "({} = 1, {value})",
+                Body::defer_flag(&object_name.text)
+            ));
+        }
         // A name answers for itself: it is either the function the compiler
         // registered under it or a variable of its own that C calls indirectly.
-        // The span cannot answer, because one macro expansion or generated
-        // fragment gives every call it produced the same span.
         if let Expr::Name(name) = callee
             && self.local(&name.text).is_none()
         {
             if let Some(symbol) = self.backend.function_symbol(&name.text) {
+                self.backend.mark_used(&symbol);
+                return Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")));
+            }
+            // A template has one symbol per instance, and the compiler named
+            // the one this call reaches.
+            if let Some(symbol) = self.backend.call_symbol(span, &name.text) {
+                self.backend.mark_used(&symbol);
                 return Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")));
             }
             if !self.backend.is_template(&name.text) {
+                self.backend.mark_used(&name.text);
                 return Ok(format!(
                     "{}({})",
                     name.text,
@@ -1942,6 +2711,19 @@ impl<'a, 'b> Body<'a, 'b> {
                         ));
                     }
                     if let Some(symbol) = self.backend.method(&receiver.base, &name.text) {
+                        self.backend.mark_used(&symbol);
+                        // A method takes its object by pointer, and C cannot
+                        // take the address of a temporary: the call runs in the
+                        // statement expression that holds the value.
+                        if *op == MemberOp::Dot && receiver.pointers == 0 && !is_lvalue(object) {
+                            let value = self.expr(object)?;
+                            let mut printed = vec!["&__shy_self".to_string()];
+                            printed.extend(self.arguments(args)?);
+                            return Ok(format!(
+                                "({{ __auto_type __shy_self = {value}; {symbol}({}); }})",
+                                printed.join(", ")
+                            ));
+                        }
                         let mut printed = vec![self.receiver(object, &receiver, *op)?];
                         printed.extend(self.arguments(args)?);
                         return Ok(format!("{symbol}({})", printed.join(", ")));
@@ -1984,17 +2766,17 @@ impl<'a, 'b> Body<'a, 'b> {
                         &qualifier.text,
                         &type_name_text_with(receiver, self.spelling()),
                     );
+                    self.backend.mark_used(&symbol);
                     return Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")));
                 }
-                if let Some((ty, tag)) = self.backend.variant(qualifier, &[], &name.text) {
-                    let value = self.arguments(args)?.join(", ");
-                    return Ok(format!(
-                        "({ty}){{ .tag = {tag}, .payload.{} = {value} }}",
-                        name.text
-                    ));
+                if let Some(value) = self.variant_construction(qualifier, &[], name, args)? {
+                    return Ok(value);
                 }
                 return match self.backend.method(&qualifier.text, &name.text) {
-                    Some(symbol) => Ok(format!("{symbol}({})", self.arguments(args)?.join(", "))),
+                    Some(symbol) => {
+                        self.backend.mark_used(&symbol);
+                        Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")))
+                    }
                     None => Err(Diagnostic::new(
                         *span,
                         format!(
@@ -2022,14 +2804,11 @@ impl<'a, 'b> Body<'a, 'b> {
                         &qualifier.text,
                         &type_name_text_with(receiver, self.spelling()),
                     );
+                    self.backend.mark_used(&symbol);
                     return Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")));
                 }
-                if let Some((ty, tag)) = self.backend.variant(qualifier, type_args, &name.text) {
-                    let value = self.arguments(args)?.join(", ");
-                    return Ok(format!(
-                        "({ty}){{ .tag = {tag}, .payload.{} = {value} }}",
-                        name.text
-                    ));
+                if let Some(value) = self.variant_construction(qualifier, type_args, name, args)? {
+                    return Ok(value);
                 }
                 // Type<args>::method(...) names one instance's method, and a
                 // type parameter names the type it is bound to here.
@@ -2045,6 +2824,7 @@ impl<'a, 'b> Body<'a, 'b> {
                     ),
                 };
                 if let Some(symbol) = self.backend.method(&instance, &name.text) {
+                    self.backend.mark_used(&symbol);
                     return Ok(format!("{symbol}({})", self.arguments(args)?.join(", ")));
                 }
                 return Err(Diagnostic::new(
@@ -2070,6 +2850,31 @@ impl<'a, 'b> Body<'a, 'b> {
         ))
     }
 
+    /// Build one payload-enum value with its payload.
+    fn variant_construction(
+        &mut self,
+        qualifier: &Name,
+        type_args: &[GenericArg],
+        name: &Name,
+        args: &[Expr],
+    ) -> Result<Option<String>, Diagnostic> {
+        let Some((plan, variant)) =
+            self.backend
+                .variant(qualifier, type_args, self.spelling(), &name.text)
+        else {
+            return Ok(None);
+        };
+        let value = self.arguments(args)?.join(", ");
+        // A niche value is the payload itself, so building one is a cast.
+        if plan.niche {
+            return Ok(Some(format!("({})({value})", plan.name)));
+        }
+        Ok(Some(format!(
+            "({}){{ .tag = {}, .payload.{} = {value} }}",
+            plan.name, variant.tag, name.text
+        )))
+    }
+
     fn arguments(&mut self, args: &[Expr]) -> Result<Vec<String>, Diagnostic> {
         args.iter().map(|arg| self.expr(arg)).collect()
     }
@@ -2082,10 +2887,9 @@ impl<'a, 'b> Body<'a, 'b> {
     fn receiver(&mut self, object: &Expr, ty: &Ty, op: MemberOp) -> Result<String, Diagnostic> {
         let text = self.expr(object)?;
         if matches!(op, MemberOp::Arrow) || ty.pointers >= 1 {
-            Ok(format!("({text})"))
-        } else {
-            Ok(format!("&({text})"))
+            return Ok(format!("({text})"));
         }
+        Ok(format!("&({text})"))
     }
 
     /// Whether a member access needs C's arrow.
@@ -2120,26 +2924,72 @@ impl<'a, 'b> Body<'a, 'b> {
                  value's type",
             ));
         };
+        let Some(plan) = self.backend.enum_plan(&ty).cloned() else {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the propagation operator needs an Option or a Result, not '{}'",
+                    ty.base
+                ),
+            ));
+        };
+        // The payload-free variant is the failure: `None` for an Option and
+        // `Ok` for a Result, which is also what tells the two shapes apart.
+        let Some(success) = plan
+            .variants
+            .iter()
+            .find(|variant| variant.name == "Some" || variant.name == "Ok")
+        else {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the propagation operator needs an Option or a Result, not '{}'",
+                    ty.base
+                ),
+            ));
+        };
+        let option = success.name == "Some";
+        let failure_tag = plan
+            .variants
+            .iter()
+            .find(|variant| variant.name == if option { "None" } else { "Err" })
+            .map_or(0, |variant| variant.tag);
         let printed = self.expr(value)?;
-        if ty.base.starts_with("Option") {
-            return Ok(format!(
-                "({{ __auto_type __try = {printed}; switch (__try.tag) {{ case 1: break; \
-                 default: return ({returned}){{0}}; }} __try.payload.Some; }})"
-            ));
-        }
-        if ty.base.starts_with("Result") {
-            return Ok(format!(
-                "({{ __auto_type __try = {printed}; switch (__try.tag) {{ case 0: break; \
-                 default: return ({returned}){{ .tag = 1, .payload.Err = __try.payload.Err }}; }} \
-                 __try.payload.Ok; }})"
-            ));
-        }
-        Err(Diagnostic::new(
-            span,
-            format!(
-                "the propagation operator needs an Option or a Result, not '{}'",
-                ty.base
-            ),
+        let (failure_condition, failure, payload) = if plan.niche {
+            // A niche stores the payload itself: Option is None on zero, and a
+            // Result is Err on any nonzero error value.
+            if option {
+                (
+                    "!__try".to_string(),
+                    format!("({returned})0"),
+                    "__try".to_string(),
+                )
+            } else {
+                (
+                    "__try != 0".to_string(),
+                    format!("({returned})(__try)"),
+                    "((void)0)".to_string(),
+                )
+            }
+        } else {
+            (
+                format!("__try.tag != {}", success.tag),
+                if option {
+                    format!("({returned}){{0}}")
+                } else {
+                    format!(
+                        "({returned}){{ .tag = {failure_tag}, .payload.Err = __try.payload.Err }}"
+                    )
+                },
+                success.payload.as_ref().map_or_else(
+                    || "((void)0)".to_string(),
+                    |_| format!("__try.payload.{}", success.name),
+                ),
+            )
+        };
+        Ok(format!(
+            "({{ __auto_type __try = {printed}; if ({failure_condition}) {{\
+             return {failure}; }} {payload}; }})"
         ))
     }
 
@@ -2159,7 +3009,57 @@ impl<'a, 'b> Body<'a, 'b> {
                 operand,
                 ..
             } => self.ty(operand).map(|ty| ty.pointee()),
-            Expr::Member { object, name, .. } => self.backend.field(&self.ty(object)?, &name.text),
+            // `value.payload.Variant` names the payload type directly.
+            Expr::Member { object, name, .. } => {
+                if let Expr::Member {
+                    object: base,
+                    name: payload,
+                    ..
+                } = object.as_ref()
+                    && payload.text == "payload"
+                    && let Some(ty) = self.ty(base)
+                    && let Some(plan) = self.backend.enum_plan(&ty)
+                    && let Some(variant) = plan
+                        .variants
+                        .iter()
+                        .find(|variant| variant.name == name.text)
+                {
+                    let payload = variant.payload.as_deref().unwrap_or("void");
+                    return Some(Ty::from_text(payload));
+                }
+                let ty = self.ty(object)?;
+                match self.backend.enum_plan(&ty) {
+                    Some(plan) if name.text == "tag" && plan.niche => {
+                        Some(Ty::from_text(&plan.name))
+                    }
+                    Some(_) if name.text == "tag" => Some(Ty::from_text("int")),
+                    _ => self.backend.field(&ty, &name.text),
+                }
+            }
+            Expr::ScopedName {
+                qualifier, name, ..
+            } => self.variant_ty(qualifier, &[], &name.text),
+            Expr::GenericScopedName {
+                qualifier,
+                args,
+                name,
+                ..
+            } => self.variant_ty(qualifier, args, &name.text),
+            // `value?` yields the success payload of the Option or Result.
+            Expr::Try { value, .. } => {
+                let ty = self.ty(value)?;
+                let plan = self.backend.enum_plan(&ty)?;
+                let success = plan
+                    .variants
+                    .iter()
+                    .find(|variant| variant.name == "Some" || variant.name == "Ok")?;
+                success.payload.as_deref().map(Ty::from_text)
+            }
+            // A statement expression yields its last expression statement.
+            Expr::StatementExpr { block, .. } => match block.stmts.last() {
+                Some(Stmt::Expr { expr, .. }) => self.ty(expr),
+                _ => None,
+            },
             Expr::Call { callee, .. } => self.callee_ty(callee),
             Expr::Cast { type_name, .. } => Some(type_name_of(type_name)),
             Expr::Index { array, .. } => self.ty(array).map(|ty| ty.pointee()),
@@ -2175,6 +3075,20 @@ impl<'a, 'b> Body<'a, 'b> {
         }
     }
 
+    /// The type of one variant used as a value: the enum itself for a
+    /// payload-free or niche variant, and the tag's integer for a payload
+    /// variant written without one.
+    fn variant_ty(&self, qualifier: &Name, args: &[GenericArg], name: &str) -> Option<Ty> {
+        let (plan, variant) = self
+            .backend
+            .variant(qualifier, args, self.spelling(), name)?;
+        Some(if variant.payload.is_some() && !plan.niche {
+            Ty::from_text("int")
+        } else {
+            Ty::from_text(&plan.name)
+        })
+    }
+
     fn callee_ty(&self, callee: &Expr) -> Option<Ty> {
         match callee {
             Expr::Name(name) => self.backend.functions.get(&name.text).cloned(),
@@ -2187,9 +3101,14 @@ impl<'a, 'b> Body<'a, 'b> {
             }
             Expr::ScopedName {
                 qualifier, name, ..
-            } => self.backend.method_ty(&qualifier.text, &name.text),
+            } => self
+                .variant_ty(qualifier, &[], &name.text)
+                .or_else(|| self.backend.method_ty(&qualifier.text, &name.text)),
             Expr::GenericScopedName {
-                qualifier, name, ..
+                qualifier,
+                args,
+                name,
+                ..
             } => {
                 if name.text == "from" {
                     Some(Ty {
@@ -2197,7 +3116,7 @@ impl<'a, 'b> Body<'a, 'b> {
                         pointers: 0,
                     })
                 } else {
-                    None
+                    self.variant_ty(qualifier, args, &name.text)
                 }
             }
             _ => None,
@@ -2284,4 +3203,108 @@ fn assign_op_text(op: AssignOp) -> &'static str {
         AssignOp::BitXor => "^=",
         AssignOp::BitOr => "|=",
     }
+}
+
+/// The defer variables every goto in one body leaves, keyed by the goto
+/// statement's span and label and ordered innermost scope and last declaration
+/// first.
+///
+/// C labels are function-scoped, so a goto alone does not say which blocks it
+/// leaves; one walk with the same block nesting the renderer uses answers it.
+fn collect_goto_drops(block: &Block) -> HashMap<(Span, String), Vec<String>> {
+    struct Walk {
+        next_scope: u32,
+        labels: HashMap<String, Vec<(u32, Vec<String>)>>,
+        gotos: Vec<((Span, String), Vec<(u32, Vec<String>)>)>,
+    }
+
+    fn declare(declaration: &Declaration, scopes: &mut [(u32, Vec<String>)]) {
+        let Some(scope) = scopes.last_mut() else {
+            return;
+        };
+        for declarator in &declaration.declarators {
+            if let Some(name) = &declarator.declarator.name {
+                scope.1.push(name.text.clone());
+            }
+        }
+    }
+
+    fn walk_block(block: &Block, walk: &mut Walk, scopes: &mut Vec<(u32, Vec<String>)>) {
+        let id = walk.next_scope;
+        walk.next_scope += 1;
+        scopes.push((id, Vec::new()));
+        for statement in &block.stmts {
+            walk_statement(statement, walk, scopes);
+        }
+        scopes.pop();
+    }
+
+    fn walk_statement(statement: &Stmt, walk: &mut Walk, scopes: &mut Vec<(u32, Vec<String>)>) {
+        match statement {
+            Stmt::Decl(declaration) if declaration.is_defer => declare(declaration, scopes),
+            Stmt::Let(declaration) if declaration.is_defer => {
+                if let Some(scope) = scopes.last_mut() {
+                    scope.1.push(declaration.name.text.clone());
+                }
+            }
+            Stmt::Decl(_) | Stmt::Let(_) => {}
+            Stmt::Block(block) => walk_block(block, walk, scopes),
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                walk_statement(then_branch, walk, scopes);
+                if let Some(else_branch) = else_branch {
+                    walk_statement(else_branch, walk, scopes);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Switch { body, .. } => {
+                walk_statement(body, walk, scopes)
+            }
+            Stmt::For { body, .. } => walk_statement(body, walk, scopes),
+            Stmt::Case { stmt, .. }
+            | Stmt::Default { stmt, .. }
+            | Stmt::AllowDeferCopy { stmt, .. } => walk_statement(stmt, walk, scopes),
+            Stmt::Label { name, stmt, .. } => {
+                walk.labels.insert(name.text.clone(), scopes.clone());
+                walk_statement(stmt, walk, scopes);
+            }
+            Stmt::Goto { label, span, .. } => {
+                walk.gotos
+                    .push(((*span, label.text.clone()), scopes.clone()));
+            }
+            Stmt::Empty(_)
+            | Stmt::Expr { .. }
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Return { .. }
+            | Stmt::Asm(_) => {}
+        }
+    }
+
+    let mut walk = Walk {
+        next_scope: 0,
+        labels: HashMap::new(),
+        gotos: Vec::new(),
+    };
+    walk_block(block, &mut walk, &mut Vec::new());
+    let Walk { labels, gotos, .. } = walk;
+    let mut drops = HashMap::new();
+    for (key, path) in gotos {
+        let Some(label) = labels.get(&key.1) else {
+            continue;
+        };
+        let mut common = 0;
+        while common < path.len() && common < label.len() && path[common].0 == label[common].0 {
+            common += 1;
+        }
+        let names: Vec<String> = path[common..]
+            .iter()
+            .rev()
+            .flat_map(|(_, scope)| scope.iter().rev().cloned())
+            .collect();
+        drops.insert(key, names);
+    }
+    drops
 }

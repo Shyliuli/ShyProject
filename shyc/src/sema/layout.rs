@@ -102,6 +102,9 @@ impl RecordField {
 pub struct RecordInfo {
     pub fields: Vec<RecordField>,
     pub is_flexible: bool,
+    /// `#[args_builtin]`: main's by-value parameter of this type passes its
+    /// fields as separate arguments instead of one aggregate.
+    pub args_builtin: bool,
 }
 
 /// A computed object layout.
@@ -234,6 +237,7 @@ impl TypeStore {
         self.records[record_id.index()] = RecordInfo {
             fields,
             is_flexible,
+            args_builtin: false,
         };
         let record = &mut self.types[ty.index()];
         record.size = Some(layout.size);

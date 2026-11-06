@@ -54,6 +54,7 @@ impl ConstFn {
             specs: self.specs.clone(),
             declarator: self.declarator.clone(),
             body: self.body.clone(),
+            allow_defer_copy: false,
         })
     }
 }

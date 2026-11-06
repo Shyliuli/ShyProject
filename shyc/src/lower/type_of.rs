@@ -116,20 +116,22 @@ impl Lowerer {
                 }
             }
             ast::Expr::ScopedName {
-                qualifier, name, ..
+                qualifier,
+                name,
+                span,
             } => match self.scoped_variant(qualifier, name) {
-                Some(variant) => Ok(variant.ty),
+                Some(variant) => self.variant_value_type(&variant, *span),
                 None => Ok(self.scoped_method(qualifier, name)?.ty),
             },
             ast::Expr::GenericScopedName {
                 qualifier,
                 args,
                 name,
-                ..
+                span,
             } => {
                 let ty = self.generic_qualifier_type(qualifier, args)?;
                 match self.variant_of(ty, name) {
-                    Some(variant) => Ok(variant.ty),
+                    Some(variant) => self.variant_value_type(&variant, *span),
                     None => Ok(self.method_on(ty, name)?.ty),
                 }
             }
@@ -245,6 +247,14 @@ impl Lowerer {
                     return self
                         .trait_table(qualifier, type_args, *span)
                         .map(|(ty, _)| ty);
+                }
+                // `x.move()` is the builtin defer move: it yields the object
+                // itself. Lowering reports a variable that is not defer.
+                if let ast::Expr::Member { object, name, .. } = callee.as_ref()
+                    && name.text == "move"
+                    && type_args.is_empty()
+                {
+                    return self.type_of(object, local);
                 }
                 // Type-only analysis instantiates through the same cache as
                 // lowering, so `sizeof(identity<int>(1))` names the instance
@@ -497,13 +507,13 @@ impl Lowerer {
                             format!("payload enum has no variant '{}'", name.text),
                         )
                     })?;
-                return match variant.payload {
-                    Some(payload) => Ok(payload),
-                    None => Err(Diagnostic::new(
-                        span,
-                        format!("variant '{}' has no payload", name.text),
-                    )),
-                };
+                // A payload-free variant stores nothing, so its payload reads
+                // as `void`. That is how `Result<void, E>::unwrap` returns
+                // nothing through a `-> T` signature.
+                return Ok(match variant.payload {
+                    Some(payload) => payload,
+                    None => self.types.builtin(Builtin::Void),
+                });
             }
         }
         let object_ty = self.type_of(object, local)?;
@@ -530,6 +540,15 @@ impl Lowerer {
                 span,
                 "`->` needs a pointer to a struct or union",
             ));
+        }
+        // The builtin `.move()` has the defer variable's own type; lowering
+        // reports a variable that is not one.
+        if name.text == "move" {
+            let mut ty = object_ty;
+            while let Some(pointee) = self.pointee(ty) {
+                ty = pointee.ty;
+            }
+            return Ok(ty);
         }
         let direct_record = self.record_of(object_ty);
         let mut last_error = None;
@@ -622,6 +641,26 @@ impl Lowerer {
     ) -> Option<ScopedVariant> {
         let ty = self.lookup_named_type(&qualifier.text)?;
         self.variant_of(ty, name)
+    }
+
+    /// The type a bare `Enum::Variant` names as a value.
+    ///
+    /// A payload-free variant is a complete value, so the name builds it. A
+    /// variant with a payload cannot be built without one, so the name can only
+    /// denote its tag; `o.tag != Option<Str>::Some` reads that way. The niche
+    /// representation stores no tag at all, so its variant names keep requiring
+    /// a payload.
+    fn variant_value_type(
+        &mut self,
+        variant: &ScopedVariant,
+        span: Span,
+    ) -> Result<TypeId, Diagnostic> {
+        if variant.payload.is_none() || self.types.is_niche_enum(variant.ty) {
+            return Ok(variant.ty);
+        }
+        self.types
+            .enum_underlying(variant.ty)
+            .ok_or_else(|| Diagnostic::new(span, "payload enum has no underlying type"))
     }
 
     /// The payload enum variant called `name`, for an already resolved type.

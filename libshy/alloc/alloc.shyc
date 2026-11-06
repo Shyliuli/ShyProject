@@ -17,6 +17,14 @@ fn string_reserve(String *s, int required) {
     s.cap = cap;
 }
 
+/* Release the buffer and leave the String empty, so freeing twice is safe. */
+fn string_free(String *s) {
+    free((void *)s.view.data);
+    s.view.data = 0;
+    s.view.len = 0;
+    s.cap = 0;
+}
+
 impl String {
     pub fn new(void) -> String {
         String s;
@@ -24,6 +32,23 @@ impl String {
         s.view.len = 0;
         s.cap = 16;
         return s;
+    }
+
+    pub fn with_capacity(int capacity) -> String {
+        String s = {0};
+        s.reserve(capacity);
+        return s;
+    }
+
+    pub fn from_str(Str text) -> String {
+        String s = {0};
+        s.reserve(text.len);
+        s.push_str(text);
+        return s;
+    }
+
+    pub fn from_cstr(const char *text) -> String {
+        return String::from_str(Str::from_cstr(text));
     }
 
     pub fn reserve(self *s, int additional) -> int {
@@ -43,9 +68,6 @@ impl String {
     }
 
     pub fn push_str(self *s, Str text) {
-        if (text.len <= 0) {
-            return;
-        }
         int old_len = s.view.len;
         int source_offset = -1;
         if (s.view.data && text.data) {
@@ -71,7 +93,41 @@ impl String {
         s.push_str(Str::from_cstr(text));
     }
 
+    pub fn len(const self *s) -> int {
+        return s.view.len;
+    }
+
+    pub fn is_empty(const self *s) -> int {
+        return s.view.len == 0;
+    }
+
     pub fn as_str(const self *s) -> Str {
         return s.view;
+    }
+
+    pub fn as_cstr(const self *s) -> const char * {
+        if (s.view.data == 0) {
+            return "";
+        }
+        return s.view.data;
+    }
+
+    pub fn eq(const self *s, Str other) -> int {
+        return s.view.eq(other);
+    }
+
+    pub fn clear(self *s) {
+        if (s.view.data) {
+            ((char *)s.view.data)[0] = 0;
+        }
+        s.view.len = 0;
+    }
+
+    pub fn clone(const self *s) -> String {
+        return String::from_str(s.view);
+    }
+
+    pub fn free(self *s) {
+        string_free(s);
     }
 }

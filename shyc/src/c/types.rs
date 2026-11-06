@@ -18,17 +18,6 @@ use crate::ast::{
 };
 use std::collections::HashMap;
 
-/// One generic use the printer met: the template name and the concrete
-/// arguments it was written with.
-///
-/// Collecting them while printing is how the C backend learns which instances a
-/// unit needs without walking the AST a second time.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Mention {
-    pub name: String,
-    pub args: Vec<String>,
-}
-
 /// How one output spells a type.
 ///
 /// Two things vary between the outputs and even between declarations: what
@@ -50,8 +39,6 @@ pub(crate) struct Spelling<'a> {
     /// Whether generic parameter lists are printed. An instance drops them,
     /// because C has no template.
     pub generics: bool,
-    /// Every generic use the printer sees is reported here.
-    pub mentions: Option<&'a std::cell::RefCell<Vec<Mention>>>,
 }
 
 impl<'a> Spelling<'a> {
@@ -62,7 +49,6 @@ impl<'a> Spelling<'a> {
             instances: None,
             bindings: None,
             generics: true,
-            mentions: None,
         }
     }
 
@@ -415,12 +401,6 @@ pub(crate) fn generic_spec_text(generic: &GenericSpec, spelling: Spelling) -> St
             GenericArgKind::Const(value) => expr_text(value),
         })
         .collect::<Vec<_>>();
-    if let Some(mentions) = spelling.mentions {
-        mentions.borrow_mut().push(Mention {
-            name: generic.name.text.clone(),
-            args: args.clone(),
-        });
-    }
     spelling.instance(&generic.name.text, &args)
 }
 
@@ -581,31 +561,6 @@ fn payload_enum_text(
     format!(
         "struct{tag}{generics} {{ {tag_type} tag; union {{ {} }} payload; }}",
         members.join(" ")
-    )
-}
-
-/// Print the definition of one record instance: Vec<int> as Vec_int.
-///
-/// The tag is the instance's C name, the members keep the template's order, and
-/// every type parameter prints as the type the instance bound it to.
-pub(crate) fn record_instance_text(record: &RecordSpec, name: &str, spelling: Spelling) -> String {
-    let mut members = Vec::new();
-    for member in record.members.as_deref().unwrap_or_default() {
-        members.push(member_text(member, spelling));
-    }
-    let members = members
-        .iter()
-        .map(|member| indented(member))
-        .collect::<Vec<_>>();
-    format!(
-        "typedef struct {name} {name};
-struct {name} {{
-{}
-}};",
-        members.join(
-            "
-"
-        )
     )
 }
 
@@ -930,6 +885,12 @@ fn assign_text(op: AssignOp) -> &'static str {
         AssignOp::BitXor => "^=",
         AssignOp::BitOr => "|=",
     }
+}
+
+/// The C text of one constant generic argument, such as the `16` of
+/// `Array<int, 16>`.
+pub(crate) fn const_argument_text(expression: &Expr) -> String {
+    expr_text(expression)
 }
 
 /// Print an initializer, which only a compound literal needs here.

@@ -5,7 +5,9 @@
 //! after the whole body is available, because a label may be defined after it
 //! is used.
 
-use super::{BreakContext, ExprKind, FnLower, LabelInfo, LoopContext, PendingGoto, SwitchContext};
+use super::{
+    BreakContext, ExprKind, FnLower, LabelInfo, LoopContext, PendingGoto, Resolved, SwitchContext,
+};
 use crate::ast;
 use crate::ir;
 use crate::sema::types::{TypeId, TypeKind};
@@ -56,7 +58,7 @@ impl FnLower<'_> {
         self.scope_counter += 1;
         self.scopes.push(super::FnScope {
             id,
-            drops: Vec::new(),
+            defers: Vec::new(),
             bindings: Default::default(),
         });
         self.l.push_type_scope();
@@ -64,26 +66,23 @@ impl FnLower<'_> {
 
     fn pop_scope(&mut self) {
         let index = self.scopes.len() - 1;
-        self.emit_scope_drops(index);
+        self.emit_scope_defers(index);
         self.scopes.pop();
         self.l.pop_type_scope();
     }
 
-    fn emit_scope_drops(&mut self, index: usize) {
-        let drops = self.scopes[index].drops.clone();
-        for local in drops.into_iter().rev() {
-            self.emit_drop(local);
+    fn emit_scope_defers(&mut self, index: usize) {
+        for local in self.scopes[index].defers.clone().into_iter().rev() {
+            self.emit_defer_drop(local);
         }
     }
 
-    pub(super) fn emit_drops_from(&mut self, depth: usize) {
+    /// Emit the guarded drops of every scope from `depth` outward, innermost
+    /// scope and last declaration first.
+    pub(super) fn emit_defers_from(&mut self, depth: usize) {
         for index in (depth..self.scopes.len()).rev() {
-            self.emit_scope_drops(index);
+            self.emit_scope_defers(index);
         }
-    }
-
-    pub(super) fn emit_all_drops(&mut self) {
-        self.emit_drops_from(0);
     }
 
     pub(super) fn finish_fallthrough(&mut self) {
@@ -154,7 +153,29 @@ impl FnLower<'_> {
             ast::Stmt::Continue(span) => self.lower_continue(*span),
             ast::Stmt::Return { value, span } => self.lower_return(value.as_ref(), *span),
             ast::Stmt::Asm(asm) => self.lower_asm(asm),
+            ast::Stmt::AllowDeferCopy { stmt, .. } => {
+                let saved = self.allow_defer_copy;
+                self.allow_defer_copy = true;
+                let result = self.lower_stmt(stmt);
+                self.allow_defer_copy = saved;
+                result
+            }
         }
+    }
+
+    /// Lower one branch of an `if`, loop, or `switch`.
+    ///
+    /// A `defer` declaration written there without braces owns only that
+    /// statement, so it is lowered in a scope of its own and dropped as soon as
+    /// the branch statement ends.
+    fn lower_branch_statement(&mut self, statement: &ast::Stmt) -> Result<(), Diagnostic> {
+        if !statement.is_defer_declaration() {
+            return self.lower_stmt(statement);
+        }
+        self.push_scope();
+        let result = self.lower_stmt(statement);
+        self.pop_scope();
+        result
     }
 
     fn lower_if(
@@ -171,13 +192,13 @@ impl FnLower<'_> {
         let end_block = self.f.alloc_block();
         self.terminate(ir::Terminator::branch(condition, then_block, else_block));
         self.set_current(then_block);
-        self.lower_stmt(then_branch)?;
+        self.lower_branch_statement(then_branch)?;
         if !self.terminated {
             self.jump_to(end_block);
         }
         self.set_current(else_block);
         if let Some(else_branch) = else_branch {
-            self.lower_stmt(else_branch)?;
+            self.lower_branch_statement(else_branch)?;
         }
         if !self.terminated {
             self.jump_to(end_block);
@@ -210,7 +231,7 @@ impl FnLower<'_> {
             target: end_block,
             depth,
         });
-        self.lower_stmt(body)?;
+        self.lower_branch_statement(body)?;
         self.loops.pop();
         self.breaks.pop();
         if !self.terminated {
@@ -240,7 +261,7 @@ impl FnLower<'_> {
             target: end_block,
             depth,
         });
-        self.lower_stmt(body)?;
+        self.lower_branch_statement(body)?;
         self.loops.pop();
         self.breaks.pop();
         if !self.terminated {
@@ -295,7 +316,7 @@ impl FnLower<'_> {
             continue_target: step_block,
             continue_depth,
         });
-        self.lower_stmt(body)?;
+        self.lower_branch_statement(body)?;
         self.loops.pop();
         self.breaks.pop();
         if !self.terminated {
@@ -382,7 +403,7 @@ impl FnLower<'_> {
             end: end_block,
             span,
         });
-        self.lower_stmt(body)?;
+        self.lower_branch_statement(body)?;
         self.breaks.pop();
         let context = self.switches.pop().expect("switch context");
         self.check_switch_exhaustiveness(&context)?;
@@ -500,12 +521,9 @@ impl FnLower<'_> {
             ));
         }
         let low = self.case_constant(value, span)?;
-        let low_number = self.l.eval_const_int(value)?;
+        let low_number = self.case_number(value)?;
         let (high, high_number) = match end {
-            Some(end) => (
-                self.case_constant(end, end.span())?,
-                self.l.eval_const_int(end)?,
-            ),
+            Some(end) => (self.case_constant(end, end.span())?, self.case_number(end)?),
             None => (low, low_number),
         };
         if low_number > high_number {
@@ -542,8 +560,39 @@ impl FnLower<'_> {
         self.lower_stmt(statement)
     }
 
+    /// The tag a bare variant name denotes as a `case` label.
+    ///
+    /// A switch over a payload enum lets `case Some:` stand for
+    /// `case Option<Str>::Some:`. C keeps its own meaning: a bare name that is
+    /// already a constant keeps it, so the shorthand never changes a C label.
+    fn case_variant_tag(&self, expr: &ast::Expr) -> Option<i64> {
+        let ast::Expr::Name(name) = expr else {
+            return None;
+        };
+        let context = self.switches.last()?;
+        if self.l.global_ref(&name.text).is_some() || self.l.enum_consts.contains_key(&name.text) {
+            return None;
+        }
+        self.l
+            .types
+            .enum_variant(context.scrutinee, &name.text)
+            .map(|variant| variant.value)
+    }
+
+    /// The numeric label of a `case` value, for duplicate detection.
+    fn case_number(&mut self, expr: &ast::Expr) -> Result<i64, Diagnostic> {
+        match self.case_variant_tag(expr) {
+            Some(tag) => Ok(tag),
+            None => self.l.eval_const_int(expr),
+        }
+    }
+
     /// The constant a case label names, converted to the switch value's type.
     fn case_constant(&mut self, expr: &ast::Expr, span: Span) -> Result<ir::Constant, Diagnostic> {
+        if let Some(tag) = self.case_variant_tag(expr) {
+            let ir_ty = self.switches.last().expect("switch context").ir_ty;
+            return Ok(ir::Constant::int(ir_ty, tag));
+        }
         let context = self.switches.last().expect("switch context");
         if self.l.types.is_niche_enum(context.scrutinee) {
             let tag = self.l.eval_const_int(expr)?;
@@ -573,17 +622,10 @@ impl FnLower<'_> {
         self.lower_stmt(statement)
     }
 
-    fn scope_path(&self) -> Vec<(u32, usize)> {
+    fn scope_path(&self) -> Vec<(u32, Vec<usize>)> {
         self.scopes
             .iter()
-            .map(|scope| {
-                let active = scope
-                    .drops
-                    .iter()
-                    .filter(|&&local| self.locals[local].drop_active)
-                    .count();
-                (scope.id, active)
-            })
+            .map(|scope| (scope.id, scope.defers.clone()))
             .collect()
     }
 
@@ -642,19 +684,37 @@ impl FnLower<'_> {
             {
                 common += 1;
             }
-            if pending.path[common..].iter().any(|(_, count)| *count > 0) {
+            if label.path[common..]
+                .iter()
+                .any(|(_, locals)| !locals.is_empty())
+            {
                 return Err(Diagnostic::new(
                     pending.span,
-                    "goto jumps out of the scope of an object with a drop method",
+                    "goto jumps into the scope of a defer declaration",
                 ));
             }
-            if label.path[common..].iter().any(|(_, count)| *count > 0) {
-                return Err(Diagnostic::new(
-                    pending.span,
-                    "goto jumps into the scope of an object with a drop method",
-                ));
+            // The scopes the jump leaves, innermost first and each in reverse
+            // declaration order.
+            let exited: Vec<usize> = pending.path[common..]
+                .iter()
+                .rev()
+                .flat_map(|(_, locals)| locals.iter().rev().copied())
+                .collect();
+            if !exited.is_empty() {
+                let cleanup = self.f.alloc_block();
+                self.f.block_mut(pending.source).terminator = ir::Terminator::jump(cleanup);
+                let saved_block = self.block;
+                let saved_terminated = self.terminated;
+                self.set_current(cleanup);
+                for local in exited {
+                    self.emit_defer_drop(local);
+                }
+                self.jump_to(label.block);
+                self.block = saved_block;
+                self.terminated = saved_terminated;
+            } else {
+                self.f.block_mut(pending.source).terminator = ir::Terminator::jump(label.block);
             }
-            self.f.block_mut(pending.source).terminator = ir::Terminator::jump(label.block);
             self.f.remove_block(pending.trampoline);
         }
         Ok(())
@@ -666,7 +726,7 @@ impl FnLower<'_> {
         };
         let target = context.target;
         let depth = context.depth;
-        self.emit_drops_on_exit(depth);
+        self.emit_defers_from(depth);
         self.jump_to(target);
         Ok(())
     }
@@ -677,7 +737,7 @@ impl FnLower<'_> {
         };
         let target = context.continue_target;
         let depth = context.continue_depth;
-        self.emit_drops_on_exit(depth);
+        self.emit_defers_from(depth);
         self.jump_to(target);
         Ok(())
     }
@@ -690,7 +750,7 @@ impl FnLower<'_> {
                     return Err(Diagnostic::new(span, "void function cannot return a value"));
                 }
             }
-            self.emit_drops_on_exit(0);
+            self.emit_defers_from(0);
             self.terminate(ir::Terminator::ret(None));
             return Ok(());
         }
@@ -700,26 +760,24 @@ impl FnLower<'_> {
                 "non-void function must return a value",
             ));
         };
-        let (operand, ty) = self.rvalue(value)?;
+        let (operand, ty) = self.return_value(value)?;
         let operand = self.convert(operand, ty, self.return_ty, span, false)?;
-        self.deactivate_if_local(value);
-        self.emit_drops_on_exit(0);
+        self.emit_defers_from(0);
         self.terminate(ir::Terminator::ret(Some(operand)));
         Ok(())
     }
 
-    /// Emit drops for a jump that leaves the current path, then restore the
-    /// locals' live flags.
-    ///
-    /// `return`, `break`, and `continue` end only one path. Statements after
-    /// the enclosing `if` still run on the other path, where those locals are
-    /// still live, so the linear "already dropped" marks must not leak past
-    /// the jump.
-    pub(super) fn emit_drops_on_exit(&mut self, depth: usize) {
-        let saved: Vec<bool> = self.locals.iter().map(|local| local.drop_active).collect();
-        self.emit_drops_from(depth);
-        for (local, active) in self.locals.iter_mut().zip(saved) {
-            local.drop_active = active;
+    /// Lower a returned expression. `return s` on a defer local is
+    /// `return s.move()`: the value is read and the moved flag set, so the
+    /// exit drops skip this one local.
+    fn return_value(&mut self, value: &ast::Expr) -> Result<(ir::Operand, TypeId), Diagnostic> {
+        if let ast::Expr::Name(name) = value
+            && let Ok(Resolved::Local(local)) = self.resolve_name(&name.text, name.span)
+            && self.locals[local].moved_slot.is_some()
+        {
+            let moved = self.move_defer_local(local);
+            return self.rvalue_val(moved, name.span);
         }
+        self.rvalue(value)
     }
 }

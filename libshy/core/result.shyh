@@ -1,6 +1,8 @@
 #ifndef SHY_RESULT_SHYH
 #define SHY_RESULT_SHYH
 
+#include <stdlib.h>
+
 /* Result<void, E> uses E's integer representation when E is a payload-free
    enum without a zero enumerator: zero means Ok and nonzero means Err.
    Other instances retain their tag and payload. */
@@ -9,5 +11,49 @@ enum Result<T, E> {
     Ok(T),
     Err(E)
 };
+
+impl Result<T, E> {
+    fn is_ok(const self *r) -> int {
+        switch (*r) {
+        case Result<T, E>::Ok:
+            return 1;
+        default:
+            return 0;
+        }
+    }
+
+    fn is_err(const self *r) -> int {
+        return !r.is_ok();
+    }
+
+    /* Err 时直接退出程序。 */
+    fn unwrap(const self *r) -> T {
+        switch (*r) {
+        case Result<T, E>::Ok:
+            return r.payload.Ok;
+        default:
+            abort();
+        }
+    }
+
+    fn unwrap_or(const self *r, T fallback) -> T {
+        switch (*r) {
+        case Result<T, E>::Ok:
+            return r.payload.Ok;
+        default:
+            return fallback;
+        }
+    }
+
+    /* Ok 时直接退出程序。 */
+    fn unwrap_err(const self *r) -> E {
+        switch (*r) {
+        case Result<T, E>::Err:
+            return r.payload.Err;
+        default:
+            abort();
+        }
+    }
+}
 
 #endif
