@@ -31,7 +31,7 @@ ShyProject 是一个面向教学的完整计算机系统实验项目。它从零
 | **linker** | `linker/` | 链接器，将一个或多个 `.sobj` 链接为 `.sfs` raw 内存镜像 |
 | **emu** | `emu/` | 模拟器，加载并执行 `.sfs` 镜像，是整个项目最重要的验证工具 |
 | **shyc** | `shyc/` | 独立 ShyC 编译器：自有前端、类型化 IR、优化与 Shy/LLVM 后端 |
-| **shycc** | `shycc/` | 编译驱动：默认调用独立 `shyc`，`--backend=chibicc` 保留旧自举后端 |
+| **shycc** | `shycc/` | 编译驱动：调用独立 `shyc`，负责汇编、链接与探针轮次 |
 | **libshy** | `libshy/` | 裸机 C 支持库——`stdio`、`string`、`ctype`、`stdlib` 等 |
 | **chibicc\_shy** | `projects/chibicc_shy/` | 自举实验——在 Shy 裸机上运行的 chibicc/ShyC 编译器移植 |
 | **ShyOS** | `projects/os/` | 最小操作系统：进程、段式隔离、Trap、调度、只读文件系统与 shell |
@@ -55,13 +55,13 @@ ShyISA 是为教学设计的精简指令集架构，核心理念是"一切皆地
 
 ## ShyC 语言
 
-ShyC 是面向 ShyISA 的裸机 C 前端。主实现是独立编译器 `shyc`，由 `shycc`
-默认驱动；`--backend=chibicc` 保留 chibicc 分支作为早期自举和兼容验证。
-语言边界与 ABI 约定见 [language.md](language.md)。当前提供：
+ShyC 是面向 ShyISA 的裸机 C 前端。实现是独立编译器 `shyc`，由 `shycc`
+驱动，负责汇编、链接与探针轮次。语言边界与 ABI 约定见
+[language.md](language.md)。当前提供：
 
 - C 语言核心子集——整数、指针、结构体、联合体、数组、控制流、`goto`
 - ILP32 指针模型，`long` 保持 64 位
-- **ShyC 原生扩展**：`.shyc`/`.shyh` 后缀、`impl` 方法、`self` 指针、RAII `drop`、`asm!` 绑定内联汇编
+- **ShyC 原生扩展**：`.shyc`/`.shyh` 后缀、`impl` 方法、`self` 指针、`defer` 显式析构、`asm!` 绑定内联汇编
 - 软件浮点支持、基础原子操作
 
 详细规范见 [ShyC.md](ShyC.md)，libshy 库说明见 [libshy/README.md](libshy/README.md)。
@@ -85,7 +85,6 @@ $ cargo run -- os        # 在 ShyCPU 上启动 ShyOS（在 ShyCPU 仓库里执�
 
 - **Rust** 工具链（`cargo`）
 - **make**
-- C 编译器（用于构建本地 chibicc）
 
 ## 快速开始
 
@@ -96,7 +95,7 @@ $ cargo run -- os        # 在 ShyCPU 上启动 ShyOS（在 ShyCPU 仓库里执�
 make bin
 ```
 
-产物：`target/bin/shycc`、`target/bin/shyasm`、`target/bin/shyld`、`target/bin/shyemu`、`target/bin/chibicc`
+产物：`target/bin/shycc`、`target/bin/shyasm`、`target/bin/shyld`、`target/bin/shyemu`、`target/bin/shyemu-user`、`target/bin/shyc`
 
 `shycc` 会优先使用同目录下的这些工具，因此可以直接运行：
 
@@ -140,6 +139,13 @@ cargo run -q -p shycc -- test/testc/main.sobj test/testc/put.sobj -o test/testc/
 - `-save-temps`：保留中间产物 `.shy` 和 `.sobj`
 - `-###`：只打印将要执行的命令
 - `--target <name>`：默认 `shy` 走 ShyISA。`rv64`/`riscv64`、`rv32`/`riscv32`、`x64`/`x86_64`、`arm64`/`aarch64`、`la64`/`loong64`/`loongarch64` 展开成 `<arch>-linux-gnu`，加 `-bare` 后缀（如 `rv64-bare`、`rv32-bare`）展开成 `<arch>-unknown-none`；`--target=host` 取本机 clang 的 triple；完整三元组原样交给 clang
+- `shy-user`：同样走 ShyISA 流水线，但链接 `libshy/sys/user.shyc` 和 `libshy/sys/user_start.shyc`，由 `shyemu-user` 以用户态运行。系统调用直接透传到宿主，所以有 `argv` 和文件系统：
+
+  ```sh
+  shycc --target=shy-user app.shyc -o app.sfs
+  shyemu-user app.sfs one --verbose -o out
+  ```
+
 - `rv32-bare` 是 32 位 RISC-V（ILP32）目标；`rv32`/`riscv32`/`rv32-linux` 需要 riscv32 的 C 库，当前没有可用 sysroot 时会直接报错并提示改用 `rv32-bare`
 - 交叉 hosted 目标自动用 `/usr/<triple>` 作为 sysroot（也认去掉 vendor 的 `/usr/<arch>-<os>-<env>`，即 Arch/Debian 的 cross 包布局），可用 `--sysroot <dir>` 覆盖，链接走 `lld`。本机装好 `riscv64-linux-gnu-gcc` 后可以直接：
 
@@ -155,17 +161,11 @@ cargo run -q -p shycc -- test/testc/main.sobj test/testc/put.sobj -o test/testc/
 
 ### 分步执行（不通过 shycc）
 
-先构建本地 chibicc：
-
-```sh
-make -C third_party/chibicc chibicc
-```
-
 编译 `.c` 为 `.shy`：
 
 ```sh
-third_party/chibicc/chibicc --target=shy -S -o test/testc/main.shy test/testc/main.c
-third_party/chibicc/chibicc --target=shy -S -o test/testc/put.shy test/testc/put.c
+cargo run -q -p shyc -- --target=shy -S -o test/testc/main.shy test/testc/main.c
+cargo run -q -p shyc -- --target=shy -S -o test/testc/put.shy test/testc/put.c
 ```
 
 汇编 `.shy` 为 `.sobj`：
@@ -238,7 +238,7 @@ ShyProject/
 │   ├── chibicc_shy/       # 自举编译器实验
 │   └── os/                # ShyOS
 ├── third_party/           # 第三方依赖
-│   └── chibicc/           # chibicc C 编译器分支
+│   └── shy_runtime_softfloat.c  # 软浮点运行库
 └── vscode-shyc/           # VS Code 扩展
 ```
 
@@ -249,6 +249,6 @@ ShyProject/
 ## 许可证
 
 - 本项目自身代码以 [MIT 许可证](LICENSE) 发布，版权所有 (c) 2026 shyliuli。
-- `third_party/chibicc` 与 `projects/chibicc_shy` 基于 Rui Ueyama 的
+- `projects/chibicc_shy` 基于 Rui Ueyama 的
   [chibicc](https://github.com/rui314/chibicc)，遵循其 MIT 许可证；详见
-  `third_party/chibicc/LICENSE` 与 `projects/chibicc_shy/LICENSE`。
+  `projects/chibicc_shy/LICENSE`。

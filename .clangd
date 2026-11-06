@@ -4,7 +4,6 @@ CompileFlags:
     - -ffreestanding
     - -nostdinc
     - -I/home/shyliuli/ShyProject/libshy/include
-    - -I/home/shyliuli/ShyProject/third_party/chibicc/include
     - -D__shy__=1
   Remove:
     - -isystem*
