@@ -2,7 +2,7 @@
   "name": "shyc-vscode",
   "displayName": "ShyC",
   "description": "ShyC language support backed by the shyc compiler.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "shyproject",
   "engines": {
     "vscode": "^1.85.0"

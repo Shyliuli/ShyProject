@@ -188,7 +188,7 @@ impl Collector<'_> {
     }
 
     fn is_generated(&self, span: Span) -> bool {
-        self.generated.iter().any(|generated| *generated == span)
+        self.generated.contains(&span)
     }
 
     // -- scopes ---------------------------------------------------------
@@ -238,6 +238,21 @@ impl Collector<'_> {
     }
 
     fn add_value_ref(&mut self, name: &Name) {
+        // `self` has no symbol of its own; it names the record the impl block
+        // is for, so navigation lands on that declaration.
+        if name.text == "self" {
+            let target = self.container.as_deref().and_then(|container| {
+                self.index
+                    .lookup(container)
+                    .iter()
+                    .copied()
+                    .find(|&id| is_type_kind(self.index.symbols[id].kind))
+            });
+            if let Some(target) = target {
+                self.add_ref(name, target);
+                return;
+            }
+        }
         if let Some(target) = self.scoped(&name.text) {
             self.add_ref(name, target);
             return;
@@ -700,8 +715,23 @@ impl Collector<'_> {
                 ast::Item::Trait(declaration) => {
                     self.push_frame(declaration.span.start);
                     self.declare_generics(&declaration.generics);
+                    let container = declaration.name.text.clone();
                     for method in &declaration.methods {
                         self.walk_signature(&method.declarator);
+                        // A default body runs with `self` bound to whatever
+                        // type implements the trait, so its members come from
+                        // the trait's own method set.
+                        if let Some(body) = &method.body {
+                            let previous = self.container.clone();
+                            self.container = Some(container.clone());
+                            self.walk_block(body);
+                            self.set_symbol_scope(
+                                method.declarator.name.as_ref().map(|name| name.span),
+                                method.span.start,
+                                body.span.end,
+                            );
+                            self.container = previous;
+                        }
                     }
                     self.pop_frame(declaration.span.end);
                 }
@@ -739,21 +769,31 @@ impl Collector<'_> {
         self.walk_signature(&function.declarator);
         self.walk_block(&function.body);
         self.pop_frame(scope_end);
-        if let Some(name) = &function.declarator.name {
-            if let Some(id) = self
-                .index
-                .symbols
-                .iter()
-                .position(|symbol| symbol.span == name.span)
-            {
-                self.index.symbols[id].scope = Some(Scope {
-                    file: name.span.file,
-                    start: function.span.start,
-                    end: scope_end,
-                });
-            }
-        }
+        self.set_symbol_scope(
+            function.declarator.name.as_ref().map(|name| name.span),
+            function.span.start,
+            scope_end,
+        );
         self.container = previous_container;
+    }
+
+    /// Records where a symbol is visible, by the declaration's name span.
+    fn set_symbol_scope(&mut self, span: Option<Span>, start: usize, end: usize) {
+        let Some(span) = span else {
+            return;
+        };
+        if let Some(id) = self
+            .index
+            .symbols
+            .iter()
+            .position(|symbol| symbol.span == span)
+        {
+            self.index.symbols[id].scope = Some(Scope {
+                file: span.file,
+                start,
+                end,
+            });
+        }
     }
 
     fn walk_signature(&mut self, declarator: &ast::Declarator) {
@@ -1191,6 +1231,7 @@ impl Collector<'_> {
 
     fn infer_expr_type(&self, expression: &ast::Expr) -> Option<String> {
         match expression {
+            ast::Expr::Name(name) if name.text == "self" => self.container.clone(),
             ast::Expr::Name(name) => self
                 .scoped(&name.text)
                 .and_then(|id| self.index.symbols[id].type_text.clone())

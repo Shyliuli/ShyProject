@@ -218,9 +218,9 @@ fn token_answer(count: usize, items: Option<&str>, key: &RequestKey) -> Option<V
         let number = kind.trim().parse::<u32>().ok()?;
         let spelling = String::from_utf8(decode_hex(hex)?).ok()?;
         let kind = parser::token_from_probe(number, &spelling)?;
-        let at_line_start = tokens.last().map_or(true, |previous: &Token| {
-            matches!(previous.kind, TokenKind::Newline)
-        });
+        let at_line_start = tokens
+            .last()
+            .is_none_or(|previous: &Token| matches!(previous.kind, TokenKind::Newline));
         tokens.push(Token {
             kind,
             span,
@@ -233,7 +233,7 @@ fn token_answer(count: usize, items: Option<&str>, key: &RequestKey) -> Option<V
 
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
     let text = text.trim();
-    if text.len() % 2 != 0 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     (0..text.len())
@@ -301,13 +301,11 @@ fn offset_at(text: &str, line: usize, column: usize) -> Option<usize> {
         .find('\n')
         .map_or(text.len(), |offset| start + offset);
     let mut offset = start;
-    let mut current = 1;
-    for character in text[start..end].chars() {
+    for (current, character) in (1..).zip(text[start..end].chars()) {
         if current >= column {
             break;
         }
         offset += character.len_utf8();
-        current += 1;
     }
     Some(offset)
 }

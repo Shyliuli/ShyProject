@@ -443,20 +443,35 @@ fn grouped_diagnostics(
     let mut grouped: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
     grouped.entry(uri.clone()).or_default();
     if enabled {
+        let mut seen = HashSet::new();
         for diagnostic in &analysis.diagnostics {
             let target = analysis
                 .uri_of(diagnostic.span.file)
                 .unwrap_or_else(|| uri.clone());
+            if !seen.insert((target.clone(), diagnostic.span, diagnostic.message.clone())) {
+                continue;
+            }
             grouped
                 .entry(target)
                 .or_default()
                 .push(lsp_diagnostic(analysis, diagnostic));
         }
+        // The probe runs the same parser over the same buffer, so its failure
+        // is the analysis error again; report the construct once.
         if let Some(failure) = failure {
-            grouped
-                .entry(uri.clone())
-                .or_default()
-                .push(lsp_diagnostic(analysis, failure));
+            let duplicate = analysis
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == failure.message);
+            let target = analysis
+                .uri_of(failure.span.file)
+                .unwrap_or_else(|| uri.clone());
+            if !duplicate && seen.insert((target.clone(), failure.span, failure.message.clone())) {
+                grouped
+                    .entry(target)
+                    .or_default()
+                    .push(lsp_diagnostic(analysis, failure));
+            }
         }
     }
     grouped
@@ -555,10 +570,16 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "ShyC language server ready")
             .await;
-        let libshy = self.settings.lock().unwrap().libshy_path.clone();
+        let libshy = self
+            .settings
+            .lock()
+            .unwrap()
+            .libshy_path
+            .clone()
+            .or_else(shyc::config::shylib);
         let message = match libshy {
             Some(path) => format!("libshy: {}", path.display()),
-            None => "libshy: not configured (set shyc.libshyPath or ~/.shycserver/config.toml)"
+            None => "libshy: not configured (set shyc.libshyPath, ~/.shycserver/config.toml, or ~/.shycc.toml)"
                 .to_string(),
         };
         self.client.log_message(MessageType::INFO, message).await;
@@ -690,32 +711,32 @@ impl LanguageServer for Backend {
         };
         let offset = analysis.lines.offset(&analysis.text, position);
 
-        if let Some(location) = include_location(&analysis, offset, &self.settings.lock().unwrap()) {
-            return Ok(Some(GotoDefinitionResponse::Scalar(location)));
-        }
-
         if let Some(target) = analysis.target_at(offset) {
             if let Some(location) = symbol_location(&analysis, target) {
                 return Ok(Some(GotoDefinitionResponse::Scalar(location)));
             }
         }
 
-        let Some((start, end)) = text::word_span(&analysis.text, offset) else {
-            return Ok(None);
-        };
-        let name = &analysis.text[start..end];
-        let locations: Vec<Location> = analysis
-            .index
-            .lookup(name)
-            .iter()
-            .filter_map(|&id| symbol_location(&analysis, id))
-            .collect();
-        match locations.len() {
-            0 => Ok(None),
-            1 => Ok(Some(GotoDefinitionResponse::Scalar(
-                locations.into_iter().next().unwrap(),
-            ))),
-            _ => Ok(Some(GotoDefinitionResponse::Array(locations))),
+        if let Some((start, end)) = text::word_span(&analysis.text, offset) {
+            let name = &analysis.text[start..end];
+            let locations: Vec<Location> = analysis
+                .index
+                .lookup(name)
+                .iter()
+                .filter_map(|&id| symbol_location(&analysis, id))
+                .collect();
+            match locations.len() {
+                1 => return Ok(Some(GotoDefinitionResponse::Scalar(locations[0].clone()))),
+                count if count > 1 => return Ok(Some(GotoDefinitionResponse::Array(locations))),
+                _ => {}
+            }
+        }
+
+        // A `use` or `#include` line names a file, not a symbol: open the
+        // module header when no declaration in the line matched.
+        match include_location(&analysis, offset) {
+            Some(location) => Ok(Some(GotoDefinitionResponse::Scalar(location))),
+            None => Ok(None),
         }
     }
 
@@ -883,7 +904,10 @@ fn strip_comment(line: &str) -> &str {
 }
 
 fn unquote(value: &str) -> String {
-    value.trim().trim_matches(|character| character == '"' || character == '\'').to_string()
+    value
+        .trim()
+        .trim_matches(|character| character == '"' || character == '\'')
+        .to_string()
 }
 
 #[derive(Default, Deserialize)]
@@ -991,9 +1015,13 @@ fn lsp_diagnostic(analysis: &Analysis, diagnostic: &shyc::source::Diagnostic) ->
     }
 }
 
-fn include_location(analysis: &Analysis, offset: usize, settings: &Settings) -> Option<Location> {
-    let line_start = analysis.text[..offset].rfind('\n').map_or(0, |index| index + 1);
-    let line_end = analysis.text[offset..].find('\n').map_or(analysis.text.len(), |index| offset + index);
+fn include_location(analysis: &Analysis, offset: usize) -> Option<Location> {
+    let line_start = analysis.text[..offset]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let line_end = analysis.text[offset..]
+        .find('\n')
+        .map_or(analysis.text.len(), |index| offset + index);
     let line = analysis.text.get(line_start..line_end)?.trim();
     let source_path = &analysis.sources.file(analysis.root).path;
     let (include_name, relative) = if let Some(rest) = line.strip_prefix("#include") {
@@ -1003,21 +1031,42 @@ fn include_location(analysis: &Analysis, offset: usize, settings: &Settings) -> 
     } else if let Some(rest) = line.strip_prefix("use ") {
         let path = rest.trim_end_matches(';').trim();
         let segments: Vec<&str> = path.split("::").collect();
-        let module = if segments.last() == Some(&"*") { &segments[..segments.len() - 1] } else { &segments[..segments.len().saturating_sub(1)] };
-        if module.is_empty() { return None; }
+        let module = if segments.last() == Some(&"*") {
+            &segments[..segments.len() - 1]
+        } else {
+            &segments[..segments.len().saturating_sub(1)]
+        };
+        if module.is_empty() {
+            return None;
+        }
         let module = module.strip_prefix(&["crate"]).unwrap_or(module);
         let module = module.strip_prefix(&["self"]).unwrap_or(module);
-        if module.is_empty() { return None; }
+        if module.is_empty() {
+            return None;
+        }
         let base = module.join("/");
-        let suffix = if module.first() == Some(&"c") { ".h" } else { ".shyh" };
+        let suffix = if module.first() == Some(&"c") {
+            ".h"
+        } else {
+            ".shyh"
+        };
         (format!("{base}{suffix}"), module.first() == Some(&"self"))
-    } else { return None; };
+    } else {
+        return None;
+    };
     let mut dirs = Vec::new();
-    if relative { dirs.push(source_path.parent()?.to_path_buf()); }
-    dirs.extend(settings.include_dirs.iter().cloned());
-    if let Some(root) = source_path.ancestors().find(|dir| dir.join("Cargo.toml").is_file() || dir.join(".git").exists()) { dirs.push(root.to_path_buf()); }
-    let path = dirs.into_iter().map(|dir| dir.join(&include_name)).find(|path| path.is_file())?;
-    Some(Location { uri: text::uri_for_path(&path)?, range: Range::default() })
+    if relative {
+        dirs.push(source_path.parent()?.to_path_buf());
+    }
+    dirs.extend(analysis.include_dirs.iter().cloned());
+    let path = dirs
+        .into_iter()
+        .map(|dir| dir.join(&include_name))
+        .find(|path| path.is_file())?;
+    Some(Location {
+        uri: text::uri_for_path(&path)?,
+        range: Range::default(),
+    })
 }
 
 fn symbol_location(analysis: &Analysis, id: usize) -> Option<Location> {
@@ -1391,11 +1440,12 @@ fn completions(analysis: &Analysis, offset: usize) -> Vec<CompletionItem> {
     }
 
     if let Some(receiver) = &context.receiver {
-        let container =
-            receiver_type(analysis, receiver, offset).map(|text| index::base_type_name(&text));
-        let container = match container {
-            Some(container) if container == "self" => enclosing_container(analysis, offset),
-            other => other,
+        // `self` is not a symbol in the index; the method around the cursor
+        // names the record whose members are wanted.
+        let container = if receiver == "self" {
+            enclosing_container(analysis, offset)
+        } else {
+            receiver_type(analysis, receiver, offset).map(|text| index::base_type_name(&text))
         };
 
         let candidates: Vec<usize> = if let Some(container) = &container {
@@ -1528,9 +1578,9 @@ fn method_takes_receiver(symbol: &index::Sym) -> bool {
         .split(',')
         .next()
         .is_some_and(|param| {
-            param
-                .split_whitespace()
-                .any(|word| word.trim_start_matches('*').trim_start_matches('&') == "self")
+            param.split_whitespace().any(|word| {
+                word.trim_matches(|character| character == '*' || character == '&') == "self"
+            })
         })
 }
 

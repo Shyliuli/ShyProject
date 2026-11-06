@@ -43,7 +43,7 @@ To build the installable package:
 
 ```sh
 npx @vscode/vsce package --dependencies --allow-missing-repository
-code --install-extension shyc-vscode-0.2.0.vsix --force
+code --install-extension shyc-vscode-0.2.1.vsix --force
 ```
 
 `--dependencies` is required: the extension loads `vscode-languageclient` at
@@ -59,7 +59,10 @@ When the extension starts it uses, in order:
 4. `cargo run --quiet --manifest-path server/Cargo.toml`.
 
 The first launch through `cargo run` compiles the server and the compiler, so
-it can take a while. `npm run build:server` avoids that.
+it can take a while. `npm run build:server` avoids that. `make bin` at the
+repository root also builds the server into `target/bin/shyc-lsp`; since that
+path is second in the list, a checkout keeps using its freshly built server
+without reinstalling the extension.
 
 ## Include directories
 
