@@ -2,11 +2,18 @@
 #include <ctype.shyh>
 #include <stdarg.h>
 #include <stddef.shyh>
+#include <errno.shyh>
 #include <stdio.shyh>
 #include <stdlib.shyh>
 #include <string.shyh>
 #include <unistd.shyh>
 #include <fcntl.shyh>
+
+static int errno_value;
+
+int *__errno_location(void) {
+  return &errno_value;
+}
 
 // The portable C library. Every platform service goes through the calls in
 // <unistd.h> and open(); this file has no inline assembly.

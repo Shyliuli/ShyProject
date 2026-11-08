@@ -1,0 +1,5 @@
+/* Compatibility wrapper: the native ShyC header lives in ../libc/. */
+#ifndef __SHY_COMPAT_C_ERRNO_SHYH
+#define __SHY_COMPAT_C_ERRNO_SHYH
+#include "../libc/errno.shyh"
+#endif

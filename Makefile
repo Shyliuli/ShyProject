@@ -11,8 +11,8 @@ LSP_DIR := vscode-shyc/server
 # stdint are included by the others, so they are generated first. The list is
 # also the recipe order when make runs without -j; the explicit prerequisites
 # below keep the order under -j.
-# core/stddef.h and core/stdint.h are hand-written routers: their types follow
-# the target's pointer width, which a generated header would freeze.
+# stddef, stdint and errno are hand-written routers: the first two follow the
+# target's pointer width, and errno must use the host libc on hosted builds.
 LIBSHY_HEADERS := \
 	libshy/c/stdtype.h \
 	libshy/c/stdarg.h \

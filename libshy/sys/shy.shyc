@@ -5,6 +5,7 @@
 
 #include <stddef.shyh>
 #include <stdint.shyh>
+#include <errno.h>
 #include <unistd.shyh>
 #include <fcntl.shyh>
 
@@ -50,8 +51,10 @@ static int next_byte(void) {
 
 // Like a terminal: stop after a newline, return 0 at the end of input.
 ssize_t read(int fd, void *buf, size_t count) {
-  if (fd != STDIN_FILENO)
+  if (fd != STDIN_FILENO) {
+    errno = EBADF;
     return -1;
+  }
   unsigned char *p = buf;
   size_t n = 0;
   while (n < count) {
@@ -68,8 +71,10 @@ ssize_t read(int fd, void *buf, size_t count) {
 
 // 0x70 is the UART data register; a write sends the low 8 bits.
 ssize_t write(int fd, const void *buf, size_t count) {
-  if (fd != STDOUT_FILENO && fd != STDERR_FILENO)
+  if (fd != STDOUT_FILENO && fd != STDERR_FILENO) {
+    errno = EBADF;
     return -1;
+  }
   const unsigned char *p = buf;
   for (size_t i = 0; i < count; i++) {
     int c = p[i];
@@ -84,11 +89,13 @@ ssize_t write(int fd, const void *buf, size_t count) {
 int open(const char *path, int flags, ...) {
   (void)path;
   (void)flags;
+  errno = ENOSYS;
   return -1;
 }
 
 int close(int fd) {
   (void)fd;
+  errno = EBADF;
   return -1;
 }
 
@@ -108,8 +115,10 @@ static char *heap_end = NULL;
 void *sbrk(intptr_t increment) {
   if (!heap_end)
     heap_end = _end;
-  if ((uintptr_t)heap_end + increment > 0x00fff000)
+  if ((uintptr_t)heap_end + increment > 0x00fff000) {
+    errno = ENOMEM;
     return (void *)-1;
+  }
   char *old = heap_end;
   heap_end = heap_end + increment;
   return old;

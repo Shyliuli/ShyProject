@@ -110,7 +110,7 @@ fn print_line<B: Buffer>(B *buffer) -> int {
     return out.write_line(buffer);
 }
 
-fn getc(void) -> int;
+fn get_char(void) -> int;
 
 fn get_line<B: Buffer>(B *buffer) -> int {
     let mut input = global_reader();

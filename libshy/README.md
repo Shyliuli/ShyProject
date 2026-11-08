@@ -5,7 +5,7 @@ bottom and three layers above it:
 
 | View | Contents |
 |---|---|
-| `c/` | the C include view: only `.h`, and only C-library headers — `stdio`, `stdlib`, `string`, `ctype`, `unistd`, `fcntl`, `stddef`, `stdint`, `stdtype`, `stdarg` |
+| `c/` | the C include view: only `.h`, and only C-library headers — `stdio`, `stdlib`, `string`, `ctype`, `unistd`, `fcntl`, `errno`, `stddef`, `stdint`, `stdtype`, `stdarg` |
 | `core/` | ShyC declarations and their C spelling (`str.shyh`, `buffer.shyh`, `option.{shyh,h}`, `result.{shyh,h}`), plus `core.shyc` |
 | `alloc/` | `vec.shyh`, `string.shyh`, `debug.shyh`, `display.shyh`, `alloc.shyc` |
 | `std/` | `fs.shyh`, `io.shyh`, `fmt.shyh`, `env.{shyh,shyc}`, `std.shyc` |
@@ -79,7 +79,7 @@ while (reader.getline(&line) > 0) {
 
 `std/io.shyh` gives `File`, `FileReader`, `FileWriter`, `StrReader`, and the
 replaceable global endpoints behind the stream-less helpers `print`,
-`print_line`, `getc`, and `get_line`.
+`print_line`, `get_char`, and `get_line`.
 
 `read_stream(FILE *f)` returns everything left in a stdio stream as a
 `String`.
@@ -90,9 +90,10 @@ creates or truncates one, `read` reads up to `max_len` bytes,
 `read_to_string` returns everything left as `Result<String, IoError>`,
 `write_all` writes every byte, and `close` closes the descriptor. `IoError`
 names the failed step (`OpenFailed`, `ReadFailed`, `WriteFailed`); a bare
-machine has no errno, so every failed open is `OpenFailed`. A `File` built
-from a descriptor the platform provides, such as `File {0}` for stdin or
-`File {1}` for stdout, still works on a bare machine.
+machine has no file system, so every failed open is `OpenFailed` with
+`errno == ENOSYS`. A `File` built from a descriptor the platform provides,
+such as `File {0}` for stdin or `File {1}` for stdout, still works on a bare
+machine.
 
 `std/fs.shyh` adds the one-call helpers `read_to_string(path)` and
 `write_file(path, text)`. Both take the path as a `Str`, the latter returning 1

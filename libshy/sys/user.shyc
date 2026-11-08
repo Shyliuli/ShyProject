@@ -4,6 +4,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -31,20 +32,29 @@ static int syscall3(int number, int a0, int a1, int a2) {
   return result;
 }
 
+// POSIX callers see -1 and errno; the ShyISA ABI passes -errno.
+static int syscall_result(int result) {
+  if (result < 0) {
+    errno = -result;
+    return -1;
+  }
+  return result;
+}
+
 ssize_t read(int fd, void *buf, size_t count) {
-  return (ssize_t)syscall3(SYS_READ, fd, (int)buf, (int)count);
+  return (ssize_t)syscall_result(syscall3(SYS_READ, fd, (int)buf, (int)count));
 }
 
 ssize_t write(int fd, const void *buf, size_t count) {
-  return (ssize_t)syscall3(SYS_WRITE, fd, (int)buf, (int)count);
+  return (ssize_t)syscall_result(syscall3(SYS_WRITE, fd, (int)buf, (int)count));
 }
 
 int open(const char *path, int flags, ...) {
-  return syscall3(SYS_OPENAT, AT_FDCWD, (int)path, flags);
+  return syscall_result(syscall3(SYS_OPENAT, AT_FDCWD, (int)path, flags));
 }
 
 int close(int fd) {
-  return syscall3(SYS_CLOSE, fd, 0, 0);
+  return syscall_result(syscall3(SYS_CLOSE, fd, 0, 0));
 }
 
 void _exit(int status) {
@@ -61,8 +71,10 @@ void *sbrk(intptr_t increment) {
   if (!heap_end)
     heap_end = _end;
   char *next = heap_end + increment;
-  if (syscall3(SYS_BRK, (int)next, 0, 0) != (int)next)
+  if (syscall3(SYS_BRK, (int)next, 0, 0) != (int)next) {
+    errno = ENOMEM;
     return (void *)-1;
+  }
   char *old = heap_end;
   heap_end = next;
   return old;

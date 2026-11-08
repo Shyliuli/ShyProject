@@ -115,7 +115,7 @@ pub fn global_reader(void) -> FileReader {
     return global_in;
 }
 
-pub fn getc(void) -> int {
+pub fn get_char(void) -> int {
     let mut input = global_reader();
     return input.getc();
 }
