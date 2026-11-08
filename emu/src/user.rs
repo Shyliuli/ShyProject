@@ -261,7 +261,7 @@ impl UserMode {
 /// 数据块从低到高是：参数字符串，`argc`，`argv` 指针数组，NULL，`envp`
 /// 指针数组，NULL。整块紧贴在 sp 下方：Shy 的栈向上生长，sp 以上才是程序
 /// 可以自由使用的栈空间，数据块因此不会被栈覆盖。
-pub fn setup_stack(emu: &mut Emu, argv: &[String], envp: &[String]) -> anyhow::Result<Entry> {
+pub fn setup_stack(emu: &mut Emu, argv: &[Vec<u8>], envp: &[Vec<u8>]) -> anyhow::Result<Entry> {
     // argc, argv..., NULL, envp..., NULL
     let words = 1 + argv.len() + 1 + envp.len() + 1;
     let strings: u32 = argv
@@ -275,11 +275,11 @@ pub fn setup_stack(emu: &mut Emu, argv: &[String], envp: &[String]) -> anyhow::R
     let mut cursor = data_start;
     let mut argv_pointers = Vec::with_capacity(argv.len());
     for arg in argv {
-        argv_pointers.push(push_string(emu, &mut cursor, arg)?);
+        argv_pointers.push(push_bytes(emu, &mut cursor, arg)?);
     }
     let mut envp_pointers = Vec::with_capacity(envp.len());
     for value in envp {
-        envp_pointers.push(push_string(emu, &mut cursor, value)?);
+        envp_pointers.push(push_bytes(emu, &mut cursor, value)?);
     }
 
     let arrays = (cursor + 3) & !3;
@@ -304,9 +304,8 @@ pub fn setup_stack(emu: &mut Emu, argv: &[String], envp: &[String]) -> anyhow::R
     })
 }
 
-/// 从 cursor 起向上写一个以 NUL 结尾的字符串，返回它的地址。
-fn push_string(emu: &mut Emu, cursor: &mut u32, text: &str) -> anyhow::Result<u32> {
-    let bytes = text.as_bytes();
+/// 从 cursor 起向上写一个以 NUL 结尾的字节串，返回它的地址。
+fn push_bytes(emu: &mut Emu, cursor: &mut u32, bytes: &[u8]) -> anyhow::Result<u32> {
     let address = *cursor;
     emu.debug_write_mem(address, bytes)?;
     emu.debug_write_mem(address + bytes.len() as u32, &[0])?;
