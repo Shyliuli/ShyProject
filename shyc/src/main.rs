@@ -411,19 +411,12 @@ fn arguments() -> Result<Option<Options>, String> {
     let mut probe_manifest = None;
     let mut probe_object = None;
     let mut preprocess = preprocess::Options::default();
+    let shylib = shyc::config::shylib();
     // The bundled headers describe the Shy target, so they are searched before
     // any `-I` directory and before the host C library.
     preprocess
         .include_dirs
         .push(Path::new(env!("CARGO_MANIFEST_DIR")).join("include"));
-    // The project's C library is not part of the compiler: `~/.shycc.toml`
-    // names it, and a checkout provides it next to the crates. Its layers are
-    // what a `use std::io::*` resolves to.
-    if let Some(shylib) = shyc::config::shylib() {
-        preprocess
-            .include_dirs
-            .extend(shyc::config::shylib_includes(&shylib));
-    }
     while let Some(arg) = args.next() {
         let selected = match arg.as_str() {
             "--help" | "-h" => {
@@ -604,6 +597,21 @@ fn arguments() -> Result<Option<Options>, String> {
             if path.is_dir() {
                 preprocess.include_dirs.push(path.to_path_buf());
             }
+        }
+    }
+    // The project's C library is not part of the compiler: `~/.shycc.toml`
+    // names it, and a checkout provides it next to the crates. Shy has no
+    // system C library, so its C headers come before user `-I` directories.
+    // Hosted targets use the system C library first and only fall back to
+    // libshy for the ShyC layers and headers the system does not provide.
+    if let Some(shylib) = shylib {
+        let includes = shyc::config::shylib_includes(&shylib);
+        if is_shy {
+            for (index, directory) in includes.into_iter().enumerate() {
+                preprocess.include_dirs.insert(1 + index, directory);
+            }
+        } else {
+            preprocess.include_dirs.extend(includes);
         }
     }
     if is_shy {

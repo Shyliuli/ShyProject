@@ -584,7 +584,7 @@ fn run(mut opts: Options) -> Result<()> {
         for input in &opts.inputs {
             ensure_kind(input, InputKind::C)?;
             let output = opts.output.clone();
-            run_compiler(&repo, &opts, input, output.as_deref(), true)?;
+            run_compiler(&repo, &opts, input, output.as_deref(), true, false)?;
         }
         return Ok(());
     }
@@ -606,7 +606,7 @@ fn run(mut opts: Options) -> Result<()> {
                 if opts.probe {
                     run_probe_unit(&repo, &opts, input, &asm, &mut probe_temps, &mut probe_libs)?;
                 } else {
-                    run_compiler(&repo, &opts, input, Some(&asm), false)?;
+                    run_compiler(&repo, &opts, input, Some(&asm), false, false)?;
                 }
                 collect_debug_input(&opts, &mut temps, &mut debug_inputs, &asm)?;
                 if opts.stage == Stage::Asm {
@@ -719,13 +719,23 @@ fn run_compiler(
     input: &str,
     output: Option<&Path>,
     preprocess_only: bool,
+    libshy_includes: bool,
 ) -> Result<()> {
-    run_shyc(repo, opts, input, output, preprocess_only, None)
+    run_shyc(
+        repo,
+        opts,
+        input,
+        output,
+        preprocess_only,
+        None,
+        libshy_includes,
+    )
 }
 
-/// Add the libshy layers in lookup order: C headers first, then explicit
-/// `c/`/`core/` paths, then compatibility wrappers.
-fn add_libshy_includes(cmd: &mut Command, _repo: &Path) {
+/// Add the libshy layers in lookup order. Internal library units use these
+/// headers even when the active target is hosted: they define the library's
+/// own C ABI and must not pick up the host compiler's headers.
+fn add_libshy_includes(cmd: &mut Command) {
     for layer in shyc::config::shylib_includes(&shylib()) {
         cmd.arg(format!("-I{}", layer.display()));
     }
@@ -755,6 +765,7 @@ fn run_shyc(
     output: Option<&Path>,
     preprocess_only: bool,
     probe: Option<&ProbeArgs>,
+    libshy_includes: bool,
 ) -> Result<()> {
     let mut cmd = shyc_command(repo, opts.print_only)?;
     cmd.arg(format!("--target={}", shyc_target(&opts.target)));
@@ -768,7 +779,9 @@ fn run_shyc(
     } else {
         cmd.arg("-S");
     }
-    add_libshy_includes(&mut cmd, repo);
+    if libshy_includes {
+        add_libshy_includes(&mut cmd);
+    }
     for arg in &opts.compile_args {
         if forwarded_to_shyc(arg) {
             cmd.arg(arg);
@@ -830,6 +843,7 @@ fn run_probe_unit(
                 answers: &answers,
                 object: None,
             }),
+            false,
         )?;
 
         let requests = probe::read_manifest(&manifest)?;
@@ -1114,7 +1128,7 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
         for input in &opts.inputs {
             ensure_kind(input, InputKind::C)?;
             let output = opts.output.clone();
-            run_compiler(repo, opts, input, output.as_deref(), true)?;
+            run_compiler(repo, opts, input, output.as_deref(), true, false)?;
         }
         return Ok(());
     }
@@ -1353,7 +1367,7 @@ fn build_float_lib(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result
     };
 
     let input = runtime_c.to_string_lossy().into_owned();
-    run_compiler(repo, opts, &input, Some(&asm), false)?;
+    run_compiler(repo, opts, &input, Some(&asm), false, true)?;
     run_asm(repo, opts, &asm, &obj)?;
     Ok(obj)
 }
@@ -1375,7 +1389,9 @@ fn emit_llvm(repo: &Path, opts: &Options, input: &Path, ll: &Path, user_unit: bo
     if bare_target(&opts.target) {
         cmd.arg("-ffreestanding");
     }
-    add_libshy_includes(&mut cmd, repo);
+    if !user_unit {
+        add_libshy_includes(&mut cmd);
+    }
     for arg in &opts.compile_args {
         if forwarded_to_shyc(arg) && (user_unit || arg.starts_with("-O")) {
             cmd.arg(arg);
@@ -1435,7 +1451,7 @@ fn build_libshy(
             )
         };
         let input = src.to_string_lossy().into_owned();
-        run_compiler(repo, opts, &input, Some(&asm), false)?;
+        run_compiler(repo, opts, &input, Some(&asm), false, true)?;
         run_asm(repo, opts, &asm, &obj)?;
         objects.push(obj);
     }
