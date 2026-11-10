@@ -305,6 +305,15 @@ struct Target {
     layout: Layout,
 }
 
+/// ShyISA executes big-endian loads and stores even when a probe needs another
+/// target's pointer width, alignment, and long width.
+fn shy_layout(layout: Layout) -> Layout {
+    Layout {
+        endian: shyc::ir::Endian::Big,
+        ..layout
+    }
+}
+
 /// Resolve the target triple and the IR data model it implies.
 ///
 /// An explicit target is never guessed: a target is accepted when its
@@ -351,7 +360,11 @@ fn resolve_target(options: &Options) -> Result<Target, String> {
                 } else {
                     abi_kind(name)
                 },
-                layout,
+                layout: if backend == Some(Backend::Shy) {
+                    shy_layout(layout)
+                } else {
+                    layout
+                },
             }),
             None => Err(format!(
                 "unknown target `{name}`: expected `shy` or an LLVM triple \
@@ -980,6 +993,7 @@ fn probe_round(options: &Options) -> Result<(), String> {
     let target = resolve_target(options)?;
     let attributes = &preprocessed.attributes;
     if !parsed.requests.is_empty() {
+        let layout = shy_layout(target.layout);
         // A declaration this round has not shaped yet is layout or data, and no
         // probe run can trap a read of it. Those requests are answered before
         // any other, so a generator never reads a template the file has not
@@ -1004,9 +1018,9 @@ fn probe_round(options: &Options) -> Result<(), String> {
         // A probe image is not a program. Its unit holds the `const fn` clones
         // and the `_start` trampoline that calls them, so it is lowered without
         // the compiler's automatic startup and never reaches a `main`. It runs
-        // on ShyISA whatever the program targets, so it uses the Shy ABI; the
-        // program's data model is what the evaluated values must agree with.
-        let program = match probe::build(&mut parsed, target.layout) {
+        // on ShyISA whatever the program targets, so it uses the Shy ABI and
+        // byte order while retaining the program's object sizes and alignment.
+        let program = match probe::build(&mut parsed, layout) {
             probe::Outcome::Unit(program) => program,
             probe::Outcome::Nothing => {
                 return Err("const-fn probe round has requests but no probe unit".into());
@@ -1030,7 +1044,7 @@ fn probe_round(options: &Options) -> Result<(), String> {
                 // so its module name must not repeat theirs: a user file named
                 // `std.shyc` would otherwise collide on `.L.std.*` sections.
                 module_name: "probe".to_string(),
-                layout: target.layout,
+                layout,
                 startup: StartupMode::Manual,
                 abi: abi_plan::AbiKind::ShyV1,
                 disable_nonexhaustive_switch: attributes.disable_nonexhaustive_switch,
@@ -1065,12 +1079,12 @@ fn probe_round(options: &Options) -> Result<(), String> {
         let assembly = shy::emit(
             &lowered.module,
             &shy::Options {
-                layout: target.layout,
+                layout,
                 emit_source_comments: false,
             },
         )
         .map_err(|error| sources.render(&error))?;
-        let trampoline = probe::emit_probe_asm(&lowered, &program.calls, target.layout)
+        let trampoline = probe::emit_probe_asm(&lowered, &program.calls, layout)
             .map_err(|reason| format!("{}: probe trampoline: {reason}", options.input.display()))?;
         let manifest = round_manifest(&parsed, &sources)?;
         fs::write(manifest_path, manifest)

@@ -7,7 +7,7 @@
 //! for a trait method). An inherent method wins over a trait method, and two
 //! matching trait methods make a receiver call ambiguous.
 
-use super::{ExprKind, ExprVal, FnLower, FunctionInstance};
+use super::{DerefStep, ExprKind, ExprVal, FnLower, FunctionInstance};
 use crate::ast;
 use crate::ir;
 use crate::sema::types::{Builtin, Qualifiers, TypeId, TypeKind};
@@ -443,12 +443,14 @@ impl FnLower<'_> {
                 }
                 return self.lower_trait_table(qualifier, type_args, span);
             }
-            let instance = self.generic_callee_instance(callee, type_args, span)?;
+            let (instance, steps) = self.generic_callee_instance(callee, type_args, span)?;
             if let ast::Expr::Member {
                 object, name, op, ..
             } = callee
             {
-                return self.lower_generic_method_call(object, name, *op, instance, args, span);
+                return self.lower_generic_method_call(
+                    object, name, *op, instance, &steps, args, span,
+                );
             }
             return self.lower_instance_call(callee, instance, args, span);
         }
@@ -476,19 +478,8 @@ impl FnLower<'_> {
         {
             let object_ty = self.type_of(object)?;
             if let Some(resolved) = self.l.method_with_autoderef(object_ty, name)? {
-                let mut receiver = self.lower_expr(object)?;
-                for (index, step) in resolved.steps.iter().enumerate() {
-                    let step_name = ast::Name::new(step.name, name.span);
-                    let step_op = if index == 0 { *op } else { ast::MemberOp::Dot };
-                    receiver = self.lower_method_call_value(
-                        receiver,
-                        &step_name,
-                        step_op,
-                        step.method.clone(),
-                        &[],
-                        span,
-                    )?;
-                }
+                let receiver =
+                    self.lower_receiver_steps(object, name, *op, &resolved.steps, span)?;
                 let method_op = if resolved.steps.is_empty() {
                     *op
                 } else {
@@ -507,12 +498,14 @@ impl FnLower<'_> {
         // A call with no written arguments instantiates a generic method from
         // the value arguments, exactly as `name(value)` does for a generic
         // function. A concrete method of the same name already returned above.
-        if let Some(instance) = self.inferred_method_instance(callee, args)? {
+        if let Some((instance, steps)) = self.inferred_method_instance(callee, args)? {
             if let ast::Expr::Member {
                 object, name, op, ..
             } = callee
             {
-                return self.lower_generic_method_call(object, name, *op, instance, args, span);
+                return self.lower_generic_method_call(
+                    object, name, *op, instance, &steps, args, span,
+                );
             }
             return self.lower_instance_call(callee, instance, args, span);
         }
@@ -602,24 +595,30 @@ impl FnLower<'_> {
         callee: &ast::Expr,
         type_args: &[ast::GenericArg],
         span: Span,
-    ) -> Result<FunctionInstance, Diagnostic> {
+    ) -> Result<(FunctionInstance, Vec<DerefStep>), Diagnostic> {
         match callee {
-            ast::Expr::Name(name) => self.l.instantiate_generic_function(name, type_args),
+            ast::Expr::Name(name) => Ok((
+                self.l.instantiate_generic_function(name, type_args)?,
+                Vec::new(),
+            )),
             ast::Expr::Member { object, name, .. } => {
                 let object_ty = self.type_of(object)?;
-                let Some(record) = self.l.receiver_of(object_ty) else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "method call needs a struct, union, pointer, or scalar receiver",
-                    ));
-                };
                 if self.l.method_with_autoderef(object_ty, name)?.is_some() {
                     return Err(Diagnostic::new(
                         span,
                         format!("method '{}' is not generic", name.text),
                     ));
                 }
-                self.l.instantiate_generic_method(record, name, type_args)
+                let Some(path) = self.l.generic_method_path(object_ty, name)? else {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("no generic method '{}' on this type", name.text),
+                    ));
+                };
+                Ok((
+                    self.l.instantiate_generic_method(path.owner, name, type_args)?,
+                    path.steps,
+                ))
             }
             ast::Expr::ScopedName {
                 qualifier, name, ..
@@ -639,7 +638,10 @@ impl FnLower<'_> {
                         format!("method '{}' is not generic", name.text),
                     ));
                 }
-                self.l.instantiate_generic_method(record, name, type_args)
+                Ok((
+                    self.l.instantiate_generic_method(record, name, type_args)?,
+                    Vec::new(),
+                ))
             }
             ast::Expr::GenericScopedName {
                 qualifier,
@@ -654,9 +656,12 @@ impl FnLower<'_> {
                         format!("method '{}' is not generic", name.text),
                     ));
                 }
-                self.l.instantiate_generic_method(ty, name, type_args)
+                Ok((
+                    self.l.instantiate_generic_method(ty, name, type_args)?,
+                    Vec::new(),
+                ))
             }
-            _ => self.l.generic_call_target(callee, type_args, span),
+            _ => Ok((self.l.generic_call_target(callee, type_args, span)?, Vec::new())),
         }
     }
 
@@ -669,14 +674,14 @@ impl FnLower<'_> {
         &mut self,
         callee: &ast::Expr,
         args: &[ast::Expr],
-    ) -> Result<Option<FunctionInstance>, Diagnostic> {
-        let (record, name, skip_params) = match callee {
+    ) -> Result<Option<(FunctionInstance, Vec<DerefStep>)>, Diagnostic> {
+        let (record, name, skip_params, steps) = match callee {
             ast::Expr::Member { object, name, .. } => {
                 let object_ty = self.type_of(object)?;
-                let Some(record) = self.l.receiver_of(object_ty) else {
+                let Some(path) = self.l.generic_method_path(object_ty, name)? else {
                     return Ok(None);
                 };
-                (record, name, 1)
+                (path.owner, name, 1, path.steps)
             }
             ast::Expr::ScopedName {
                 qualifier, name, ..
@@ -684,10 +689,12 @@ impl FnLower<'_> {
                 let Some(ty) = self.l.lookup_named_type(&qualifier.text) else {
                     return Ok(None);
                 };
-                let Some(record) = self.l.receiver_of(ty) else {
+                if self.l.method_of(ty, name)?.is_some()
+                    || !self.l.has_generic_method(ty, &name.text)?
+                {
                     return Ok(None);
-                };
-                (record, name, 0)
+                }
+                (ty, name, 0, Vec::new())
             }
             ast::Expr::GenericScopedName {
                 qualifier,
@@ -696,28 +703,23 @@ impl FnLower<'_> {
                 ..
             } => {
                 let ty = self.l.generic_qualifier_type(qualifier, args)?;
-                let Some(record) = self.l.receiver_of(ty) else {
+                if self.l.method_of(ty, name)?.is_some()
+                    || !self.l.has_generic_method(ty, &name.text)?
+                {
                     return Ok(None);
-                };
-                (record, name, 0)
+                }
+                (ty, name, 0, Vec::new())
             }
             _ => return Ok(None),
         };
-        if self.l.method_with_autoderef(record, name)?.is_some()
-            || !self.l.has_generic_method(record, &name.text)?
-        {
-            return Ok(None);
-        }
         let mut arguments = Vec::with_capacity(args.len());
         for argument in args {
             arguments.push((argument.span(), self.type_of(argument)?));
         }
-        Ok(Some(self.l.infer_generic_method(
-            record,
-            name,
-            &arguments,
-            skip_params,
-        )?))
+        Ok(Some((
+            self.l.infer_generic_method(record, name, &arguments, skip_params)?,
+            steps,
+        )))
     }
 
     /// Lower a call through one already instantiated generic function.
@@ -776,13 +778,20 @@ impl FnLower<'_> {
         name: &ast::Name,
         op: ast::MemberOp,
         instance: FunctionInstance,
+        steps: &[DerefStep],
         args: &[ast::Expr],
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
-        self.lower_method_call_target(
-            object,
+        let receiver = self.lower_receiver_steps(object, name, op, steps, span)?;
+        let method_op = if steps.is_empty() {
+            op
+        } else {
+            ast::MemberOp::Dot
+        };
+        self.lower_method_call_value(
+            receiver,
             name,
-            op,
+            method_op,
             super::MethodInfo {
                 symbol: instance.symbol,
                 ty: instance.ty,
@@ -793,17 +802,30 @@ impl FnLower<'_> {
         )
     }
 
-    fn lower_method_call_target(
+    /// Lower the `Deref` projections a method lookup found before the method
+    /// itself is called.
+    fn lower_receiver_steps(
         &mut self,
         object: &ast::Expr,
         name: &ast::Name,
         op: ast::MemberOp,
-        method: super::MethodInfo,
-        args: &[ast::Expr],
+        steps: &[DerefStep],
         span: Span,
     ) -> Result<ExprVal, Diagnostic> {
-        let object_value = self.lower_expr(object)?;
-        self.lower_method_call_value(object_value, name, op, method, args, span)
+        let mut receiver = self.lower_expr(object)?;
+        for (index, step) in steps.iter().enumerate() {
+            let step_name = ast::Name::new(step.name, name.span);
+            let step_op = if index == 0 { op } else { ast::MemberOp::Dot };
+            receiver = self.lower_method_call_value(
+                receiver,
+                &step_name,
+                step_op,
+                step.method.clone(),
+                &[],
+                span,
+            )?;
+        }
+        Ok(receiver)
     }
 
     pub(super) fn lower_method_call_value(
@@ -827,7 +849,13 @@ impl FnLower<'_> {
         {
             let mut receiver_ty = object_value.ty;
             let mut receiver_const = object_value.qualifiers.is_const;
-            while let Some(pointee) = self.l.pointee(receiver_ty) {
+            // Stop at the type self names, even when it is a pointer: a
+            // pointer impl takes the pointer value itself, so its pointee's
+            // constness is not the receiver's.
+            while !self.l.types.is_compatible(receiver_ty, receiver.ty) {
+                let Some(pointee) = self.l.pointee(receiver_ty) else {
+                    break;
+                };
                 receiver_const = pointee.qualifiers.is_const;
                 receiver_ty = pointee.ty;
             }
@@ -845,7 +873,13 @@ impl FnLower<'_> {
                 "`->` needs a pointer to a struct or union",
             ));
         }
-        let receiver = if self.l.types.is_record(object_ty) {
+        let receiver = if self.l.types.is_record(object_ty)
+            || (self.l.types.is_pointer(object_ty)
+                && self
+                    .l
+                    .pointee(first_param)
+                    .is_some_and(|expected| self.l.types.is_compatible(expected.ty, object_ty)))
+        {
             if self.l.types.is_pointer(first_param) {
                 let address = self.object_address(object_value, span)?;
                 self.address_value(address)

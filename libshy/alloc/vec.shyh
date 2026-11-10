@@ -2,6 +2,7 @@
 #define SHY_ALLOC_VEC_SHYH
 
 #include <stdlib.h>
+#include <alloc/debug.shyh>
 
 /* A growable array. A zero-initialized Vec is empty: `Vec<int> v = {0};`.
    Elements are v.data[0] .. v.data[v.len - 1]. A generic impl is compiled
@@ -36,6 +37,21 @@ impl Vec<T> {
         v.data = 0;
         v.len = 0;
         v.cap = 0;
+    }
+}
+
+impl<T: Debug> Debug for Vec<T> {
+    fn debug(const self *v, String *out) -> int {
+        int start = out.len();
+        out.push_cstr("[");
+        for (int i = 0; i < v.len; i++) {
+            if (i > 0) {
+                out.push_cstr(", ");
+            }
+            v.data[i].debug(out);
+        }
+        out.push_cstr("]");
+        return out.len() - start;
     }
 }
 

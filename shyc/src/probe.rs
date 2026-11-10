@@ -69,6 +69,8 @@
 //! that reads it answers from data the round does not have yet. A round is as
 //! sound as the initializers it keeps.
 
+use std::collections::HashMap;
+
 use crate::abi::{Location, Passing, ReturnPlan, ValuePart};
 use crate::ast;
 use crate::ir::Layout;
@@ -338,6 +340,26 @@ struct BakedTokens {
     tokens: Vec<Token>,
 }
 
+/// One field of a reflected record.
+#[derive(Clone)]
+struct FieldReflection {
+    name: String,
+    ty: String,
+    pointer: bool,
+}
+
+/// One named record the field builtins answer for.
+///
+/// Only structs are here: a union has no single active member, so a derived
+/// Debug would print storage that may not be the value the program wrote.
+/// A record whose fields cannot be spelled, or whose type is generic, is left
+/// out entirely; a query for it reaches the probe's fatal path instead of
+/// answering with an empty or partial field list.
+struct RecordReflection {
+    owner: String,
+    fields: Vec<FieldReflection>,
+}
+
 /// Which compile-time builtins the probed bodies call, and therefore which
 /// ordinary definitions the generated source supplies.
 #[derive(Default)]
@@ -353,6 +375,10 @@ struct BuiltinNeeds {
     implements: bool,
     require_impl: bool,
     try_provide_impl: bool,
+    field_count: bool,
+    field_name: bool,
+    field_type: bool,
+    field_is_pointer: bool,
 }
 
 impl BuiltinNeeds {
@@ -368,6 +394,12 @@ impl BuiltinNeeds {
             || self.implements
             || self.require_impl
             || self.try_provide_impl
+            || self.reflects_fields()
+    }
+
+    /// Whether a body asks for record fields.
+    fn reflects_fields(&self) -> bool {
+        self.field_count || self.field_name || self.field_type || self.field_is_pointer
     }
 
     /// Whether a token builder the arena serves is called.
@@ -399,7 +431,8 @@ fn wrapper_symbol(id: usize) -> String {
 /// scalars. A Tokens result becomes the static storage the hidden return
 /// pointer names and the serializer that flattens it. The accessors and the
 /// declaration-world queries this slice implements are ordinary functions for
-/// the same reason.
+/// the same reason. Field reflection is the same: static strings plus four
+/// ordinary lookups, so no part of the derived Debug is generated here.
 fn generated_items(
     baked: &[BakedTokens],
     baked_text: &[(String, String)],
@@ -409,6 +442,7 @@ fn generated_items(
     unresolved_bodies: bool,
     try_runs: &[&TrySite],
     world: &WorldSnapshot,
+    records: &[RecordReflection],
     site: Span,
     layout: Layout,
 ) -> Result<Vec<ast::Item>, String> {
@@ -423,7 +457,7 @@ fn generated_items(
         return Ok(Vec::new());
     }
     let mut source = String::new();
-    if needs.stores_tokens() || unresolved_bodies {
+    if needs.stores_tokens() || needs.reflects_fields() || unresolved_bodies {
         source.push_str(PROBE_FAILURE_HELPERS);
     }
     if unresolved_bodies {
@@ -480,6 +514,9 @@ fn generated_items(
     }
     if needs.declared || needs.implements || needs.require_impl || needs.try_provide_impl {
         bake_world(&mut source, world, needs)?;
+    }
+    if needs.reflects_fields() {
+        bake_field_reflection(&mut source, records);
     }
     if tokens_result {
         serialize_tokens(&mut source);
@@ -951,6 +988,325 @@ fn bake_world(
     Ok(())
 }
 
+/// Collects the struct definitions field reflection can answer for.
+///
+/// A record with a field shape that cannot be spelled at all is left out of
+/// the table rather than failing the round: a program may define such a record
+/// without deriving anything. Querying it later reaches the probe's fatal
+/// path, so the absence never turns into an empty derived Debug.
+fn reflect_records(items: &[ast::Item]) -> Vec<RecordReflection> {
+    let mut aliases: HashMap<String, (ast::DeclSpecs, ast::Declarator)> = HashMap::new();
+    for item in items {
+        let ast::Item::Decl(declaration) = item else {
+            continue;
+        };
+        if declaration.specs.storage != Some(ast::StorageClass::Typedef) {
+            continue;
+        }
+        for declarator in &declaration.declarators {
+            if let Some(name) = &declarator.declarator.name {
+                aliases.insert(
+                    name.text.clone(),
+                    (declaration.specs.clone(), declarator.declarator.clone()),
+                );
+            }
+        }
+    }
+    let mut records = Vec::new();
+    for item in items {
+        let ast::Item::Decl(declaration) = item else {
+            continue;
+        };
+        let mut aliases_here = Vec::new();
+        if declaration.specs.storage == Some(ast::StorageClass::Typedef) {
+            for declarator in &declaration.declarators {
+                let plain = declarator.declarator.derived.is_empty();
+                if plain && let Some(name) = &declarator.declarator.name {
+                    aliases_here.push(name.text.clone());
+                }
+            }
+        }
+        for specifier in &declaration.specs.type_specs {
+            if let ast::TypeSpecifier::Record(record) = specifier {
+                reflect_record(record, &aliases_here, &aliases, &mut records);
+            }
+        }
+    }
+    records
+}
+
+/// Adds one record definition, its nested definitions, and every name it is
+/// visible under.
+fn reflect_record(
+    record: &ast::RecordSpec,
+    typedef_names: &[String],
+    aliases: &HashMap<String, (ast::DeclSpecs, ast::Declarator)>,
+    records: &mut Vec<RecordReflection>,
+) {
+    let Some(members) = &record.members else {
+        return;
+    };
+    for member in members {
+        for specifier in &member.specs.type_specs {
+            if let ast::TypeSpecifier::Record(nested) = specifier {
+                reflect_record(nested, &[], aliases, records);
+            }
+        }
+    }
+    if record.kind != ast::RecordKind::Struct || !record.generics.is_empty() {
+        return;
+    }
+    let mut owners = Vec::new();
+    if let Some(tag) = &record.tag {
+        owners.push(tag.text.clone());
+    }
+    for name in typedef_names {
+        if !owners.contains(name) {
+            owners.push(name.clone());
+        }
+    }
+    if owners.is_empty() {
+        return;
+    }
+    let Some(fields) = reflect_fields(members, aliases) else {
+        return;
+    };
+    for owner in owners {
+        if records.iter().any(|known| known.owner == owner) {
+            continue;
+        }
+        records.push(RecordReflection {
+            owner,
+            fields: fields.clone(),
+        });
+    }
+}
+
+/// The fields of one struct, or `None` when a field has a shape reflection
+/// cannot spell.
+fn reflect_fields(
+    members: &[ast::MemberDecl],
+    aliases: &HashMap<String, (ast::DeclSpecs, ast::Declarator)>,
+) -> Option<Vec<FieldReflection>> {
+    let mut fields = Vec::new();
+    for member in members {
+        // An anonymous struct/union member has no field name of its own.
+        if member.declarators.is_empty() {
+            return None;
+        }
+        if member
+            .specs
+            .type_specs
+            .iter()
+            .any(|specifier| matches!(specifier, ast::TypeSpecifier::Record(record) if record.members.is_some()))
+        {
+            return None;
+        }
+        for declarator in &member.declarators {
+            if declarator.bit_width.is_some() {
+                return None;
+            }
+            if declarator
+                .declarator
+                .derived
+                .iter()
+                .any(|derived| !matches!(derived, ast::DerivedDeclarator::Pointer(_)))
+            {
+                return None;
+            }
+            let name = declarator.declarator.name.as_ref()?.text.clone();
+            let pointer = pointer_field(&member.specs, &declarator.declarator, aliases)?;
+            fields.push(FieldReflection {
+                name,
+                ty: field_type_text(&member.specs, &declarator.declarator, pointer),
+                pointer,
+            });
+        }
+    }
+    Some(fields)
+}
+
+/// Whether a field is a pointer, resolving typedef chains.
+///
+/// `None` means the declared type is an array or function through an alias, so
+/// the field cannot be reflected as a value.
+fn pointer_field(
+    specs: &ast::DeclSpecs,
+    declarator: &ast::Declarator,
+    aliases: &HashMap<String, (ast::DeclSpecs, ast::Declarator)>,
+) -> Option<bool> {
+    let mut seen = Vec::new();
+    pointer_shape(specs, declarator, aliases, &mut seen)
+}
+
+fn pointer_shape(
+    specs: &ast::DeclSpecs,
+    declarator: &ast::Declarator,
+    aliases: &HashMap<String, (ast::DeclSpecs, ast::Declarator)>,
+    seen: &mut Vec<String>,
+) -> Option<bool> {
+    for derived in &declarator.derived {
+        match derived {
+            ast::DerivedDeclarator::Pointer(_) => return Some(true),
+            ast::DerivedDeclarator::Array(_) | ast::DerivedDeclarator::Function(_) => return None,
+        }
+    }
+    for specifier in &specs.type_specs {
+        let ast::TypeSpecifier::TypedefName(name) = specifier else {
+            continue;
+        };
+        if seen.contains(&name.text) {
+            return Some(false);
+        }
+        let Some((alias_specs, alias_declarator)) = aliases.get(&name.text) else {
+            return Some(false);
+        };
+        seen.push(name.text.clone());
+        return pointer_shape(alias_specs, alias_declarator, aliases, seen);
+    }
+    Some(false)
+}
+
+/// The field's type as the world matcher spells it.
+///
+/// A non-pointer field drops its value qualifiers: `const int` and `int` have
+/// one Debug impl between them, and the generated call takes the field's
+/// address as `const int *` anyway. A pointer field keeps its pointee
+/// qualifiers, because `const char *` and `char *` are different Debug impls,
+/// and drops only the qualifier on the outermost pointer itself, which does not
+/// change the pointed-to type. A tag used with its `struct`, `union`, or `enum`
+/// keyword is written as the bare name, which is the spelling the impl world
+/// stores. The result is then canonicalized, so `char *` becomes `char*`.
+fn field_type_text(specs: &ast::DeclSpecs, declarator: &ast::Declarator, pointer: bool) -> String {
+    let mut specs = specs.clone();
+    if !pointer {
+        specs.qualifiers.clear();
+    }
+    for specifier in &mut specs.type_specs {
+        match specifier {
+            ast::TypeSpecifier::Record(record) => {
+                if let Some(tag) = &record.tag {
+                    *specifier = ast::TypeSpecifier::TypedefName(tag.clone());
+                }
+            }
+            ast::TypeSpecifier::Enum(enumeration) => {
+                if let Some(tag) = &enumeration.tag {
+                    *specifier = ast::TypeSpecifier::TypedefName(tag.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut declarator = declarator.clone();
+    declarator.name = None;
+    if pointer
+        && let Some(ast::DerivedDeclarator::Pointer(outermost)) = declarator.derived.first_mut()
+    {
+        outermost.qualifiers.clear();
+    }
+    let type_name = ast::TypeName {
+        span: specs.span,
+        specs,
+        declarator: Some(declarator),
+    };
+    canonical_type_name(&crate::c::types::type_name_text(&type_name))
+}
+
+/// Bakes the owner and field tables the four reflection builtins read.
+///
+/// Every table entry is a static string or int, so a const fn's call needs no
+/// host round. A missing owner is fatal rather than an empty answer: a derived
+/// Debug that formatted nothing would look correct at run time.
+fn bake_field_reflection(source: &mut String, records: &[RecordReflection]) {
+    let owner_count = records.len();
+    let field_count: usize = records.iter().map(|record| record.fields.len()).sum();
+    let mut starts = Vec::with_capacity(owner_count + 1);
+    let mut owners = Vec::new();
+    let mut names = Vec::new();
+    let mut types = Vec::new();
+    let mut pointers = Vec::new();
+    starts.push(0usize);
+    for record in records {
+        owners.push(record.owner.clone());
+        for field in &record.fields {
+            names.push(field.name.clone());
+            types.push(field.ty.clone());
+            pointers.push(if field.pointer { "1" } else { "0" });
+        }
+        starts.push(names.len());
+    }
+    let owners = list_or_zero(&owners.iter().map(|name| c_string(name)).collect::<Vec<_>>());
+    let starts = list_or_zero(&starts.iter().map(usize::to_string).collect::<Vec<_>>());
+    let names = list_or_zero(&names.iter().map(|name| c_string(name)).collect::<Vec<_>>());
+    let types = list_or_zero(&types.iter().map(|ty| c_string(ty)).collect::<Vec<_>>());
+    let pointers = list_or_zero(
+        &pointers
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>(),
+    );
+    source.push_str(&format!(
+        "\
+static const char *__shy_probe_field_owners[{}] = {{ {owners} }};
+static int __shy_probe_field_starts[{}] = {{ {starts} }};
+static const char *__shy_probe_field_names[{}] = {{ {names} }};
+static const char *__shy_probe_field_types[{}] = {{ {types} }};
+static int __shy_probe_field_pointers[{}] = {{ {pointers} }};
+
+static int __shy_probe_streq(const char *left, const char *right) {{
+    int i = 0;
+    while (left[i] != 0 || right[i] != 0) {{
+        if (left[i] != right[i]) {{ return 0; }}
+        i = i + 1;
+    }}
+    return 1;
+}}
+
+static int __shy_probe_field_owner(const char *owner) {{
+    int i = 0;
+    while (i < {owner_count}) {{
+        if (__shy_probe_streq(owner, __shy_probe_field_owners[i])) {{ return i; }}
+        i = i + 1;
+    }}
+    __shy_probe_fatal(10, (int)owner, 0, 0);
+    return -1;
+}}
+
+int field_count(const char *owner) {{
+    int at = __shy_probe_field_owner(owner);
+    if (at < 0) {{ return -1; }}
+    return __shy_probe_field_starts[at + 1] - __shy_probe_field_starts[at];
+}}
+
+const char *field_name(const char *owner, int index) {{
+    int at = __shy_probe_field_owner(owner);
+    if (at < 0) {{ return 0; }}
+    if (index < 0 || index >= __shy_probe_field_starts[at + 1] - __shy_probe_field_starts[at]) {{ return 0; }}
+    return __shy_probe_field_names[__shy_probe_field_starts[at] + index];
+}}
+
+const char *field_type(const char *owner, int index) {{
+    int at = __shy_probe_field_owner(owner);
+    if (at < 0) {{ return 0; }}
+    if (index < 0 || index >= __shy_probe_field_starts[at + 1] - __shy_probe_field_starts[at]) {{ return 0; }}
+    return __shy_probe_field_types[__shy_probe_field_starts[at] + index];
+}}
+
+int field_is_pointer(const char *owner, int index) {{
+    int at = __shy_probe_field_owner(owner);
+    if (at < 0) {{ return -1; }}
+    if (index < 0 || index >= __shy_probe_field_starts[at + 1] - __shy_probe_field_starts[at]) {{ return -1; }}
+    return __shy_probe_field_pointers[__shy_probe_field_starts[at] + index];
+}}
+",
+        owner_count.max(1),
+        owner_count + 1,
+        field_count.max(1),
+        field_count.max(1),
+        field_count.max(1),
+    ));
+}
+
 /// The two host queries use the existing five-word mailbox. Ops 6 and 7 carry
 /// owner/trait pointers and the serialized round world, followed by its length.
 const WORLD_QUERY_BODY: &str = r#"
@@ -1266,6 +1622,10 @@ fn builtin_names(caller: &str, names: &[String], needs: &mut BuiltinNeeds) -> Op
             "implements" => needs.implements = true,
             "require_impl" => needs.require_impl = true,
             "try_provide_impl" => needs.try_provide_impl = true,
+            "field_count" => needs.field_count = true,
+            "field_name" => needs.field_name = true,
+            "field_type" => needs.field_type = true,
+            "field_is_pointer" => needs.field_is_pointer = true,
             _ => {}
         }
     }
@@ -1513,6 +1873,11 @@ pub fn build(parsed: &mut ParseOutput, layout: Layout) -> Outcome {
     // requests merely because an unused helper is present.
     unresolved_bodies |= guard_unresolved_bodies(&mut items, &parsed.deferred_body_functions);
     let try_runs: Vec<&TrySite> = parsed.try_sites.iter().collect();
+    let records = if needs.reflects_fields() {
+        reflect_records(&items)
+    } else {
+        Vec::new()
+    };
     match generated_items(
         &baked,
         &baked_text,
@@ -1522,6 +1887,7 @@ pub fn build(parsed: &mut ParseOutput, layout: Layout) -> Outcome {
         unresolved_bodies,
         &try_runs,
         &parsed.world,
+        &records,
         parsed.requests[0].site,
         layout,
     ) {

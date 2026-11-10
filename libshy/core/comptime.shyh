@@ -113,4 +113,15 @@ int require_impl(const char *owner, const char *trait_name);
 #[const_fn_token_builtin]
 int try_provide_impl(const char *owner, const char *trait_name);
 
+/* Named fields of a non-generic struct, in declaration order. These queries
+   run only at compile time; an unknown type or unsupported field is an error. */
+#[const_fn_token_builtin]
+int field_count(const char *owner);
+#[const_fn_token_builtin]
+const char *field_name(const char *owner, int index);
+#[const_fn_token_builtin]
+const char *field_type(const char *owner, int index);
+#[const_fn_token_builtin]
+int field_is_pointer(const char *owner, int index);
+
 #endif

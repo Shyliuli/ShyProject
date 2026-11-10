@@ -210,11 +210,12 @@ impl super::Lowerer {
                 self.types.kind(ty),
                 TypeKind::Enum(_) | TypeKind::PayloadEnum(_)
             )
-            || self.types.is_arithmetic(ty);
+            || self.types.is_arithmetic(ty)
+            || matches!(self.types.kind(ty), TypeKind::Pointer { .. });
         if !owned {
             return Err(Diagnostic::new(
                 block.self_type.span,
-                "impl target must be a struct, union, enum, or arithmetic type",
+                "impl target must be a struct, union, enum, arithmetic type, or pointer",
             ));
         }
         let name = self.impl_name(&block.self_type, ty)?;
@@ -995,6 +996,9 @@ impl super::Lowerer {
     /// A record or enum is named by the tag the user wrote; an arithmetic type
     /// has no tag, so its canonical spelling (`int`, `unsigned long`) is used.
     fn impl_name(&self, type_name: &ast::TypeName, ty: TypeId) -> Result<String, Diagnostic> {
+        if matches!(self.types.kind(ty), TypeKind::Pointer { .. }) {
+            return Ok(crate::c::types::type_name_text(type_name));
+        }
         if type_name.declarator.is_some() {
             return Err(Diagnostic::new(
                 type_name.span,

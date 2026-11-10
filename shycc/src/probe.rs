@@ -104,6 +104,9 @@ const HOST_OP_UNRESOLVED_BODY: u32 = 8;
 /// answer 1. The driver keeps only the earliest offer per pair.
 #[cfg(feature = "constfn-probe")]
 const HOST_OP_PROVIDE_IMPL: u32 = 9;
+/// op 10: reject a field query for an unknown or unsupported struct.
+#[cfg(feature = "constfn-probe")]
+const HOST_OP_FIELD_REFLECTION_FAILURE: u32 = 10;
 /// The highest `TokenKind` a committed token stream may carry: the seven kinds
 /// the compiler's lexer declares (ident, number, string, char, punct, newline,
 /// eof).
@@ -722,9 +725,9 @@ fn answer_try(
         match query.op {
             HOST_OP_IMPLEMENTS | HOST_OP_DECLARED => answer_world_query(&query, child),
             HOST_OP_PROVIDE_IMPL => answer_provide_impl(&query, child, provided),
-            HOST_OP_UNRESOLVED_BODY | HOST_OP_TOKEN_ALLOCATION_FAILURE => {
-                fatal_host_request(&query, child)
-            }
+            HOST_OP_UNRESOLVED_BODY
+            | HOST_OP_TOKEN_ALLOCATION_FAILURE
+            | HOST_OP_FIELD_REFLECTION_FAILURE => fatal_host_request(&query, child),
             op => anyhow::bail!(
                 "host op {HOST_OP_TRY}: a try_run child cannot make host request {op}"
             ),
@@ -746,6 +749,12 @@ fn fatal_host_request(call: &HostCall, emu: &Emu) -> Result<Vec<u8>> {
             let name = query_name(emu, call.args[0])?;
             format!(
                 "function '{name}' still contains an unresolved const fn syntax expansion; no answer was committed"
+            )
+        }
+        HOST_OP_FIELD_REFLECTION_FAILURE => {
+            let owner = query_name(emu, call.args[0])?;
+            format!(
+                "field reflection requires a non-generic struct with named scalar fields; '{owner}' is unknown or unsupported"
             )
         }
         HOST_OP_TOKEN_ALLOCATION_FAILURE => {
@@ -800,9 +809,9 @@ pub fn answer_host_request(
         HOST_OP_TRY => answer_try(&call, emu, provided),
         HOST_OP_IMPLEMENTS | HOST_OP_DECLARED => answer_world_query(&call, emu),
         HOST_OP_PROVIDE_IMPL => answer_provide_impl(&call, emu, provided),
-        HOST_OP_UNRESOLVED_BODY | HOST_OP_TOKEN_ALLOCATION_FAILURE => {
-            fatal_host_request(&call, emu)
-        }
+        HOST_OP_UNRESOLVED_BODY
+        | HOST_OP_TOKEN_ALLOCATION_FAILURE
+        | HOST_OP_FIELD_REFLECTION_FAILURE => fatal_host_request(&call, emu),
         op => bail!("unsupported host request op {op}"),
     }
 }

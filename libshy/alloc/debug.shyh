@@ -2,6 +2,8 @@
 #define SHY_ALLOC_DEBUG_SHYH
 
 #include <alloc/string.shyh>
+#include <core/comptime.shyh>
+#include <stdint.h>
 
 /* Rust-style Debug rendering into a String: integers are decimal, characters
    are single quoted, strings are quoted and escaped.
@@ -106,6 +108,115 @@ impl Debug for String {
         let mut inner = Debug::from<Str>();
         return inner.debug(&value.view, out);
     }
+}
+
+/* A C string is quoted and escaped just like Str; NULL prints as null. */
+fn fmt_debug_cstr(String *out, const char *text) -> int {
+    if (text == 0) {
+        out.push_cstr("null");
+        return 4;
+    }
+    Str view = Str::from_cstr(text);
+    let mut inner = Debug::from<Str>();
+    return inner.debug(&view, out);
+}
+
+impl Debug for char * {
+    fn debug(const self *value, String *out) -> int {
+        return fmt_debug_cstr(out, *value);
+    }
+}
+
+impl Debug for const char * {
+    fn debug(const self *value, String *out) -> int {
+        return fmt_debug_cstr(out, *value);
+    }
+}
+
+/* Like argv, the array must end with a NULL pointer. */
+impl Debug for char ** {
+    fn debug(const self *value, String *out) -> int {
+        if (*value == 0) {
+            out.push_cstr("null");
+            return 4;
+        }
+        int start = out.len();
+        fmt_putc(out, '[');
+        for (int i = 0; (*value)[i] != 0; i++) {
+            if (i > 0) {
+                out.push_cstr(", ");
+            }
+            fmt_debug_cstr(out, (*value)[i]);
+        }
+        fmt_putc(out, ']');
+        return out.len() - start;
+    }
+}
+
+/* Other pointers are addresses; their pointees are never read. */
+impl Debug for void * {
+    fn debug(const self *value, String *out) -> int {
+        uintptr_t address = (uintptr_t)*value;
+        const char *digits = "0123456789abcdef";
+        char reversed[2 * sizeof(uintptr_t)];
+        int count = 0;
+        do {
+            reversed[count] = digits[address & 15];
+            count++;
+            address = address >> 4;
+        } while (address != 0);
+        int start = out.len();
+        out.push_cstr("0x");
+        while (count > 0) {
+            count--;
+            fmt_putc(out, reversed[count]);
+        }
+        return out.len() - start;
+    }
+}
+
+/* Generates an ordinary Debug impl, using each field's Debug implementation. */
+const fn derive_debug(Tokens input) -> Tokens {
+    const char *owner = tokens_text(input);
+    if (try_provide_impl(owner, "Debug") == 0) {
+        return tokens_from_text("");
+    }
+    int count = field_count(owner);
+    let mut text = String::new();
+    text.push_cstr("impl Debug for ");
+    text.push_cstr(owner);
+    text.push_cstr(" { fn debug(const self *value, String *out) -> int { int start = out.len(); out.push_cstr(\"");
+    text.push_cstr(owner);
+    text.push_cstr(" {\");");
+    for (int i = 0; i < count; i++) {
+        const char *name = field_name(owner, i);
+        const char *type = field_type(owner, i);
+        int pointer = field_is_pointer(owner, i) && implements(type, "Debug") == 0;
+        if (pointer == 0) {
+            require_impl(type, "Debug");
+        }
+        text.push_cstr("out.push_cstr(\"");
+        text.push_cstr(i == 0 ? " " : ", ");
+        text.push_cstr(name);
+        text.push_cstr(": \"); { let mut field = Debug::from<");
+        text.push_cstr(pointer ? "void *" : type);
+        text.push_cstr(">(); ");
+        if (pointer) {
+            text.push_cstr("void *address = (void *)value->");
+            text.push_cstr(name);
+            text.push_cstr("; field.debug(&address, out);");
+        } else {
+            text.push_cstr("field.debug(&value->");
+            text.push_cstr(name);
+            text.push_cstr(", out);");
+        }
+        text.push_cstr(" }");
+    }
+    text.push_cstr(count == 0 ? "out.push_cstr(\"}\");" : "out.push_cstr(\" }\");");
+    text.push_cstr("return out.len() - start; } }");
+    Tokens result = tokens_from_text(text.as_cstr());
+    text.free();
+    return result;
 }
 
 #endif

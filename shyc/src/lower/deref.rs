@@ -6,6 +6,27 @@ use std::collections::HashSet;
 
 pub(super) const MAX_AUTO_DEREF: usize = 8;
 
+/// The type a generic method was found on, and the `Deref` projections a call
+/// must apply before reaching it.
+pub(super) struct GenericMethodPath {
+    pub owner: TypeId,
+    pub steps: Vec<DerefStep>,
+}
+
+/// What one receiver lookup found at a type.
+enum MethodLookup {
+    Concrete(MethodInfo),
+    Generic,
+}
+
+/// One receiver walk result: where the method was found and the autoderef it
+/// took to get there.
+struct MethodPath {
+    owner: TypeId,
+    found: MethodLookup,
+    steps: Vec<DerefStep>,
+}
+
 impl Lowerer {
     pub(super) fn record_paths(
         &mut self,
@@ -185,52 +206,128 @@ impl Lowerer {
         receiver: TypeId,
         name: &ast::Name,
     ) -> Result<Option<AutoMethod>, Diagnostic> {
-        let found = self.find_method_path(receiver, name, false)?;
-        let Some(found) = found else {
+        let Some(path) = self.find_method_path(receiver, name, false)? else {
             return Ok(None);
         };
-        if !found.steps.is_empty() && self.method_needs_mut_receiver(&found.method) {
+        let MethodLookup::Concrete(method) = path.found else {
+            return Ok(None);
+        };
+        if !path.steps.is_empty() && self.method_needs_mut_receiver(&method) {
             if let Some(mutable) = self.find_method_path(receiver, name, true)? {
-                return Ok(Some(mutable));
+                if let MethodLookup::Concrete(method) = mutable.found {
+                    return Ok(Some(AutoMethod {
+                        method,
+                        steps: mutable.steps,
+                    }));
+                }
             }
             return Err(Diagnostic::new(
                 name.span,
                 format!("method '{}' needs a DerefMut implementation", name.text),
             ));
         }
-        Ok(Some(found))
+        Ok(Some(AutoMethod {
+            method,
+            steps: path.steps,
+        }))
     }
 
+    /// The generic method found from `receiver`, with the autoderef a call must
+    /// apply. `None` when the first matching method is concrete.
+    pub(super) fn generic_method_path(
+        &mut self,
+        receiver: TypeId,
+        name: &ast::Name,
+    ) -> Result<Option<GenericMethodPath>, Diagnostic> {
+        let Some(path) = self.find_method_path(receiver, name, false)? else {
+            return Ok(None);
+        };
+        if let MethodLookup::Concrete(_) = path.found {
+            return Ok(None);
+        }
+        if !path.steps.is_empty() && self.generic_method_needs_mut_receiver(path.owner, name)? {
+            if let Some(mutable) = self.find_method_path(receiver, name, true)?
+                && let MethodLookup::Generic = mutable.found
+            {
+                return Ok(Some(GenericMethodPath {
+                    owner: mutable.owner,
+                    steps: mutable.steps,
+                }));
+            }
+            return Err(Diagnostic::new(
+                name.span,
+                format!("method '{}' needs a DerefMut implementation", name.text),
+            ));
+        }
+        Ok(Some(GenericMethodPath {
+            owner: path.owner,
+            steps: path.steps,
+        }))
+    }
+
+    /// The first method `name` a receiver reaches.
+    ///
+    /// The exact type is asked first, so a pointer's own impl wins over its
+    /// pointee's and an unrelated pointer impl cannot hide a pointee method.
+    /// When the type has no such method, one autoderef step is taken: a raw
+    /// pointer moves to its pointee, and a record moves through its `Deref`
+    /// (or `DerefMut`) implementation. The walk is bounded and stops if a type
+    /// repeats.
     fn find_method_path(
         &mut self,
         receiver: TypeId,
         name: &ast::Name,
         mutable: bool,
-    ) -> Result<Option<AutoMethod>, Diagnostic> {
-        let mut current = receiver;
-        let mut steps = Vec::new();
+    ) -> Result<Option<MethodPath>, Diagnostic> {
         let mut seen = HashSet::new();
-        for _ in 0..MAX_AUTO_DEREF {
-            let Some(owner) = self.receiver_of(current) else {
-                break;
-            };
-            if !seen.insert(owner) {
-                break;
-            }
-            if let Some(method) = self.method_of(owner, name)? {
-                return Ok(Some(AutoMethod { method, steps }));
-            }
-            // Only a record can carry a Deref implementation to a further owner.
-            let Some(record) = self.record_of(current) else {
-                break;
-            };
-            let Some(step) = self.deref_step(record, mutable, name.span)? else {
-                break;
-            };
-            current = step.target;
-            steps.push(step);
+        self.find_method_path_at(receiver, name, mutable, &mut seen)
+    }
+
+    fn find_method_path_at(
+        &mut self,
+        current: TypeId,
+        name: &ast::Name,
+        mutable: bool,
+        seen: &mut HashSet<TypeId>,
+    ) -> Result<Option<MethodPath>, Diagnostic> {
+        if seen.len() >= MAX_AUTO_DEREF || !seen.insert(current) {
+            return Ok(None);
         }
-        Ok(None)
+        if let Some(method) = self.method_of(current, name)? {
+            return Ok(Some(MethodPath {
+                owner: current,
+                found: MethodLookup::Concrete(method),
+                steps: Vec::new(),
+            }));
+        }
+        if self.has_generic_method(current, &name.text)? {
+            return Ok(Some(MethodPath {
+                owner: current,
+                found: MethodLookup::Generic,
+                steps: Vec::new(),
+            }));
+        }
+        // A raw pointer dereferences to its pointee. Only a record can carry a
+        // `Deref` implementation to a further owner.
+        let next = match self.pointee(current) {
+            Some(pointee) => pointee.ty,
+            None => {
+                let Some(record) = self.record_of(current) else {
+                    return Ok(None);
+                };
+                let Some(step) = self.deref_step(record, mutable, name.span)? else {
+                    return Ok(None);
+                };
+                let Some(mut path) =
+                    self.find_method_path_at(step.target, name, mutable, seen)?
+                else {
+                    return Ok(None);
+                };
+                path.steps.insert(0, step);
+                return Ok(Some(path));
+            }
+        };
+        self.find_method_path_at(next, name, mutable, seen)
     }
 
     fn method_needs_mut_receiver(&self, method: &MethodInfo) -> bool {
@@ -241,5 +338,23 @@ impl Lowerer {
             .first()
             .and_then(|&receiver| self.pointee(receiver))
             .is_some_and(|pointee| !pointee.qualifiers.is_const)
+    }
+
+    /// Whether a generic method's own declaration takes a writable `self`.
+    fn generic_method_needs_mut_receiver(
+        &mut self,
+        owner: TypeId,
+        name: &ast::Name,
+    ) -> Result<bool, Diagnostic> {
+        let template = self.generic_method_template(owner, name)?;
+        let Some(ast::DerivedDeclarator::Function(function)) =
+            template.decl.declarator.derived.first()
+        else {
+            return Ok(false);
+        };
+        let Some(receiver) = function.params.first() else {
+            return Ok(false);
+        };
+        Ok(!receiver.specs.qualifiers.contains(&ast::Qualifier::Const))
     }
 }

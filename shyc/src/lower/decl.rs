@@ -742,6 +742,10 @@ impl Lowerer {
         if let Some(GlobalRef::Function(index)) = self.global_ref(name) {
             return self.function(index).symbol.clone();
         }
+        // Entry points keep their ABI names even when `fn` defaults to local.
+        if matches!(name, "main" | "_start") && storage != Some(ast::StorageClass::Static) {
+            return name.to_string();
+        }
         if self.file_local(storage, is_shy_fn, is_pub, defined) {
             self.internal_symbol(name)
         } else {

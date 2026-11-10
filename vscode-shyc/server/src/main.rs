@@ -1084,6 +1084,15 @@ fn symbol_at(analysis: &Analysis, offset: usize) -> Option<&index::Sym> {
     }
     let (start, end) = text::word_span(&analysis.text, offset)?;
     let name = &analysis.text[start..end];
+    if let Some(id) = analysis
+        .index
+        .visible_symbols(analysis.root, offset)
+        .into_iter()
+        .rev()
+        .find(|&id| analysis.index.symbol(id).name == name)
+    {
+        return Some(analysis.index.symbol(id));
+    }
     analysis
         .index
         .lookup(name)
@@ -1506,7 +1515,12 @@ fn completions(analysis: &Analysis, offset: usize) -> Vec<CompletionItem> {
 }
 
 fn receiver_type(analysis: &Analysis, name: &str, offset: usize) -> Option<String> {
-    for id in analysis.index.visible_symbols(analysis.root, offset) {
+    for id in analysis
+        .index
+        .visible_symbols(analysis.root, offset)
+        .into_iter()
+        .rev()
+    {
         let symbol = analysis.index.symbol(id);
         if symbol.name == name {
             return symbol.type_text.clone();

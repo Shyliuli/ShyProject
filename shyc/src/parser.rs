@@ -381,6 +381,19 @@ fn impl_declaration(block: &ast::ImplBlock) -> Option<ImplDecl> {
     if owner.is_none() {
         owner = builtin.spelling();
     }
+    if block
+        .self_type
+        .declarator
+        .as_ref()
+        .is_some_and(|declarator| {
+            declarator
+                .derived
+                .iter()
+                .any(|derived| matches!(derived, ast::DerivedDeclarator::Pointer(_)))
+        })
+    {
+        owner = Some(type_name_text(&block.self_type));
+    }
     let bounds = block
         .generics
         .iter()
@@ -471,6 +484,14 @@ fn integer_value(text: &str) -> Option<i64> {
 
 /// Best-effort spelling of a type name, used only as an index key.
 fn type_name_text(name: &ast::TypeName) -> String {
+    if name.declarator.as_ref().is_some_and(|declarator| {
+        declarator
+            .derived
+            .iter()
+            .any(|derived| matches!(derived, ast::DerivedDeclarator::Pointer(_)))
+    }) {
+        return crate::probe::canonical_type_name(&crate::c::types::type_name_text(name));
+    }
     let mut parts = Vec::new();
     for specifier in &name.specs.type_specs {
         parts.push(match specifier {

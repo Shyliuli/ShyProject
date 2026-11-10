@@ -72,6 +72,9 @@ pub struct Index {
     pub by_name: HashMap<String, Vec<usize>>,
     pub refs: Vec<Reference>,
     ref_spans: HashSet<(FileId, usize, usize)>,
+    /// Generic parameters of the impl that declared a method, by method
+    /// symbol. Used to replace `T` with the receiver's actual argument.
+    method_generics: HashMap<usize, Vec<String>>,
 }
 
 impl Index {
@@ -257,7 +260,7 @@ impl Collector<'_> {
             self.add_ref(name, target);
             return;
         }
-        if let Some(target) = self.pick(name, value_kinds) {
+        if let Some(target) = self.pick(name, file_value_kind) {
             self.add_ref(name, target);
         }
     }
@@ -302,7 +305,9 @@ impl Collector<'_> {
             })
             .collect();
         if candidates.is_empty() {
-            self.add_value_ref(name);
+            if container.is_none() {
+                self.add_value_ref(name);
+            }
             return;
         }
 
@@ -314,6 +319,12 @@ impl Collector<'_> {
                     .is_some_and(|owner| self.index.symbols[id].container.as_deref() == Some(owner))
             })
             .collect();
+        // A known receiver restricts the member to that owner. Falling back to
+        // a same-named field or method of another type would bind the wrong
+        // declaration, so an owner mismatch means no reference.
+        if container.is_some() && owned.is_empty() {
+            return;
+        }
         let pool = if owned.is_empty() { candidates } else { owned };
 
         let target = if call {
@@ -325,7 +336,6 @@ impl Collector<'_> {
                         .copied()
                         .find(|&id| self.index.symbols[id].kind == SymKind::Variant)
                 })
-                .or_else(|| pool.first().copied())
         } else {
             pool.iter()
                 .copied()
@@ -335,7 +345,6 @@ impl Collector<'_> {
                         .copied()
                         .find(|&id| self.index.symbols[id].kind == SymKind::Variant)
                 })
-                .or_else(|| pool.first().copied())
         };
 
         if let Some(target) = target {
@@ -344,11 +353,11 @@ impl Collector<'_> {
     }
 
     fn pick(&self, name: &Name, accepted: fn(SymKind) -> bool) -> Option<usize> {
-        let ids = self.index.lookup(&name.text);
-        ids.iter()
+        self.index
+            .lookup(&name.text)
+            .iter()
             .copied()
             .find(|&id| accepted(self.index.symbols[id].kind))
-            .or_else(|| ids.first().copied())
     }
 
     // -- definitions ----------------------------------------------------
@@ -357,7 +366,9 @@ impl Collector<'_> {
         for item in &unit.items {
             match item {
                 ast::Item::Decl(declaration) => self.collect_declaration(declaration),
-                ast::Item::Function(function) => self.collect_function(function, None),
+                ast::Item::Function(function) => {
+                    self.collect_function(function, None);
+                }
                 ast::Item::Impl(block) => self.collect_impl(block),
                 ast::Item::Trait(declaration) => self.collect_trait(declaration),
                 ast::Item::Use(_) => {}
@@ -416,40 +427,58 @@ impl Collector<'_> {
         }
     }
 
-    fn collect_function(&mut self, function: &ast::FunctionDecl, container: Option<&str>) {
+    fn collect_function(
+        &mut self,
+        function: &ast::FunctionDecl,
+        container: Option<&str>,
+    ) -> Option<usize> {
         let kind = if container.is_some() {
             SymKind::Method
         } else {
             SymKind::Function
         };
-        let Some(name) = &function.declarator.name else {
-            return;
-        };
+        let name = function.declarator.name.as_ref()?;
         self.collect_function_parts(
             &function.specs,
             &function.declarator,
             container,
             kind,
             name.span,
-        );
+        )
     }
 
     fn collect_impl(&mut self, block: &ast::ImplBlock) {
         let container = base_type_name(&self.text(block.self_type.span));
+        let generics: Vec<String> = block
+            .generics
+            .iter()
+            .map(|parameter| parameter.name.text.clone())
+            .collect();
         for method in &block.methods {
-            self.collect_function(method, Some(&container));
+            let id = self.collect_function(method, Some(&container));
+            self.record_method_generics(id, &generics);
         }
         for prototype in &block.prototypes {
             let Some(name) = &prototype.declarator.name else {
                 continue;
             };
-            self.collect_function_parts(
+            let id = self.collect_function_parts(
                 &prototype.specs,
                 &prototype.declarator,
                 Some(&container),
                 SymKind::Method,
                 name.span,
             );
+            self.record_method_generics(id, &generics);
+        }
+    }
+
+    fn record_method_generics(&mut self, id: Option<usize>, generics: &[String]) {
+        if generics.is_empty() {
+            return;
+        }
+        if let Some(id) = id {
+            self.index.method_generics.insert(id, generics.to_vec());
         }
     }
 
@@ -485,10 +514,8 @@ impl Collector<'_> {
         container: Option<&str>,
         kind: SymKind,
         span: Span,
-    ) {
-        let Some(name) = &declarator.name else {
-            return;
-        };
+    ) -> Option<usize> {
+        let name = declarator.name.as_ref()?;
         self.collect_specs(specs, None);
         if let Some(ast::DerivedDeclarator::Function(function)) = declarator.derived.first() {
             for parameter in &function.params {
@@ -501,7 +528,7 @@ impl Collector<'_> {
             self.signature(specs, declarator)
         };
         let detail = format!("{} {}({})", return_type, name.text, params);
-        self.index.push(Sym {
+        Some(self.index.push(Sym {
             name: name.text.clone(),
             kind,
             span,
@@ -509,7 +536,7 @@ impl Collector<'_> {
             type_text: Some(return_type),
             container: container.map(str::to_string),
             scope: None,
-        });
+        }))
     }
 
     fn collect_specs(&mut self, specs: &ast::DeclSpecs, hint: Option<&str>) {
@@ -1236,10 +1263,15 @@ impl Collector<'_> {
                 .scoped(&name.text)
                 .and_then(|id| self.index.symbols[id].type_text.clone())
                 .or_else(|| {
+                    // Only a file-scope value can stand behind a name that no
+                    // visible frame declared. A same-named parameter or field
+                    // from an included file is not this name.
                     self.index
                         .lookup(&name.text)
                         .iter()
-                        .find_map(|&id| self.index.symbols[id].type_text.clone())
+                        .copied()
+                        .find(|&id| file_value_kind(self.index.symbols[id].kind))
+                        .and_then(|id| self.index.symbols[id].type_text.clone())
                 }),
             ast::Expr::Unary {
                 op: ast::UnaryOp::Dereference,
@@ -1272,10 +1304,22 @@ impl Collector<'_> {
                             self.index.symbols[id].container.as_deref() == Some(owner)
                         })
                     })
-                    .or_else(|| candidates.first().copied())?;
+                    .or_else(|| {
+                        container
+                            .is_none()
+                            .then(|| candidates.first().copied())
+                            .flatten()
+                    })?;
                 self.index.symbols[id].type_text.clone()
             }
-            ast::Expr::Call { callee, .. } => self.infer_expr_type(callee),
+            ast::Expr::Call { callee, .. } => {
+                if let ast::Expr::Member { object, name, .. } = callee.as_ref() {
+                    self.infer_method_call_type(object, name)
+                        .or_else(|| self.infer_expr_type(callee))
+                } else {
+                    self.infer_expr_type(callee)
+                }
+            }
             ast::Expr::ScopedName {
                 qualifier, name, ..
             }
@@ -1309,6 +1353,34 @@ impl Collector<'_> {
             ast::Expr::String(_) => Some("char *".to_string()),
             _ => None,
         }
+    }
+
+    /// The return type of one `receiver.method(...)` call.
+    ///
+    /// A method symbol stores the return type as written in its impl, so
+    /// `Result<T, E>::unwrap` stores `T`. The receiver says what `T` and `E`
+    /// are; without that, a local declared from `unwrap()` would keep the
+    /// template parameter and its members could not be completed.
+    fn infer_method_call_type(&self, object: &ast::Expr, name: &Name) -> Option<String> {
+        let receiver = self.infer_expr_type(object)?;
+        let container = base_type_name(&receiver);
+        let id = self
+            .index
+            .lookup(&name.text)
+            .iter()
+            .copied()
+            .find(|&id| {
+                self.index.symbols[id].kind == SymKind::Method
+                    && self.index.symbols[id].container.as_deref() == Some(container.as_str())
+            })?;
+        let return_type = self.index.symbols[id].type_text.clone()?;
+        let generics = self
+            .index
+            .method_generics
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        Some(substitute_method_return(&return_type, &receiver, generics))
     }
 
     fn type_of(&self, specs: &ast::DeclSpecs, declarator: &ast::Declarator) -> String {
@@ -1540,18 +1612,84 @@ fn type_kinds(kind: SymKind) -> bool {
     is_type_kind(kind)
 }
 
-fn value_kinds(kind: SymKind) -> bool {
+/// A name no visible frame declares can only denote a file-scope value.
+/// Parameters, locals, and fields belong to whatever declaration introduced
+/// them, so a same-named one from an included file is not this name.
+fn file_value_kind(kind: SymKind) -> bool {
     matches!(
         kind,
-        SymKind::Function
-            | SymKind::Method
-            | SymKind::Global
-            | SymKind::Local
-            | SymKind::Param
-            | SymKind::Variant
-            | SymKind::Label
-            | SymKind::ConstParam
+        SymKind::Function | SymKind::Global | SymKind::Variant
     )
+}
+
+/// Rebuild a method return type from the receiver's actual type arguments.
+fn substitute_method_return(return_type: &str, receiver: &str, generics: &[String]) -> String {
+    let mut bindings = HashMap::new();
+    // The index spells the type keyword `self` like the source does.
+    bindings.insert("Self".to_string(), receiver.to_string());
+    bindings.insert("self".to_string(), receiver.to_string());
+    if let Some(arguments) = generic_arguments(receiver) {
+        for (name, argument) in generics.iter().zip(arguments) {
+            bindings.insert(name.clone(), argument);
+        }
+    }
+    substitute_identifiers(return_type, &bindings)
+}
+
+/// The top-level arguments of `Name<A, B>`, or `None` when the text has none.
+fn generic_arguments(text: &str) -> Option<Vec<String>> {
+    let open = text.find('<')?;
+    let close = text.rfind('>')?;
+    if close <= open {
+        return None;
+    }
+    let inner = &text[open + 1..close];
+    let mut arguments = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (at, character) in inner.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => {
+                arguments.push(inner[start..at].trim().to_string());
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    arguments.push(inner[start..].trim().to_string());
+    Some(arguments)
+}
+
+/// Replace whole identifiers in a type spelling, leaving larger names alone.
+fn substitute_identifiers(text: &str, bindings: &HashMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut word = String::new();
+    for character in text.chars() {
+        if character.is_alphanumeric() || character == '_' {
+            word.push(character);
+        } else {
+            push_identifier(&mut out, &mut word, bindings);
+            out.push(character);
+        }
+    }
+    push_identifier(&mut out, &mut word, bindings);
+    out
+}
+
+fn push_identifier(out: &mut String, word: &mut String, bindings: &HashMap<String, String>) {
+    if word.is_empty() {
+        return;
+    }
+    match bindings.get(word.as_str()) {
+        Some(value) => out.push_str(value),
+        None => out.push_str(word),
+    }
+    word.clear();
 }
 
 fn builtin_text(builtin: ast::BuiltinType) -> &'static str {

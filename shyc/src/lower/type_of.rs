@@ -739,20 +739,22 @@ impl Lowerer {
         let (record, name, skip_params) = match callee {
             ast::Expr::Member { object, name, .. } => {
                 let object_ty = self.type_of(object, local)?;
-                let Some(record) = self.receiver_of(object_ty) else {
+                let Some(path) = self.generic_method_path(object_ty, name)? else {
                     return Ok(None);
                 };
-                (record, name, 1)
+                (path.owner, name, 1)
             }
             ast::Expr::ScopedName {
                 qualifier, name, ..
             } => {
-                let Some(ty) = self.lookup_named_type(&qualifier.text) else {
+                let Some(record) = self.lookup_named_type(&qualifier.text) else {
                     return Ok(None);
                 };
-                let Some(record) = self.receiver_of(ty) else {
+                if self.method_of(record, name)?.is_some()
+                    || !self.has_generic_method(record, &name.text)?
+                {
                     return Ok(None);
-                };
+                }
                 (record, name, 0)
             }
             ast::Expr::GenericScopedName {
@@ -762,18 +764,13 @@ impl Lowerer {
                 ..
             } => {
                 let ty = self.generic_qualifier_type(qualifier, type_args)?;
-                let Some(record) = self.receiver_of(ty) else {
+                if self.method_of(ty, name)?.is_some() || !self.has_generic_method(ty, &name.text)? {
                     return Ok(None);
-                };
-                (record, name, 0)
+                }
+                (ty, name, 0)
             }
             _ => return Ok(None),
         };
-        if self.method_with_autoderef(record, name)?.is_some()
-            || !self.has_generic_method(record, &name.text)?
-        {
-            return Ok(None);
-        }
         let mut arguments = Vec::with_capacity(args.len());
         for argument in args {
             let ty = self.type_of(argument, local)?;
@@ -800,19 +797,16 @@ impl Lowerer {
             ast::Expr::Name(name) => self.instantiate_generic_function(name, type_args),
             ast::Expr::Member { object, name, .. } => {
                 let object_ty = self.type_of(object, local)?;
-                let Some(record) = self.receiver_of(object_ty) else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "method call needs a struct, union, pointer, or scalar receiver",
-                    ));
-                };
-                if self.method_with_autoderef(record, name)?.is_some() {
+                if self.method_with_autoderef(object_ty, name)?.is_some() {
                     return Err(Diagnostic::new(
                         span,
                         format!("method '{}' is not generic", name.text),
                     ));
                 }
-                self.instantiate_generic_method(record, name, type_args)
+                let owner = self
+                    .generic_method_path(object_ty, name)?
+                    .map_or(object_ty, |path| path.owner);
+                self.instantiate_generic_method(owner, name, type_args)
             }
             ast::Expr::ScopedName {
                 qualifier, name, ..

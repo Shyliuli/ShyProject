@@ -1195,24 +1195,6 @@ impl Lowerer {
         Some(ty)
     }
 
-    /// The type a method receiver denotes, looking through any pointer depth.
-    ///
-    /// A method may be implemented for a record, an enum, or an arithmetic
-    /// scalar, so `impl Debug for int` makes an integer the owner of its
-    /// methods just like a struct does.
-    pub(super) fn receiver_of(&self, mut ty: TypeId) -> Option<TypeId> {
-        while let TypeKind::Pointer { pointee } = self.types.kind(ty) {
-            ty = pointee.ty;
-        }
-        let owned = self.types.is_record(ty)
-            || matches!(
-                self.types.kind(ty),
-                TypeKind::Enum(_) | TypeKind::PayloadEnum(_)
-            )
-            || self.types.is_arithmetic(ty);
-        owned.then_some(ty)
-    }
-
     // -----------------------------------------------------------------------
     // Literals
     // -----------------------------------------------------------------------

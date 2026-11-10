@@ -121,4 +121,10 @@ const fn scanln_generation(int count) -> Tokens {
 
 scanln_generation(8);
 
+const fn eprintln(Tokens input) -> Tokens {
+    return tokens_concat(
+        tokens_concat(tokens_from_text("writeln!(stderr_writer(), "), input),
+        tokens_from_text(")"));
+}
+
 #endif
