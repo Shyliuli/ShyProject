@@ -652,6 +652,10 @@ the methods the header provides.
 
 #### Bare variant names
 
+A variant may be named through its enum type for every enum, whether or not any
+variant carries a payload. For an ordinary C-style enum, `Color::Red` and the
+unscoped enumerator `Red` denote the same value.
+
 A variant name on its own is the value when the variant has no payload, and its
 tag when it has one, because a payload variant cannot be built without one:
 `value.tag != Option<int>::Some` compares against the tag, while

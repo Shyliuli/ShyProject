@@ -663,7 +663,7 @@ impl Lowerer {
             .ok_or_else(|| Diagnostic::new(span, "payload enum has no underlying type"))
     }
 
-    /// The payload enum variant called `name`, for an already resolved type.
+    /// The enum variant called `name`, for an already resolved type.
     pub(super) fn variant_of(&self, ty: TypeId, name: &ast::Name) -> Option<ScopedVariant> {
         let variant = self.types.enum_variant(ty, &name.text)?;
         Some(ScopedVariant {

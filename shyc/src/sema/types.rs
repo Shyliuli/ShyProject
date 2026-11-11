@@ -750,10 +750,10 @@ impl TypeStore {
         self.enum_info(ty).map(|info| info.underlying)
     }
 
-    /// The payload enum variant called `name`, if `ty` is a payload enum.
+    /// The enum variant called `name`, for both plain and payload enums.
     pub fn enum_variant(&self, ty: TypeId, name: &str) -> Option<&EnumVariant> {
         match self.kind(ty) {
-            TypeKind::PayloadEnum(id) => self.enums[id.index()]
+            TypeKind::Enum(id) | TypeKind::PayloadEnum(id) => self.enums[id.index()]
                 .variants
                 .iter()
                 .find(|variant| variant.name == name),
