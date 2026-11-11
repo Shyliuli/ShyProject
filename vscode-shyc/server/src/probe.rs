@@ -82,6 +82,8 @@ pub struct Outcome {
     pub answers: Option<Arc<Answers>>,
     /// Where a failed probe named a source location, the offset and message.
     pub failure: Option<(usize, String)>,
+    /// A driver startup error that should be shown in the editor.
+    pub error: Option<String>,
 }
 
 /// Run the probe rounds for one buffer and read the answers they leave.
@@ -103,6 +105,10 @@ pub fn run(
             success: false,
             answers: None,
             failure: None,
+            error: Some(format!(
+                "could not write the temporary ShyC buffer {}",
+                source.display()
+            )),
         };
     }
 
@@ -126,18 +132,35 @@ pub fn run(
         }
     }
 
-    let output = command.output();
-    let success = output.as_ref().is_ok_and(|output| output.status.success());
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = std::fs::remove_file(&source);
+            let _ = std::fs::remove_file(&answers);
+            let message = if error.kind() == std::io::ErrorKind::NotFound {
+                "shycc was not found. Add `shycc_path = \"/absolute/path/to/shycc\"` to ~/.shycserver/config.toml, then run \"ShyC: Restart Language Server\"."
+                    .to_string()
+            } else {
+                format!("could not run shycc at {}: {error}", program.display())
+            };
+            return Outcome {
+                success: false,
+                answers: None,
+                failure: None,
+                error: Some(message),
+            };
+        }
+    };
+    let success = output.status.success();
     let mut outcome = Outcome {
         success,
         answers: read_answers(&answers).map(Arc::new),
         failure: None,
+        error: None,
     };
-    if let Ok(output) = output {
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            outcome.failure = failure(&stderr, &source, path, text);
-        }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        outcome.failure = failure(&stderr, &source, path, text);
     }
 
     let _ = std::fs::remove_file(&source);

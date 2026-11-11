@@ -279,6 +279,9 @@ impl Backend {
                     state.running = None;
                 }
                 if outcome.success {
+                    if state.generation == generation {
+                        state.failure = None;
+                    }
                     if let Some(answers) = &outcome.answers {
                         if state.done.len() >= 8 {
                             state.done.clear();
@@ -286,11 +289,13 @@ impl Backend {
                         state.done.insert(hash, answers.clone());
                         if state.generation == generation {
                             state.answers = Some(answers.clone());
-                            state.failure = None;
                         }
                     }
                 }
                 if state.generation == generation {
+                    if let Some(error) = &outcome.error {
+                        state.failure = Some((hash, 0, error.clone()));
+                    }
                     if let Some((offset, message)) = &outcome.failure {
                         state.failure = Some((hash, *offset, message.clone()));
                     }
@@ -307,7 +312,7 @@ impl Backend {
             if !current {
                 return;
             }
-            if outcome.answers.is_none() && outcome.failure.is_none() {
+            if outcome.answers.is_none() && outcome.failure.is_none() && outcome.error.is_none() {
                 return;
             }
             if !documents.lock().unwrap().contains_key(&uri) {

@@ -42,6 +42,22 @@ export async function deactivate(): Promise<void> {
 
 async function startClient(context: vscode.ExtensionContext) {
   const server = serverCommand(context);
+  if (!server) {
+    const message =
+      'ShyC language server was not found. Set "shyc.lsp.path" in VS Code settings.json, or install a package that includes server/bin/shyc-lsp.';
+    output.appendLine(`failed to start: ${message}`);
+    output.show(true);
+    const openSettings = "Open Settings";
+    void vscode.window.showErrorMessage(message, openSettings).then((choice) => {
+      if (choice === openSettings) {
+        void vscode.commands.executeCommand(
+          "workbench.action.openSettings",
+          "shyc.lsp.path",
+        );
+      }
+    });
+    return;
+  }
   output.appendLine(`starting: ${server.command} ${server.args.join(" ")}`);
 
   const serverOptions: ServerOptions = {
@@ -113,7 +129,7 @@ function serverCommand(context: vscode.ExtensionContext): {
   command: string;
   args: string[];
   cwd: string | undefined;
-} {
+} | undefined {
   const cwd = workspaceRoot();
   const configured = vscode.workspace
     .getConfiguration("shyc")
@@ -143,12 +159,7 @@ function serverCommand(context: vscode.ExtensionContext): {
     }
   }
 
-  const manifest = path.join(context.extensionPath, "server", "Cargo.toml");
-  return {
-    command: "cargo",
-    args: ["run", "--quiet", "--manifest-path", manifest, "--"],
-    cwd,
-  };
+  return undefined;
 }
 
 function workspaceRoot(): string | undefined {

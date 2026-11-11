@@ -42,13 +42,12 @@ Host.
 To build the installable package:
 
 ```sh
-npx @vscode/vsce package --dependencies --allow-missing-repository
+npx @vscode/vsce package --allow-missing-repository
 code --install-extension shyc-vscode-0.2.1.vsix --force
 ```
 
-`--dependencies` is required: the extension loads `vscode-languageclient` at
-runtime, and vsce no longer puts `node_modules` into the package by default.
-Without it the extension fails to activate, so no language server starts.
+The prepublish step bundles `vscode-languageclient` into `out/extension.js`, so
+the package does not need a `node_modules` directory at runtime.
 
 When the extension starts it uses, in order:
 
@@ -56,13 +55,14 @@ When the extension starts it uses, in order:
 2. `target/bin/shyc-lsp`, `target/debug/shyc-lsp`, or `target/release/shyc-lsp`
    in the workspace;
 3. `server/target/{debug,release}/shyc-lsp` inside this extension;
-4. `cargo run --quiet --manifest-path server/Cargo.toml`.
+4. `server/bin/shyc-lsp` in an installed package.
 
-The first launch through `cargo run` compiles the server and the compiler, so
-it can take a while. `npm run build:server` avoids that. `make bin` at the
-repository root also builds the server into `target/bin/shyc-lsp`; since that
-path is second in the list, a checkout keeps using its freshly built server
-without reinstalling the extension.
+The extension never builds the server implicitly. If no binary is found it
+shows an error with the `shyc.lsp.path` setting. `npm run build:server` builds
+the development server. `make bin` at the repository root also builds the
+server into `target/bin/shyc-lsp`; since that path is second in the list, a
+checkout keeps using its freshly built server without reinstalling the
+extension.
 
 ## Include directories
 

@@ -183,19 +183,19 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run bundle:server && npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run bundle:server && npm run compile && npm run bundle:extension",
+    "compile": "tsc -p ./ --noEmit",
+    "bundle:extension": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --sourcemap --outfile=out/extension.js",
+    "watch": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --sourcemap --outfile=out/extension.js --watch",
     "build:server": "cargo build --manifest-path server/Cargo.toml",
-    "build": "npm run build:server && npm run compile",
+    "build": "npm run build:server && npm run compile && npm run bundle:extension",
     "bundle:server": "cargo build --release --manifest-path server/Cargo.toml && mkdir -p server/bin && cp server/target/release/shyc-lsp server/bin/shyc-lsp"
-  },
-  "dependencies": {
-    "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
+    "esbuild": "^0.25.0",
+    "vscode-languageclient": "^9.0.1",
     "typescript": "^5.3.0"
   }
 }
