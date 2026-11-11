@@ -1268,7 +1268,7 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
 }
 
 fn run_asm(repo: &Path, opts: &Options, input: &Path, output: &Path) -> Result<()> {
-    let mut cmd = tool_command(repo, "asm", "shyasm");
+    let mut cmd = tool_command(repo, "asm", "shyasm")?;
     cmd.arg(input).arg("-o").arg(output);
     run_command(opts, &mut cmd)
 }
@@ -1280,7 +1280,7 @@ fn run_linker(
     output: &Path,
     sym: Option<&Path>,
 ) -> Result<()> {
-    let mut cmd = tool_command(repo, "linker", "shyld");
+    let mut cmd = tool_command(repo, "linker", "shyld")?;
     // libshy is linked as whole objects, not an archive, so drop the functions
     // nothing reaches: a program that only calls `puts` keeps no `printf`.
     cmd.arg("--gc-sections");
@@ -1291,6 +1291,34 @@ fn run_linker(
     run_command(opts, &mut cmd)
 }
 
+/// The `shy-dwarf` binary: the explicit override, the copy next to this
+/// binary, or the one this workspace already built.
+///
+/// Like `tool_command`, this never builds anything: one `cargo run` per
+/// invocation would resolve the workspace and run a debug-profile tool, which
+/// is slower than the tool it produces.
+fn shy_dwarf_tool(repo: &Path) -> Result<PathBuf> {
+    if let Ok(path) = env::var("SHYCC_SHY_DWARF") {
+        return Ok(PathBuf::from(path));
+    }
+    let sibling = env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("shy-dwarf")));
+    if let Some(path) = sibling.filter(|path| path.exists()) {
+        return Ok(path);
+    }
+    let built = repo.join("target/release/shy-dwarf");
+    if built.exists() {
+        return Ok(built);
+    }
+    bail!(
+        "cannot find `shy-dwarf`: not next to shycc and not at {}.\n\
+         Build it with `make testpath` (or `cargo build --release -p shy-dwarf`),\n\
+         or set SHYCC_SHY_DWARF to the tool's path.",
+        built.display()
+    )
+}
+
 fn run_shy_dwarf(
     repo: &Path,
     opts: &Options,
@@ -1298,19 +1326,7 @@ fn run_shy_dwarf(
     sym: &Path,
     output: &Path,
 ) -> Result<()> {
-    let mut cmd = if let Ok(path) = env::var("SHYCC_SHY_DWARF") {
-        Command::new(path)
-    } else {
-        let mut cmd = Command::new("cargo");
-        cmd.arg("run")
-            .arg("-q")
-            .arg("--manifest-path")
-            .arg(repo.join("Cargo.toml"))
-            .arg("-p")
-            .arg("shy-dwarf")
-            .arg("--");
-        cmd
-    };
+    let mut cmd = Command::new(shy_dwarf_tool(repo)?);
     for (asm, debug) in debug_inputs {
         cmd.arg("--asm").arg(asm);
         cmd.arg("--debug").arg(debug);
@@ -1458,34 +1474,78 @@ fn build_libshy(
     Ok(objects)
 }
 
-fn tool_command(repo: &Path, package: &str, installed_name: &str) -> Command {
+/// The assembler or linker the driver runs.
+///
+/// The order is the explicit `SHYCC_<NAME>`/`SHYCC_<PACKAGE>` override, the
+/// tool next to this binary, the first one on `PATH`, and finally an error.
+///
+/// There is deliberately no `cargo run` fallback: every invocation would
+/// resolve the workspace and check fingerprints before running anything, and
+/// it would silently run a debug-profile tool. A missing tool is a setup error
+/// worth reporting, not something to hide behind a build.
+fn tool_command(repo: &Path, package: &str, installed_name: &str) -> Result<Command> {
     if let Ok(path) = env::var(format!("SHYCC_{}", installed_name.to_ascii_uppercase())) {
-        return Command::new(path);
+        return Ok(Command::new(path));
     }
     if let Ok(path) = env::var(format!("SHYCC_{}", package.to_ascii_uppercase())) {
-        return Command::new(path);
+        return Ok(Command::new(path));
     }
 
-    if let Ok(current) = env::current_exe()
-        && let Some(dir) = current.parent()
-    {
-        let sibling = dir.join(installed_name);
-        if sibling.exists() {
-            return Command::new(sibling);
+    let current = env::current_exe().context("cannot locate the running shycc binary")?;
+    let dir = current
+        .parent()
+        .context("the running shycc binary has no parent directory")?;
+    let sibling = dir.join(installed_name);
+    if sibling.exists() {
+        return Ok(Command::new(sibling));
+    }
+
+    // A toolchain installed anywhere on `PATH` is the next answer: the driver
+    // itself may have been copied out of the build tree that holds the tools.
+    if let Some(tool) = find_on_path(installed_name) {
+        return Ok(Command::new(tool));
+    }
+
+    bail!(
+        "cannot find `{installed_name}`: not next to shycc ({}) and not on PATH.\n\
+         Build the toolchain into `build/bin` and run that copy:\n  \
+         make testpath\n  {}\n\
+         or set SHYCC_{} to the tool's path.",
+        dir.display(),
+        repo.join("build/bin/shycc").display(),
+        installed_name.to_ascii_uppercase()
+    );
+}
+
+/// The first executable `name` on `PATH`, the way a shell resolves it.
+///
+/// A bare `Command::new(name)` would search `PATH` too, but only when the
+/// command is spawned, which is too late to decide that the tool is missing.
+/// An empty `PATH` entry means the current directory to a shell, and a
+/// toolchain is never installed there, so it is skipped.
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path).find_map(|dir| {
+        if dir.as_os_str().is_empty() {
+            return None;
         }
-    }
+        let tool = dir.join(name);
+        is_executable(&tool).then_some(tool)
+    })
+}
 
-    // Keep the caller's working directory so relative input and output paths
-    // keep their meaning; `--manifest-path` finds the workspace instead.
-    let mut cmd = Command::new("cargo");
-    cmd.arg("run")
-        .arg("-q")
-        .arg("--manifest-path")
-        .arg(repo.join("Cargo.toml"))
-        .arg("-p")
-        .arg(package)
-        .arg("--");
-    cmd
+/// Whether `path` names a file this user may execute.
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+/// Without POSIX permission bits, being a file is the best test there is.
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn run_command(opts: &Options, cmd: &mut Command) -> Result<()> {

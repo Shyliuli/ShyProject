@@ -95,7 +95,7 @@ $ cargo run -- os        # 在 ShyCPU 上启动 ShyOS（在 ShyCPU 仓库里执�
 make bin
 ```
 
-产物：`target/bin/shycc`、`target/bin/shyasm`、`target/bin/shyld`、`target/bin/shyemu`、`target/bin/shyemu-user`、`target/bin/shyc`
+产物：`target/bin/shycc`、`target/bin/shyasm`、`target/bin/shyld`、`target/bin/shyemu`、`target/bin/shyemu-user`、`target/bin/shyc`、`target/bin/shy-dwarf`（`--shy-emit-debug-info` 用的调试信息工具）
 
 `shycc` 会优先使用同目录下的这些工具，因此可以直接运行：
 
@@ -103,6 +103,19 @@ make bin
 target/bin/shycc test/shyc/libshy_smoke.shyc -llibshy -o /tmp/app.sfs
 target/bin/shyemu /tmp/app.sfs
 ```
+
+`make testpath` 会把同一套工具装到 `build/bin/`（不在 `target/` 下，`cargo clean`
+不会删），跑完会打印一行 `export PATH=…`，可以直接执行：
+
+```sh
+make testpath
+export PATH=$PWD/build/bin:$PATH
+```
+
+`shycc` 需要能找到配套的 `shyasm`/`shyld`。查找顺序是 `SHYCC_SHYASM`/`SHYCC_SHYLD`
+（或 `SHYCC_ASM`/`SHYCC_LINKER`）→ 与自身同目录 → `PATH` 上的同名可执行文件；
+三处都没有时它直接报错，不会再退回 `cargo run`。`target/bin/shycc` 和
+`build/bin/shycc` 旁边就是这两个工具，因此可以直接运行。
 
 安装到系统路径：
 
@@ -117,21 +130,21 @@ make install-bin PREFIX=/usr/local
 推荐使用 `shycc` 驱动一次完成编译、汇编和链接：
 
 ```sh
-cargo run -q -p shycc -- test/testc/main.c test/testc/put.c -o test/testc/testc.sfs --sym test/testc/testc.sym
-cargo run -q -p emu -- test/testc/testc.sfs
+target/bin/shycc test/testc/main.c test/testc/put.c -o test/testc/testc.sfs --sym test/testc/testc.sym
+target/bin/shyemu test/testc/testc.sfs
 ```
 
 `shycc` 支持类 GCC 的阶段选项：
 
 ```sh
 # 只编译，不汇编
-cargo run -q -p shycc -- -S test/testc/main.c -o test/testc/main.shy
+target/bin/shycc -S test/testc/main.c -o test/testc/main.shy
 
 # 只汇编，不链接
-cargo run -q -p shycc -- -c test/testc/main.shy -o test/testc/main.sobj
+target/bin/shycc -c test/testc/main.shy -o test/testc/main.sobj
 
 # 只链接
-cargo run -q -p shycc -- test/testc/main.sobj test/testc/put.sobj -o test/testc/testc.sfs --sym test/testc/testc.sym
+target/bin/shycc test/testc/main.sobj test/testc/put.sobj -o test/testc/testc.sfs --sym test/testc/testc.sym
 ```
 
 附加选项：

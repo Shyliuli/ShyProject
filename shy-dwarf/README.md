@@ -4,7 +4,7 @@
 metadata. It is normally invoked by `shycc` when both debug flags are enabled:
 
 ```sh
-cargo run -q -p shycc -- --shy-emit-source-lines --shy-emit-debug-info \
+target/bin/shycc --shy-emit-source-lines --shy-emit-debug-info \
   input.c -o app.sfs --sym app.sym
 ```
 

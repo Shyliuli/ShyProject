@@ -34,7 +34,7 @@ Build a C/ShyC program with full DWARF debug info (source lines, locals,
 parameters, types):
 
 ```sh
-cargo run -q -p shycc -- --shy-emit-source-lines --shy-emit-debug-info \
+target/bin/shycc --shy-emit-source-lines --shy-emit-debug-info \
   test/testc/main.c test/testc/put.c -o /tmp/testc.sfs --sym /tmp/testc.sym
 ```
 

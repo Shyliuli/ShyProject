@@ -4,7 +4,8 @@ MAKE ?= make
 INSTALL ?= install
 
 BIN_DIR := target/bin
-TOOL_BINS := shyasm shyemu shyemu-user shyld shycc
+TEST_BIN_DIR := build/bin
+TOOL_BINS := shyasm shyemu shyemu-user shyld shycc shy-dwarf
 LSP_DIR := vscode-shyc/server
 
 # C headers generated from the native ShyC headers. Order matters: stddef and
@@ -31,18 +32,33 @@ LIBSHY_INCLUDES := -Ilibshy/c -Ilibshy -Ilibshy/include
 SHYC_RELEASE := target/release/shyc
 SHYC_SOURCES := $(wildcard shyc/src/*.rs shyc/src/*/*.rs) shyc/Cargo.toml
 
-.PHONY: bin install-bin clean-bin test cargo-test test-shyc os-build os-run libshy-headers
+.PHONY: bin tools testpath install-bin clean-bin test cargo-test test-shyc os-build os-run libshy-headers
 
-bin: libshy-headers $(BIN_DIR)
-	$(CARGO) build --release -p asm -p emu -p linker -p shycc -p shyc
+bin: tools
 	$(CARGO) build --release --manifest-path $(LSP_DIR)/Cargo.toml
+	$(INSTALL) -m 0755 $(LSP_DIR)/target/release/shyc-lsp $(BIN_DIR)/shyc-lsp
+
+# The toolchain under the names shycc looks for: it runs the assembler and
+# linker that sit next to its own binary, so the installed names are what make
+# `$(BIN_DIR)/shycc` work without any SHYCC_* variable.
+tools: libshy-headers $(BIN_DIR)
+	$(CARGO) build --release -p asm -p emu -p linker -p shycc -p shyc -p shy-dwarf
 	$(INSTALL) -m 0755 target/release/asm $(BIN_DIR)/shyasm
 	$(INSTALL) -m 0755 target/release/emu $(BIN_DIR)/shyemu
 	$(INSTALL) -m 0755 target/release/shyemu-user $(BIN_DIR)/shyemu-user
 	$(INSTALL) -m 0755 target/release/linker $(BIN_DIR)/shyld
 	$(INSTALL) -m 0755 target/release/shycc $(BIN_DIR)/shycc
 	$(INSTALL) -m 0755 target/release/shyc $(BIN_DIR)/shyc
-	$(INSTALL) -m 0755 $(LSP_DIR)/target/release/shyc-lsp $(BIN_DIR)/shyc-lsp
+	$(INSTALL) -m 0755 target/release/shy-dwarf $(BIN_DIR)/shy-dwarf
+
+# A staging directory for running the toolchain from a test or by hand:
+# build/bin/shycc finds shyasm and shyld beside itself, so no SHYCC_* variable is
+# needed. It lives outside target/ so `cargo clean` cannot take it away, and the
+# line it prints can be evaluated: `eval "$(make -s testpath)"`.
+testpath: tools
+	$(INSTALL) -d $(TEST_BIN_DIR)
+	$(INSTALL) -m 0755 $(BIN_DIR)/shyasm $(BIN_DIR)/shyemu $(BIN_DIR)/shyemu-user $(BIN_DIR)/shyld $(BIN_DIR)/shycc $(BIN_DIR)/shyc $(BIN_DIR)/shy-dwarf $(TEST_BIN_DIR)/
+	@echo "export PATH=$(CURDIR)/$(TEST_BIN_DIR):$$PATH"
 
 libshy-headers: $(LIBSHY_HEADERS)
 
@@ -77,7 +93,7 @@ test: libshy-headers cargo-test test-shyc
 cargo-test:
 	$(CARGO) test
 
-test-shyc:
+test-shyc: testpath
 	test/shyc/run.sh
 
 os-build: libshy-headers

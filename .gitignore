@@ -2,6 +2,7 @@
 .claude/
 .pi/
 target/
+/build/
 develop.md
 test/testc/*.shy
 test/testc/*.sobj

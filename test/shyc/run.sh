@@ -2,8 +2,12 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SHYCC="$ROOT/build/bin/shycc"
+SHYEMU="$ROOT/build/bin/shyemu"
 OUT="$ROOT/target/shyc-tests"
 mkdir -p "$OUT"
+
+[ -x "$SHYCC" ] && [ -x "$SHYEMU" ] || { echo "missing $SHYCC or $SHYEMU: run \`make testpath\`" >&2; exit 1; }
 
 run_case() {
   local src="$1"
@@ -16,11 +20,11 @@ run_case() {
   local sfs="$OUT/$name.sfs"
 
   printf 'compile %-28s' "$src"
-  (cd "$ROOT" && cargo run -q -p shycc -- "test/shyc/cases/$src" "$@" -o "$sfs")
+  (cd "$ROOT" && "$SHYCC" "test/shyc/cases/$src" "$@" -o "$sfs")
 
   set +e
   local output
-  output=$(cd "$ROOT" && cargo run -q -p emu --bin emu -- "$sfs" 2>&1)
+  output=$("$SHYEMU" "$sfs" 2>&1)
   local status=$?
   set -e
 

@@ -34,7 +34,7 @@ The host Shy toolchain can optionally preserve a lightweight source-to-assembly
 mapping in generated `.shy` files:
 
 ```sh
-cargo run -q -p shycc -- --shy-emit-source-lines -S file.shyc -o file.shy
+target/bin/shycc --shy-emit-source-lines -S file.shyc -o file.shy
 ```
 
 When enabled, the Shy backend emits comment lines before the function symbol and
@@ -61,7 +61,7 @@ sidecar produced by `shyc`) to generate DWARF debug info for GDB.
 To produce a debug ELF alongside the `.sfs` image, use:
 
 ```sh
-cargo run -q -p shycc -- --shy-emit-source-lines --shy-emit-debug-info \
+target/bin/shycc --shy-emit-source-lines --shy-emit-debug-info \
   input.c -o app.sfs --sym app.sym
 ```
 
