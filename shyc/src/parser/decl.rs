@@ -7,7 +7,7 @@ use crate::ast::{
     GenericArgKind, GenericParam, GenericParamKind, ImplBlock, InitDeclarator, Item,
     MethodPrototype, StorageClass, TraitDecl, TraitMethod, TypeName, TypeSpecifier, UseDecl,
 };
-use crate::lexer::{Token, TokenKind};
+use crate::lexer::TokenKind;
 use crate::source::{Diagnostic, Span};
 
 use crate::ast;
@@ -29,8 +29,8 @@ pub(crate) struct GlobalNames {
 /// never leak. Unknown identifiers are accepted as type names, which makes the
 /// pass insensitive to declaration order: the real parse gets the complete
 /// file-scope sets no matter where a typedef or tag is written.
-pub(crate) fn prescan(tokens: &[Token]) -> GlobalNames {
-    let mut parser = Parser::new(tokens.to_vec(), true);
+pub(crate) fn prescan(tokens: &super::TokenStream) -> GlobalNames {
+    let mut parser = Parser::with_tokens(std::rc::Rc::clone(tokens), true);
     parser.prescan_items();
     GlobalNames {
         typedefs: std::mem::take(&mut parser.scopes[0].typedefs),

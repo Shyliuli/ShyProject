@@ -141,15 +141,18 @@ impl Parser {
     pub(crate) fn close_angle(&mut self) -> Result<Span, Diagnostic> {
         if self.at_punct(">>") {
             let index = self.index_ahead(0);
-            let mut second = self.tokens[index].clone();
+            // Splitting writes to the stream, so it is copied only when another
+            // parse still shares it; the usual parse owns it outright.
+            let tokens = std::rc::Rc::make_mut(&mut self.tokens);
+            let mut second = tokens[index].clone();
             let midpoint = second.span.start + (second.span.end - second.span.start) / 2;
             second.kind = TokenKind::Punct(">".to_string());
             second.span.start = midpoint;
             second.at_line_start = false;
             second.leading_space = false;
-            self.tokens[index].kind = TokenKind::Punct(">".to_string());
-            self.tokens[index].span.end = midpoint;
-            self.tokens.insert(index + 1, second);
+            tokens[index].kind = TokenKind::Punct(">".to_string());
+            tokens[index].span.end = midpoint;
+            tokens.insert(index + 1, second);
         }
         self.expect_punct(">")
     }
@@ -230,8 +233,10 @@ impl Parser {
     }
 
     fn checkpoint(&self) -> Checkpoint {
+        // The stream is shared, so a checkpoint costs one reference count
+        // instead of a copy of every token in the unit.
         Checkpoint {
-            tokens: self.tokens.clone(),
+            tokens: std::rc::Rc::clone(&self.tokens),
             pos: self.pos,
             last: self.last,
             angle_depth: self.angle_depth,
@@ -248,7 +253,7 @@ impl Parser {
 
 /// Cursor state saved before a speculative parse.
 struct Checkpoint {
-    tokens: Vec<Token>,
+    tokens: std::rc::Rc<Vec<Token>>,
     pos: usize,
     last: Span,
     angle_depth: usize,

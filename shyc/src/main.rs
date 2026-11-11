@@ -101,14 +101,14 @@ fn run() -> Result<(), String> {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
             let unit =
-                parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
+                parser::parse_shared(std::rc::Rc::new(preprocessed.tokens)).map_err(|error| sources.render(&error))?;
             render_c_source(&options, &unit, &preprocessed.attributes, &mut sources)?
         }
         Stage::CHeader => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
             let unit =
-                parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
+                parser::parse_shared(std::rc::Rc::new(preprocessed.tokens)).map_err(|error| sources.render(&error))?;
             // The output path names the include guard. Without `-o` the header
             // goes to stdout, so the input path names it instead.
             let guard_path = options.output.as_deref().unwrap_or(options.input.as_path());
@@ -133,7 +133,7 @@ fn run() -> Result<(), String> {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
             let unit =
-                parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
+                parser::parse_shared(std::rc::Rc::new(preprocessed.tokens)).map_err(|error| sources.render(&error))?;
             let lowered = lower_instances(&options, &unit, &preprocessed.attributes, &mut sources)?;
             export_instances::render_wrapper(&lowered)
         }
@@ -141,14 +141,14 @@ fn run() -> Result<(), String> {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
             let unit =
-                parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
+                parser::parse_shared(std::rc::Rc::new(preprocessed.tokens)).map_err(|error| sources.render(&error))?;
             format!("{unit:#?}\n")
         }
         Stage::Ir | Stage::Emit(_) => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
             let unit =
-                parser::parse(&preprocessed.tokens).map_err(|error| sources.render(&error))?;
+                parser::parse_shared(std::rc::Rc::new(preprocessed.tokens)).map_err(|error| sources.render(&error))?;
             let target = resolve_target(&options)?;
             let startup = if preprocessed.attributes.no_main || options.freestanding {
                 StartupMode::Manual
@@ -968,7 +968,8 @@ fn probe_round(options: &Options) -> Result<(), String> {
     // An answer's reading comes from the declaration, and the round's requests
     // name the function each key belongs to. Both come from a parse without
     // answers; the source is the same, so the keys are the same.
-    let mut parsed = parser::parse_for_probe(&preprocessed.tokens, parser::Answers::default())
+    let tokens: parser::TokenStream = std::rc::Rc::new(preprocessed.tokens);
+    let mut parsed = parser::parse_for_probe(&tokens, parser::Answers::default())
         .map_err(|error| sources.render(&error))?;
     if let Some(path) = options.probe_answers.as_deref() {
         // One answer can unlock requests that only exist after an expansion (a
@@ -985,7 +986,7 @@ fn probe_round(options: &Options) -> Result<(), String> {
             for (key, answer) in &collected {
                 answers.insert(key.clone(), answer.clone());
             }
-            parsed = parser::parse_for_probe(&preprocessed.tokens, answers)
+            parsed = parser::parse_for_probe(&tokens, answers)
                 .map_err(|error| sources.render(&error))?;
         }
     }

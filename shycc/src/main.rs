@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, bail};
 
+mod cache;
 mod probe;
+
+use cache::{Cache, Fingerprint, cache};
 
 static TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -73,6 +76,9 @@ struct Options {
     probe_only: bool,
     /// Where `--probe-only` writes the answers its rounds collected.
     probe_answers: Option<PathBuf>,
+    /// `--no-cache`: build every default-library artifact from source instead of
+    /// reusing the one an earlier run stored.
+    no_cache: bool,
     compile_args: Vec<String>,
     /// `-Wl,` items, forwarded to clang; the Shy linker validates them itself.
     link_args: Vec<String>,
@@ -154,6 +160,7 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         constfn_rounds: DEFAULT_PROBE_ROUNDS,
         probe_only: false,
         probe_answers: None,
+        no_cache: false,
         compile_args: Vec::new(),
         link_args: Vec::new(),
         inputs: Vec::new(),
@@ -205,6 +212,7 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                 opts.emit = Some(what.to_string());
             }
             "-###" => opts.print_only = true,
+            "--no-cache" => opts.no_cache = true,
             "--constfn-probe" | "--probe" => {
                 opts.probe = true;
                 opts.probe_explicit = true;
@@ -513,6 +521,9 @@ fn forwarded_to_shyc(arg: &str) -> bool {
 }
 
 fn run(mut opts: Options) -> Result<()> {
+    // Installed before the first compile step: every artifact key below reads
+    // the cache this one call chose.
+    Cache::install(Cache::from_env(opts.no_cache));
     if opts.probe {
         // The runner is compiled in only with the `constfn-probe` feature; a
         // default build refuses the flag before anything runs.
@@ -827,8 +838,10 @@ fn run_probe_unit(
         Some(path) => path.clone(),
         None => temps.temp_path(".probe.answers"),
     };
+    // A user-named answers file is an output, not a cache: moving it into the
+    // cache would delete the file the caller asked for.
+    let mut state = ProbeAnswers::open(opts, input, &answers)?;
     let mut answered: Vec<probe::Answer> = Vec::new();
-    probe::write_answers(&answers, &[])?;
     for _ in 0..opts.constfn_rounds {
         let manifest = temps.temp_path(".probe.manifest");
         let asm = temps.temp_path(".probe.shy");
@@ -854,7 +867,12 @@ fn run_probe_unit(
                     output.display()
                 )
             })?;
+            state.settled(&answers);
             return Ok(());
+        }
+
+        if state.discard(&answers)? {
+            continue;
         }
 
         run_probe_image(
@@ -1004,8 +1022,8 @@ fn run_emit_probe(
     libs: &mut Option<ProbeLibs>,
 ) -> Result<()> {
     let answers = temps.temp_path(".probe.answers");
+    let mut state = ProbeAnswers::open(opts, input, &answers)?;
     let mut answered: Vec<probe::Answer> = Vec::new();
-    probe::write_answers(&answers, &[])?;
     for _ in 0..opts.constfn_rounds {
         let manifest = temps.temp_path(".probe.manifest");
         let object = temps.temp_path(".probe.shy");
@@ -1023,7 +1041,11 @@ fn run_emit_probe(
         )?;
         let requests = probe::read_manifest(&manifest)?;
         if requests.is_empty() {
+            state.settled(&answers);
             return Ok(());
+        }
+        if state.discard(&answers)? {
+            continue;
         }
         run_probe_image(
             repo,
@@ -1176,9 +1198,20 @@ fn run_llvm(repo: &Path, opts: &Options) -> Result<()> {
     // libshy's core, alloc, and std on top of it, as Rust links its std.
     if opts.stage == Stage::Link && !bare_target(&opts.target) && !opts.no_default_libs {
         for source in LIBSHY_RUST_LAYERS {
+            let path = shylib().join(source);
+            let key = caches_artifacts(opts)
+                .then(|| libshy_ll_key(opts, source))
+                .flatten();
+            if let Some(hit) = key.as_deref().and_then(|key| cache().lookup(key, "ll")) {
+                clang_inputs.push(hit);
+                continue;
+            }
             let ll = temps.temp_path(".ll");
-            emit_llvm(repo, opts, &shylib().join(source), &ll, false)?;
-            clang_inputs.push(ll);
+            emit_llvm(repo, opts, &path, &ll, false)?;
+            clang_inputs.push(match key {
+                Some(key) => cache().store(&key, "ll", &ll),
+                None => ll,
+            });
         }
     }
 
@@ -1364,6 +1397,12 @@ fn build_float_lib(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result
     let runtime_c = temps.temp_path(".float.c");
     let body = fs::read_to_string(&src)
         .with_context(|| format!("failed to read internal float library: {}", src.display()))?;
+    let key = caches_artifacts(opts)
+        .then(|| float_object_key(opts, &src))
+        .flatten();
+    if let Some(hit) = key.as_deref().and_then(|key| cache().lookup(key, "sobj")) {
+        return Ok(hit);
+    }
     fs::write(&runtime_c, format!("#![no_main]\n{body}")).with_context(|| {
         format!(
             "failed to write temporary float runtime: {}",
@@ -1385,7 +1424,10 @@ fn build_float_lib(repo: &Path, opts: &Options, temps: &mut TempFiles) -> Result
     let input = runtime_c.to_string_lossy().into_owned();
     run_compiler(repo, opts, &input, Some(&asm), false, true)?;
     run_asm(repo, opts, &asm, &obj)?;
-    Ok(obj)
+    Ok(match key {
+        Some(key) => cache().store(&key, "sobj", &obj),
+        None => obj,
+    })
 }
 
 /// libshy's layers above the C library, in dependency order.
@@ -1415,6 +1457,215 @@ fn emit_llvm(repo: &Path, opts: &Options, input: &Path, ll: &Path, user_unit: bo
     }
     cmd.arg("-o").arg(ll).arg(input);
     run_command(opts, &mut cmd)
+}
+
+/// Whether this run may reuse artifacts from the cache.
+///
+/// `-save-temps` names the intermediate files itself and `-###` only prints the
+/// commands, so neither run is the one an artifact on disk describes.
+fn caches_artifacts(opts: &Options) -> bool {
+    !opts.save_temps && !opts.print_only && cache().root().is_some()
+}
+
+/// A token that changes whenever the compiler that produces the artifacts does.
+///
+/// `None` when the driver would fall back to `cargo run`: its output follows the
+/// source tree, which no key can describe without hashing the whole workspace.
+fn shyc_identity(print_only: bool) -> Option<String> {
+    let program = PathBuf::from(shyc_command(&repo_root(), print_only).ok()?.get_program());
+    let metadata = program.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(format!(
+        "{}:{}:{}",
+        program.display(),
+        metadata.len(),
+        modified.as_nanos()
+    ))
+}
+
+/// The answer set one input's probe rounds run on, and the cache entry behind it.
+///
+/// A stored set is exactly what the rounds would compute again, so feeding it
+/// back settles the compile in a single round: `shyc` finds an answer for every
+/// `const fn` call and asks for nothing, and no probe image is built.
+struct ProbeAnswers {
+    /// The cache key, when this run may store and reuse a set.
+    key: Option<String>,
+    /// Whether a stored set was fed back and has not been disproved yet.
+    reused: bool,
+}
+
+impl ProbeAnswers {
+    /// Start from the stored set when there is one, and from no answers
+    /// otherwise.
+    fn open(opts: &Options, input: &str, path: &Path) -> Result<ProbeAnswers> {
+        // A user-named answers file is an output: storing it would move the
+        // file the caller asked to be left in place.
+        let key = (opts.probe_answers.is_none() && caches_artifacts(opts))
+            .then(|| probe_answers_key(opts, input))
+            .flatten();
+        let mut state = ProbeAnswers {
+            key,
+            reused: false,
+        };
+        let stored = state
+            .key
+            .as_deref()
+            .and_then(|key| cache().lookup(key, "answers"));
+        match stored {
+            Some(stored) => {
+                fs::copy(&stored, path).with_context(|| {
+                    format!("failed to reuse const-fn answers from {}", stored.display())
+                })?;
+                state.reused = true;
+            }
+            None => probe::write_answers(path, &[])?,
+        }
+        Ok(state)
+    }
+
+    /// Keep the settled set for the next run.
+    fn settled(&self, path: &Path) {
+        if let Some(key) = &self.key {
+            cache().store(key, "answers", path);
+        }
+    }
+
+    /// Drop a stored set that did not settle this compile.
+    ///
+    /// Answers that do not answer every call describe different sources, so they
+    /// must not stay: the round is re-run with no answers at all, which is what
+    /// the driver does when nothing is stored. Returns whether that happened.
+    fn discard(&mut self, path: &Path) -> Result<bool> {
+        if !self.reused {
+            return Ok(false);
+        }
+        self.reused = false;
+        if let Some(stale) = self
+            .key
+            .as_deref()
+            .and_then(|key| cache().lookup(key, "answers"))
+        {
+            let _ = fs::remove_file(stale);
+        }
+        probe::write_answers(path, &[])?;
+        Ok(true)
+    }
+}
+
+/// The key of one input's settled `const fn` answers.
+///
+/// Everything a `const fn` can read has to be in here: the call's arguments, the
+/// types and impls its headers declare, the data model of the target, and the
+/// compiler that evaluates it. A missed input would reuse answers for a program
+/// that no longer exists, so the include path is hashed rather than trusted.
+fn probe_answers_key(opts: &Options, input: &str) -> Option<String> {
+    let mut fingerprint = Fingerprint::new();
+    fingerprint
+        .text("probe-answers")
+        .text(&shyc_identity(opts.print_only)?)
+        .text(&opts.target)
+        .text(shyc_target(&opts.target));
+    if opts.target == SHY_USER {
+        fingerprint.text("-ffreestanding");
+    }
+    // A round's budgets decide whether a probe finishes, so a different budget
+    // is a different set of answers to remember.
+    fingerprint
+        .number(opts.constfn_steps)
+        .number(opts.constfn_timeout_ms);
+    for arg in &opts.compile_args {
+        if forwarded_to_shyc(arg) {
+            fingerprint.text(arg);
+        }
+    }
+    // Every header the include path can reach, and the directory of the input
+    // itself, which is where a quoted include starts looking.
+    for arg in &opts.compile_args {
+        if let Some(dir) = arg.strip_prefix("-I") {
+            let dir = if dir.is_empty() { "." } else { dir };
+            cache::hash_tree(&mut fingerprint, Path::new(dir)).ok()?;
+        }
+    }
+    let source = Path::new(input);
+    if let Some(dir) = source.parent()
+        && !dir.as_os_str().is_empty()
+    {
+        cache::hash_tree(&mut fingerprint, dir).ok()?;
+    }
+    cache::hash_file(&mut fingerprint, source).ok()?;
+    cache::hash_tree(&mut fingerprint, &shylib()).ok()?;
+    Some(format!("probe-{}", fingerprint.key()))
+}
+
+/// The key of one `libshy` object for the Shy target.
+///
+/// Every source and header of the library is in the key, not only the unit's
+/// own file: a unit's object changes when any header it can reach changes, and
+/// the library is small enough to hash whole.
+fn libshy_object_key(opts: &Options, probe: bool, source: &str) -> Option<String> {
+    let mut fingerprint = Fingerprint::new();
+    fingerprint
+        .text("libshy-object")
+        .text(&shyc_identity(opts.print_only)?)
+        .text(&opts.target)
+        .text(if probe { "probe" } else { "program" })
+        .text(source);
+    // The Shy pipeline hands library units the user's `-I`/`-D`/`-U` as well.
+    for arg in &opts.compile_args {
+        if forwarded_to_shyc(arg) {
+            fingerprint.text(arg);
+        }
+    }
+    cache::hash_tree(&mut fingerprint, &shylib()).ok()?;
+    Some(format!("libshy-{}", fingerprint.key()))
+}
+
+/// The key of the soft-float runtime's object.
+fn float_object_key(opts: &Options, source: &Path) -> Option<String> {
+    let mut fingerprint = Fingerprint::new();
+    fingerprint
+        .text("float-object")
+        .text(&shyc_identity(opts.print_only)?)
+        .text(&opts.target);
+    for arg in &opts.compile_args {
+        if forwarded_to_shyc(arg) {
+            fingerprint.text(arg);
+        }
+    }
+    // The driver wraps the body in `#![no_main]` before compiling it.
+    fingerprint.text("#![no_main]");
+    cache::hash_file(&mut fingerprint, source).ok()?;
+    cache::hash_tree(&mut fingerprint, &shylib()).ok()?;
+    Some(format!("float-{}", fingerprint.key()))
+}
+
+/// The key of one `libshy` layer's LLVM IR on a hosted target.
+fn libshy_ll_key(opts: &Options, source: &str) -> Option<String> {
+    let mut fingerprint = Fingerprint::new();
+    fingerprint
+        .text("libshy-ll")
+        .text(&shyc_identity(opts.print_only)?)
+        .text(&opts.target)
+        .text(source);
+    if bare_target(&opts.target) {
+        fingerprint.text("-ffreestanding");
+    }
+    // A library unit is compiled with the optimization level only.
+    for arg in &opts.compile_args {
+        if arg.starts_with("-O") {
+            fingerprint.text(arg);
+        }
+    }
+    cache::hash_tree(&mut fingerprint, &shylib()).ok()?;
+    Some(format!("libshy-ll-{}", fingerprint.key()))
 }
 
 /// The Shy target's whole library: the portable C layer, the Shy
@@ -1455,6 +1706,13 @@ fn build_libshy(
                 src.display()
             );
         }
+        let key = caches_artifacts(opts)
+            .then(|| libshy_object_key(opts, probe, source))
+            .flatten();
+        if let Some(hit) = key.as_deref().and_then(|key| cache().lookup(key, "sobj")) {
+            objects.push(hit);
+            continue;
+        }
         let (asm, obj) = if opts.save_temps {
             (
                 PathBuf::from(format!("{name}.shy")),
@@ -1469,7 +1727,10 @@ fn build_libshy(
         let input = src.to_string_lossy().into_owned();
         run_compiler(repo, opts, &input, Some(&asm), false, true)?;
         run_asm(repo, opts, &asm, &obj)?;
-        objects.push(obj);
+        objects.push(match key {
+            Some(key) => cache().store(&key, "sobj", &obj),
+            None => obj,
+        });
     }
     Ok(objects)
 }

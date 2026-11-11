@@ -50,6 +50,7 @@ pub use probe::{
 pub use ty::builtin_type;
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::ast;
 use crate::lexer::{Token, TokenKind};
@@ -92,16 +93,26 @@ pub fn parse(tokens: &[Token]) -> Result<ast::TranslationUnit, Diagnostic> {
     parse_with_sites(tokens).map(|(unit, _)| unit)
 }
 
-/// Parses a unit and reports the compile-time sites it expanded.
+/// Parses a stream the caller already shares.
 ///
-/// A `const fn` call runs in a probe round, so a parse without answers cannot
-/// finish one: the call is recorded as a request and leaves a placeholder. A
-/// program the round has not answered is reported here instead of being
-/// compiled from that placeholder.
-pub fn parse_with_sites(
-    tokens: &[Token],
+/// A driver that parses one unit more than once — probe rounds do — wraps the
+/// preprocessed tokens once and hands the same stream back, so no pass copies
+/// it.
+pub fn parse_shared(tokens: TokenStream) -> Result<ast::TranslationUnit, Diagnostic> {
+    parse_shared_with_sites(tokens).map(|(unit, _)| unit)
+}
+
+/// [`parse_with_sites`] over a shared stream.
+pub fn parse_shared_with_sites(
+    tokens: TokenStream,
 ) -> Result<(ast::TranslationUnit, Vec<ComptimeSite>), Diagnostic> {
-    let parsed = parse_for_probe(tokens, Answers::default())?;
+    let parsed = parse_for_probe(&tokens, Answers::default())?;
+    reject_unanswered(&parsed)?;
+    Ok((parsed.unit, parsed.sites))
+}
+
+/// A program that still asks a `const fn` question was compiled without a probe.
+fn reject_unanswered(parsed: &probe::ParseOutput) -> Result<(), Diagnostic> {
     if let Some(request) = parsed.requests.first() {
         return Err(Diagnostic::new(
             request.site,
@@ -111,6 +122,20 @@ pub fn parse_with_sites(
             ),
         ));
     }
+    Ok(())
+}
+
+/// Parses a unit and reports the compile-time sites it expanded.
+///
+/// A `const fn` call runs in a probe round, so a parse without answers cannot
+/// finish one: the call is recorded as a request and leaves a placeholder. A
+/// program the round has not answered is reported here instead of being
+/// compiled from that placeholder.
+pub fn parse_with_sites(
+    tokens: &[Token],
+) -> Result<(ast::TranslationUnit, Vec<ComptimeSite>), Diagnostic> {
+    let parsed = parse_for_probe(&Rc::new(tokens.to_vec()), Answers::default())?;
+    reject_unanswered(&parsed)?;
     Ok((parsed.unit, parsed.sites))
 }
 
@@ -238,9 +263,18 @@ pub fn parse_generic_args(
     Ok(args)
 }
 
+/// A preprocessed token stream that several parses can read without copying it.
+pub type TokenStream = Rc<Vec<Token>>;
+
 /// Parser state shared by every grammar file.
 pub(crate) struct Parser {
-    tokens: Vec<Token>,
+    /// The token stream being parsed.
+    ///
+    /// Shared rather than owned so the two passes over one translation unit, and
+    /// the checkpoints a speculative parse takes, all read the same copy: the
+    /// stream is tens of thousands of `Token`s each holding a `String`, so
+    /// copying it per pass and per checkpoint dominates parsing.
+    tokens: Rc<Vec<Token>>,
     /// Index of the next token; may point at a `Newline` the cursor skips.
     pos: usize,
     /// Span of the most recently consumed token.
@@ -729,6 +763,15 @@ pub(crate) struct Scope {
 
 impl Parser {
     fn new(tokens: Vec<Token>, prescan: bool) -> Self {
+        Parser::with_tokens(Rc::new(tokens), prescan)
+    }
+
+    /// Starts a parse over a stream that is already shared.
+    ///
+    /// A caller parsing the same unit more than once — the declaration and body
+    /// passes, or the rescans inside them — clones the `Rc` instead of the
+    /// stream.
+    fn with_tokens(tokens: Rc<Vec<Token>>, prescan: bool) -> Self {
         let last = tokens.first().map_or(
             Span {
                 file: FileId(0),

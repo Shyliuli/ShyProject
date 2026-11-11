@@ -392,7 +392,10 @@ impl ProbeContext {
 /// becomes a [`ProbeRequest`] and leaves a placeholder, so the parse finishes
 /// and the driver can run the next round; a call the trampoline cannot carry
 /// stays ordinary code. Nothing is evaluated here.
-pub fn parse_for_probe(tokens: &[Token], answers: Answers) -> Result<ParseOutput, Diagnostic> {
+pub fn parse_for_probe(
+    tokens: &super::TokenStream,
+    answers: Answers,
+) -> Result<ParseOutput, Diagnostic> {
     let (declarations, bodies_deferred) = parse_one_stage(tokens, answers.clone(), true)?;
     let mut output = if !declarations.requests.is_empty() || !bodies_deferred {
         declarations
@@ -428,12 +431,12 @@ pub fn parse_for_probe(tokens: &[Token], answers: Answers) -> Result<ParseOutput
 /// a placeholder and reported through the second half of the result, so the
 /// caller knows a second pass is needed.
 fn parse_one_stage(
-    tokens: &[Token],
+    tokens: &super::TokenStream,
     answers: Answers,
     defer_body_calls: bool,
 ) -> Result<(ParseOutput, bool), Diagnostic> {
     let global = super::decl::prescan(tokens);
-    let mut parser = Parser::new(tokens.to_vec(), false);
+    let mut parser = super::Parser::with_tokens(std::rc::Rc::clone(tokens), false);
     parser.scopes[0].typedefs = global.typedefs;
     parser.scopes[0].tags = global.tags;
     parser.scopes[0].traits = global.traits;
