@@ -5,7 +5,7 @@ bottom and three layers above it:
 
 | View | Contents |
 |---|---|
-| `c/` | the C include view: only `.h`, and only C-library headers — `stdio`, `stdlib`, `string`, `ctype`, `unistd`, `fcntl`, `errno`, `stddef`, `stdint`, `stdtype`, `stdarg` |
+| `c/` | the C include view: only `.h`, and only C-library headers — `stdio`, `stdlib`, `string`, `ctype`, `unistd`, `fcntl`, `errno`, `limits`, `stddef`, `stdint`, `stdtype`, `stdarg` |
 | `core/` | ShyC declarations and their C spelling (`str.shyh`, `buffer.shyh`, `option.{shyh,h}`, `result.{shyh,h}`), plus `core.shyc` |
 | `alloc/` | `vec.shyh`, `string.shyh`, `debug.shyh`, `display.shyh`, `alloc.shyc` |
 | `std/` | `fs.shyh`, `io.shyh`, `fmt.shyh`, `env.{shyh,shyc}`, `std.shyc` |
@@ -18,8 +18,12 @@ desugared on the way *out*, by the compiler, not carried in the source.
 
 `c/*.h` are generated from the `.shyh` sources in `libc/` and `core/` with
 `shyc --emit=c-header` and committed; `make libshy-headers` regenerates them.
-`c/stddef.h` and `c/stdint.h` are hand-written routers because their contents
-follow the target pointer width, which a generated header would freeze.
+`c/stddef.h`, `c/stdint.h`, `c/errno.h`, and `c/limits.h` forward to their native
+headers to preserve target-dependent definitions and macros.
+
+`<limits.h>` defines the integer bounds from `CHAR_MIN` through `ULLONG_MAX`.
+On ShyISA, `char` is signed, `short` is 16 bits, `int` is 32 bits, and both
+`long` and `long long` are 64 bits. `CHAR_BIT` is 8 and `MB_LEN_MAX` is 1.
 
 The C layer is libc-compatible, so ordinary C code compiles against it.
 `<stdtype.h>` adds Rust-style aliases such as `i32`, `u64`, and `usize`.
