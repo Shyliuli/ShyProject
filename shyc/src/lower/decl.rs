@@ -529,7 +529,7 @@ impl Lowerer {
         if let Some(GlobalRef::Function(index)) = self.global_ref(&symbol) {
             return self.function(index).symbol.clone();
         }
-        if self.file_local(storage, is_shy_fn, is_pub, defined) {
+        if self.file_local(storage, is_pub, is_shy_fn && defined) {
             self.internal_symbol(&symbol)
         } else {
             symbol
@@ -746,35 +746,31 @@ impl Lowerer {
         if matches!(name, "main" | "_start") && storage != Some(ast::StorageClass::Static) {
             return name.to_string();
         }
-        if self.file_local(storage, is_shy_fn, is_pub, defined) {
+        if self.file_local(storage, is_pub, is_shy_fn && defined) {
             self.internal_symbol(name)
         } else {
             name.to_string()
         }
     }
 
-    /// Whether a declaration gets a file-local symbol.
+    /// Whether a first declaration gets a file-local symbol.
     ///
-    /// `static` always does. A Shy `fn` or method does too, because ShyC makes
-    /// file-local the default; `#![disable_default_static]` restores the C
-    /// default for a file. A C-style declaration is only affected by `static`.
+    /// `static` stays local and `pub` exports. Otherwise `default_local`
+    /// selects the Shy default, unless the file restores C linkage defaults.
+    /// Callers select that default for Shy function bodies and non-extern objects.
     fn file_local(
         &self,
         storage: Option<ast::StorageClass>,
-        is_shy_fn: bool,
         is_pub: bool,
-        defined: bool,
+        default_local: bool,
     ) -> bool {
         if storage == Some(ast::StorageClass::Static) {
             return true;
         }
         if is_pub {
-            // 显式 `pub`：文件级默认被它关掉，就是导出。
             return false;
         }
-        // 原型声明的是别处的东西，永远按对外名字走；只有带函数体的定义
-        // 才吃「ShyC 默认文件级私有」这条规则。
-        is_shy_fn && defined && !self.disable_default_static
+        default_local && !self.disable_default_static
     }
 
     /// Register a function, checking redeclaration compatibility.
@@ -840,16 +836,6 @@ impl Lowerer {
         span: Span,
     ) -> Result<(), Diagnostic> {
         let is_extern = storage == Some(ast::StorageClass::Extern);
-        // 全局变量和函数同一套规则：`pub` 导出，`static` 私有，
-        // 两者都不写就是本单元私有（`#![disable_default_static]` 切回 C 默认）。
-        // `extern` 声明的是别处的东西，名字永远按对外符号走。
-        let symbol = if storage == Some(ast::StorageClass::Static)
-            || (!is_pub && !is_extern && !self.disable_default_static)
-        {
-            self.internal_symbol(name)
-        } else {
-            name.to_string()
-        };
         let defined = init.is_some() || !is_extern;
         let index = match self.global_ref(name) {
             Some(GlobalRef::Function(_)) => {
@@ -896,9 +882,15 @@ impl Lowerer {
                 index
             }
             None => {
+                // As with functions, the first declaration fixes the symbol.
+                let symbol = if self.file_local(storage, is_pub, !is_extern) {
+                    self.internal_symbol(name)
+                } else {
+                    name.to_string()
+                };
                 let index = self.objects.len();
                 self.objects.push(ObjectInfo {
-                    symbol: symbol.clone(),
+                    symbol,
                     ty,
                     qualifiers,
                     has_init: init.is_some(),
@@ -924,6 +916,7 @@ impl Lowerer {
             ));
         }
         if init.is_some() || self.objects[index].data.is_none() {
+            let symbol = self.objects[index].symbol.clone();
             let object_ty = self.objects[index].ty;
             let object_qualifiers = self.objects[index].qualifiers;
             let global =
