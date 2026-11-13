@@ -325,7 +325,7 @@ the program is built, so its body is ordinary ShyC: pointers, globals, `goto`,
 `sizeof`, loops, and the standard library all work. Nothing is interpreted, and
 nothing from the header set is special-cased. Building text is therefore normal
 ShyC code, which is what lets a generator write declarations the way a template
-would (see `libshy/std/fmt.shyh`, which builds the `println!` wrappers with
+would (see `libshy/std/fmt.shyh`, which builds the `println!` expansion with
 `String` and hands the finished source to `tokens_from_text`):
 
 ```c
@@ -636,22 +636,19 @@ The call inside `main` expands to a statement and prints `42`. At file scope the
 same call would expand to items instead, so a macro that produces statements is
 called from a function body.
 
-A macro meant for other files lives in a header, next to the traits it targets:
+A macro meant for other files lives in a header, next to the traits it targets.
+For example, `alloc/debug.shyh` provides `derive_debug`:
 
 ```c
-/* derive.shyh */
-const fn derive_debug(Tokens input) -> Tokens {
-    return tokens_concat(
-        tokens_concat(tokens_from_text("impl Debug for "), input),
-        tokens_from_text(" { fn debug(const self *value, String *out) -> int { ... } }"));
-}
-
-/* user.shyc */
-#include "derive.shyc"
-
+#include <std/fmt.shyh>
 struct Widget { int value; };
-
 derive_debug(Widget);
+
+int main(void) {
+    Widget widget = {42};
+    println!("{:?}", widget);
+    return 0;
+}
 ```
 
 A compile-time function is visible wherever its header is included, so it needs
@@ -662,21 +659,27 @@ jumps to the declaration. The call goes
 after the declaration it decorates, and `println!("{:?}", value)` then uses the
 generated impl — the argument still has to implement `Debug`.
 
-`println!` and `format!` take a **literal** format string. The compiler checks
-it once — placeholder count, `{}` versus `{:?}`, brace balance, and
-`{name}` names — and expands the call into the code that renders it: the
-literal pieces are pushed into a `String` and every argument becomes one
-`Display` or `Debug` call picked for its concrete type. Nothing about the
-format survives into the program, so there is no format string to parse and no
-per-arity wrapper to call. The expansion is a GNU statement expression, so it
-works wherever an expression does.
+`write!`, `writeln!`, `print!`, `println!`, `eprintln!`, and `format!` are
+library const fns receiving `Tokens`; `name!(...)` invokes a const fn with the
+argument tokens as written. Ordinary token-generator calls also accept
+`name(...)`. A runtime function with the same name keeps ordinary calls, so
+POSIX `write(...)` and formatting `write!(...)` can coexist.
 
-`writeln!(writer, ...)` is the same expansion with a destination: the format
-string follows the writer, the finished line is written through it, and the
-temporary `String` is freed. The writer is one ordinary expression of a type
-implementing `Writer`; the compiler stores it in a local, so it is evaluated
-once. A temporary endpoint (`stdout_writer()`) or a writer's address
-(`writeln!(&text, ...)` for a `String`) both work.
+The formatting const fns check the literal format string, its placeholder
+count, `{}` versus `{:?}`, brace balance, and `{name}` captures. They generate
+direct writes and concrete `Display`/`Debug` calls, inside a statement
+expression. Neither format parsing nor intermediate strings remain at run
+time. `Display` and `Debug` accept `WriterRef *`, a borrowed destination with
+the `Writer` function table; nested formatting uses the same destination.
+
+`write!(writer, ...)` writes without a newline; `writeln!` appends one.
+`print!` and `println!` use the global writer; `eprintln!` uses stderr.
+The destination and argument expressions are evaluated once, in order.
+The result is the byte count including any newline, or -1 when output fails.
+Short writes are retried, and failures stop the remaining output.
+A temporary endpoint (`stdout_writer()`) or a writer's address
+(`writeln!(&text, ...)` for a `String`) both work. `format!` creates a String
+as the destination and returns it; the caller calls `drop()` on it.
 
 `scanln!` is different: it hands its string to `sscanf`, so the compiler only
 counts C conversions and calls a wrapper, up to eight arguments:

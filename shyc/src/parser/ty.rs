@@ -491,7 +491,7 @@ impl Parser {
         parser.probe = self.probe.clone();
         parser.defer_body_calls = self.defer_body_calls;
         parser.body_stack = self.body_stack.clone();
-        parser.function_body_names = self.function_body_names.clone();
+        parser.function_bodies = self.function_bodies.clone();
         let mut members = Vec::new();
         while !parser.at_eof() {
             if parser.eat_punct(";") {

@@ -289,7 +289,16 @@ impl Parser {
         };
         function.params = const_params(&function.declarator);
         function.returns_tokens = returns_tokens_type(&function.specs);
+        // Token generators have a compile-time name, separate from runtime
+        // functions such as POSIX write. Probe images use a private symbol.
+        if function.params.len() == 1 && function.params[0].1 == ParamKind::Tokens {
+            function.declarator.name = Some(ast::Name::new(
+                format!("__shy_tokens_{}", function.name),
+                function.span,
+            ));
+        }
         self.const_fns.push(function);
+        self.pop_scope();
         Ok(())
     }
 
@@ -387,6 +396,14 @@ impl Parser {
                         ));
                     }
                 }
+            } else if self.scopes.len() == 1
+                && matches!(
+                    declarator.derived.first(),
+                    Some(DerivedDeclarator::Function(_))
+                )
+                && let Some(name) = &declarator.name
+            {
+                self.declare_value(&name.text);
             } else if self.scopes.len() > 1
                 && let Some(name) = &declarator.name
             {
@@ -537,6 +554,7 @@ impl Parser {
 
     fn fn_item(&mut self) -> Result<Item, Diagnostic> {
         let (start, specs, declarator) = self.fn_signature()?;
+        let name = declarator.name.clone();
         let declarator_span = declarator.span;
         let item = if self.at_punct("{") {
             let body = self.block_with_params(Some(&declarator))?;
@@ -561,6 +579,9 @@ impl Parser {
             })
         };
         self.pop_scope();
+        if let Some(name) = name {
+            self.declare_value(&name.text);
+        }
         Ok(item)
     }
 

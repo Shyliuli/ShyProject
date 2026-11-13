@@ -6,8 +6,8 @@
 //! semantic work.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CharLit, Expr, GenericArg, LetDecl, MemberOp, Name, NumberLit,
-    PostfixOp, Stmt, StringLit, StringLitGroup, UnaryOp,
+    AssignOp, BinaryOp, CharLit, Expr, GenericArg, MemberOp, Name, NumberLit, PostfixOp, StringLit,
+    StringLitGroup, UnaryOp,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -308,13 +308,6 @@ impl Parser {
         })
     }
 
-    /// Expand `println!("{}", a, b)` into the wrapper that takes two values.
-    ///
-    /// The format string is parsed at run time by the library, so the compile
-    /// time part is the arity: the call becomes `println2(fmt, a, b)` and the
-    /// generic bounds of that wrapper type-check every argument. A later
-    /// user-defined macro facility replaces this fixed table.
-
     /// Answers one const fn call in an expression from the probe cache.
     ///
     /// Unanswered calls become requests when the trampoline can carry the
@@ -584,39 +577,13 @@ impl Parser {
         }
     }
 
-    /// keeps its wrapper call, because \`sscanf\` reads the C conversions itself.
-    fn expand_format_macro(
+    /// scanln! keeps a typed wrapper because sscanf reads its format at run time.
+    fn expand_scan_macro(
         &mut self,
         name: Name,
         args: Vec<Expr>,
         span: Span,
     ) -> Result<Expr, Diagnostic> {
-        // `writeln!` takes the destination first, so its literal format
-        // string is the second argument. The writer is one ordinary expression:
-        // the expansion stores it in a local, which evaluates it exactly once.
-        if name.text == "writeln" {
-            if args.len() < 2 {
-                return Err(Diagnostic::new(
-                    span,
-                    "macro 'writeln!' takes a writer and a format string",
-                ));
-            }
-            let writer = args[0].clone();
-            let literal = match &args[1] {
-                Expr::String(group) => Some(string_value(group)?),
-                _ => None,
-            };
-            let Some(text) = literal else {
-                return Err(Diagnostic::new(
-                    name.span,
-                    "the format string of 'writeln!' must be a literal",
-                ));
-            };
-            let parts = split_format(&text, args.len() - 2, name.span)?;
-            let actions = format_actions(parts, args[2..].to_vec(), name.span)?;
-            self.record_macro_site(&name.text.clone(), name.span, "fmt_begin");
-            return Ok(self.format_statement(&name, actions, Some(writer), span));
-        }
         let Some(format) = args.first() else {
             return Err(Diagnostic::new(
                 span,
@@ -628,25 +595,6 @@ impl Parser {
             _ => None,
         };
         match name.text.as_str() {
-            "println" | "format" => {
-                let Some(text) = literal else {
-                    return Err(Diagnostic::new(
-                        name.span,
-                        format!("the format string of '{}!' must be a literal", name.text),
-                    ));
-                };
-                let parts = split_format(&text, args.len() - 1, name.span)?;
-                let actions = format_actions(parts, args[1..].to_vec(), name.span)?;
-                // The macro keeps a definition to jump to: the library call its
-                // expansion starts with.
-                let entry = if name.text == "println" {
-                    "fmt_line"
-                } else {
-                    "fmt_begin"
-                };
-                self.record_macro_site(&name.text.clone(), name.span, entry);
-                Ok(self.format_statement(&name, actions, None, span))
-            }
             "scanln" => {
                 if args.len() - 1 > 8 {
                     return Err(Diagnostic::new(
@@ -679,116 +627,6 @@ impl Parser {
                 name.span,
                 format!("unknown macro '{other}!'"),
             )),
-        }
-    }
-
-    /// The statement expression a println!, writeln!, or format! call stands
-    /// for. A writeln! fills the same String and hands it to the writer the
-    /// call named, then frees it; format! returns it to the caller.
-    fn format_statement(
-        &mut self,
-        name: &Name,
-        actions: Vec<FormatAction>,
-        writer: Option<Expr>,
-        span: Span,
-    ) -> Expr {
-        self.macro_index += 1;
-        let out = Name::new(format!("__fmt_out_{}", self.macro_index), span);
-        let mut stmts = Vec::with_capacity(actions.len() + 2);
-        stmts.push(Stmt::Let(LetDecl {
-            span,
-            is_mut: true,
-            is_defer: false,
-            name: out.clone(),
-            init: plain_call("fmt_begin", Vec::new(), span),
-        }));
-        for action in actions {
-            match action {
-                FormatAction::Text(text) => {
-                    if text.is_empty() {
-                        continue;
-                    }
-                    stmts.push(Stmt::Expr {
-                        expr: method_call(
-                            &out,
-                            "push_cstr",
-                            vec![string_literal(&text, span)],
-                            span,
-                        ),
-                        span,
-                    });
-                }
-                FormatAction::Argument { debug, value } => {
-                    let slot = value.span();
-                    let render = if debug { "fmt_debug" } else { "fmt_display" };
-                    stmts.push(Stmt::Expr {
-                        expr: plain_call(render, vec![value, address_of(&out, span)], slot),
-                        span: slot,
-                    });
-                }
-            }
-        }
-        if let Some(writer) = writer {
-            // One local for the destination expression: it is evaluated here,
-            // once, and every call below uses that same value.
-            let writer_name = Name::new(format!("__fmt_writer_{}", self.macro_index), span);
-            stmts.push(Stmt::Let(LetDecl {
-                span,
-                is_mut: true,
-                is_defer: false,
-                name: writer_name.clone(),
-                init: writer,
-            }));
-            let written = Name::new(format!("__fmt_written_{}", self.macro_index), span);
-            stmts.push(Stmt::Let(LetDecl {
-                span,
-                is_mut: false,
-                is_defer: false,
-                name: written.clone(),
-                init: method_call(
-                    &writer_name,
-                    "write_line",
-                    vec![address_of(&out, span)],
-                    span,
-                ),
-            }));
-            stmts.push(Stmt::Expr {
-                expr: method_call(&out, "free", Vec::new(), span),
-                span,
-            });
-            stmts.push(Stmt::Expr {
-                expr: Expr::Name(written),
-                span,
-            });
-        } else if name.text == "println" {
-            // println! writes the line itself, so it keeps the count the
-            // writer returned and frees the temporary String before handing
-            // that count back to the caller.
-            let written = Name::new(format!("__fmt_written_{}", self.macro_index), span);
-            stmts.push(Stmt::Let(LetDecl {
-                span,
-                is_mut: false,
-                is_defer: false,
-                name: written.clone(),
-                init: plain_call("fmt_line", vec![address_of(&out, span)], span),
-            }));
-            stmts.push(Stmt::Expr {
-                expr: method_call(&out, "free", Vec::new(), span),
-                span,
-            });
-            stmts.push(Stmt::Expr {
-                expr: Expr::Name(written),
-                span,
-            });
-        } else {
-            stmts.push(Stmt::Expr {
-                expr: Expr::Name(out),
-                span,
-            });
-        }
-        Expr::StatementExpr {
-            block: Block { span, stmts },
-            span,
         }
     }
 
@@ -849,9 +687,14 @@ impl Parser {
                 };
                 let name = name.clone();
                 self.bump();
+                if let Some(index) = self.const_fns.iter().position(|f| f.name == name.text) {
+                    expr = self.probe_expr_call(index, name.span)?;
+                    fresh_try = false;
+                    continue;
+                }
                 let (args, close) = self.call_arguments()?;
                 let span = expr.span().join(close);
-                expr = self.expand_format_macro(name, args, span)?;
+                expr = self.expand_scan_macro(name, args, span)?;
                 fresh_try = false;
             } else if self.at_punct("(") {
                 // `try_run(f, args..., &result)` asks the probe to run an
@@ -878,10 +721,12 @@ impl Parser {
                 // locals, so only the evaluator can run it.
                 if let Expr::Name(name) = &expr
                     && let Some(index) = self.const_fns.iter().position(|f| f.name == name.text)
+                    && !self.scopes[0].values.contains(&name.text)
                 {
                     let span = expr.span();
                     if self.in_const_body {
                         self.record_const_call(index, span);
+                        expr = Expr::Name(self.const_fns[index].declarator.name.clone().unwrap());
                     } else if self.probe_active() {
                         expr = self.probe_expr_call(index, span)?;
                         fresh_try = false;
@@ -1145,24 +990,6 @@ impl Parser {
         Ok(parts)
     }
 }
-/// One piece of a compiled format string.
-enum FormatPart {
-    /// Literal text, escapes decoded and braces resolved.
-    Text(String),
-    /// A placeholder, rendered with Display or Debug.
-    Slot {
-        debug: bool,
-        /// The variable a \`{name}\` placeholder inserts, if it names one.
-        name: Option<String>,
-    },
-}
-
-/// One step of the statement expression a format macro compiles to.
-enum FormatAction {
-    Text(String),
-    Argument { debug: bool, value: Expr },
-}
-
 /// The text a string literal stands for, escapes decoded.
 fn string_value(group: &StringLitGroup) -> Result<String, Diagnostic> {
     let mut text = String::new();
@@ -1171,147 +998,6 @@ fn string_value(group: &StringLitGroup) -> Result<String, Diagnostic> {
         text.push_str(&String::from_utf8_lossy(&value.bytes));
     }
     Ok(text)
-}
-
-/// Splits a literal format string into text and placeholders.
-///
-/// \`{{\`/\`}}\` are resolved here, so nothing downstream looks for a brace, and
-/// the placeholder count is checked against the arguments the call supplied.
-fn split_format(text: &str, arguments: usize, span: Span) -> Result<Vec<FormatPart>, Diagnostic> {
-    let mut parts: Vec<FormatPart> = Vec::new();
-    let mut pending = String::new();
-    let mut placeholders = 0;
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
-        match character {
-            '{' if characters.peek() == Some(&'{') => {
-                characters.next();
-                pending.push('{');
-            }
-            '}' if characters.peek() == Some(&'}') => {
-                characters.next();
-                pending.push('}');
-            }
-            '{' => {
-                let mut inner = String::new();
-                loop {
-                    match characters.next() {
-                        Some('}') => break,
-                        Some(character) => inner.push(character),
-                        None => {
-                            return Err(Diagnostic::new(span, "format string has an unclosed '{'"));
-                        }
-                    }
-                }
-                let (name, debug) = format_spec(&inner, span)?;
-                if !pending.is_empty() {
-                    parts.push(FormatPart::Text(std::mem::take(&mut pending)));
-                }
-                // A `{name}` placeholder inserts a variable that is already in
-                // scope, so only the positional ones take an argument.
-                if name.is_none() {
-                    placeholders += 1;
-                }
-                parts.push(FormatPart::Slot { debug, name });
-            }
-            character => pending.push(character),
-        }
-    }
-    if !pending.is_empty() {
-        parts.push(FormatPart::Text(pending));
-    }
-    if placeholders != arguments {
-        return Err(placeholder_mismatch(placeholders, arguments, span));
-    }
-    Ok(parts)
-}
-
-/// The variable and Debug flag of one \`{...}\` placeholder.
-fn format_spec(inner: &str, span: Span) -> Result<(Option<String>, bool), Diagnostic> {
-    match inner {
-        "" => return Ok((None, false)),
-        ":?" => return Ok((None, true)),
-        _ => {}
-    }
-    let (name, debug) = match inner.strip_suffix(":?") {
-        Some(name) => (name, true),
-        None => (inner, false),
-    };
-    let valid = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_');
-    if !valid {
-        return Err(Diagnostic::new(
-            span,
-            format!("unknown format specifier '{{{inner}}}'"),
-        ));
-    }
-    Ok((Some(name.to_string()), debug))
-}
-
-/// Pairs each placeholder with its argument, in order.
-fn format_actions(
-    parts: Vec<FormatPart>,
-    values: Vec<Expr>,
-    span: Span,
-) -> Result<Vec<FormatAction>, Diagnostic> {
-    let mut values = values.into_iter();
-    let mut actions = Vec::with_capacity(parts.len());
-    for part in parts {
-        match part {
-            FormatPart::Text(text) => actions.push(FormatAction::Text(text)),
-            FormatPart::Slot { debug, name } => {
-                let value = match name {
-                    // \`{name}\` inserts the variable of that name, so no
-                    // argument was written for it.
-                    Some(variable) => Expr::Name(Name::new(variable, span)),
-                    None => match values.next() {
-                        Some(value) => value,
-                        None => {
-                            return Err(Diagnostic::new(
-                                span,
-                                "format string has more placeholders than arguments",
-                            ));
-                        }
-                    },
-                };
-                actions.push(FormatAction::Argument { debug, value });
-            }
-        }
-    }
-    Ok(actions)
-}
-
-/// A call to a plain function name.
-fn plain_call(name: &str, args: Vec<Expr>, span: Span) -> Expr {
-    Expr::Call {
-        callee: Box::new(Expr::Name(Name::new(name.to_string(), span))),
-        type_args: Vec::new(),
-        args,
-        span,
-    }
-}
-
-/// \`object.method(args)\` on a local name.
-fn method_call(object: &Name, method: &str, args: Vec<Expr>, span: Span) -> Expr {
-    Expr::Call {
-        callee: Box::new(Expr::Member {
-            object: Box::new(Expr::Name(object.clone())),
-            name: Name::new(method.to_string(), span),
-            op: MemberOp::Dot,
-            span,
-        }),
-        type_args: Vec::new(),
-        args,
-        span,
-    }
-}
-
-/// \`&name\`.
-fn address_of(name: &Name, span: Span) -> Expr {
-    Expr::Unary {
-        op: UnaryOp::AddressOf,
-        operand: Box::new(Expr::Name(name.clone())),
-        span,
-    }
 }
 
 /// One string literal expression, escapes re-applied.
@@ -1422,10 +1108,12 @@ fn parse_fragment(tokens: Vec<Token>, span: Span, parent: &mut Parser) -> Result
     parser.scopes[0].typedefs = parent.scopes[0].typedefs.clone();
     parser.scopes[0].tags = parent.scopes[0].tags.clone();
     parser.scopes[0].traits = parent.scopes[0].traits.clone();
+    parser.scopes[0].values = parent.scopes[0].values.clone();
+    parser.const_fns = parent.const_fns.clone();
     parser.probe = parent.probe.clone();
     parser.defer_body_calls = parent.defer_body_calls;
     parser.body_stack = parent.body_stack.clone();
-    parser.function_body_names = parent.function_body_names.clone();
+    parser.function_bodies = parent.function_bodies.clone();
     let expr = parser.expression()?;
     if !parser.at_eof() {
         return Err(Diagnostic::new(

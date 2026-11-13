@@ -364,6 +364,7 @@ struct RecordReflection {
 /// ordinary definitions the generated source supplies.
 #[derive(Default)]
 struct BuiltinNeeds {
+    compile_error: bool,
     tokens_len: bool,
     token_text: bool,
     tokens_from_text: bool,
@@ -383,7 +384,8 @@ struct BuiltinNeeds {
 
 impl BuiltinNeeds {
     fn any(&self) -> bool {
-        self.tokens_len
+        self.compile_error
+            || self.tokens_len
             || self.token_text
             || self.tokens_from_text
             || self.tokens_from_int
@@ -497,6 +499,32 @@ fn generated_items(
     }
     if needs.tokens_from_text {
         source.push_str(&tokens_from_text(layout));
+    }
+    if needs.compile_error {
+        source.push_str(
+            r#"
+void compile_error(const char *message) {
+    int request[5] = {11, (int)message, 0, 0, 0};
+    int reply[1];
+    int *queue = request;
+    int *answer = reply;
+    asm!(queue, answer) {
+        "seta 9x 4x\n"
+        "seta ax 5x\n"
+        "setn 0x 999\n"
+        "setn 1x 3\n"
+        "setn 2x 11\n"
+        "seta 3x 9x\n"
+        "setn 4x 20\n"
+        "seta 5x ax\n"
+        "setn 6x 4\n"
+        "syscall\n"
+        "seta 4x 9x\n"
+        "seta 5x ax\n"
+    };
+}
+"#,
+        );
     }
     if needs.builds_tokens() {
         if needs.tokens_from_int {
@@ -1611,6 +1639,7 @@ fn builtin_names(caller: &str, names: &[String], needs: &mut BuiltinNeeds) -> Op
             ));
         }
         match name.as_str() {
+            "compile_error" => needs.compile_error = true,
             "tokens_len" => needs.tokens_len = true,
             "token_text" => needs.token_text = true,
             "tokens_from_text" => needs.tokens_from_text = true,
@@ -1640,17 +1669,17 @@ fn unit_calls(items: &[ast::Item], calls: &mut Vec<(String, Vec<String>)>) {
     for item in items {
         match item {
             ast::Item::Function(function) => {
-                method_names(&function.declarator, &function.body, calls);
+                method_names(&function.declarator, &function.body, calls, true);
             }
             ast::Item::Impl(block) => {
                 for method in &block.methods {
-                    method_names(&method.declarator, &method.body, calls);
+                    method_names(&method.declarator, &method.body, calls, false);
                 }
             }
             ast::Item::Trait(declaration) => {
                 for method in &declaration.methods {
                     if let Some(body) = &method.body {
-                        method_names(&method.declarator, body, calls);
+                        method_names(&method.declarator, body, calls, false);
                     }
                 }
             }
@@ -1668,12 +1697,16 @@ fn method_names(
     declarator: &ast::Declarator,
     body: &ast::Block,
     calls: &mut Vec<(String, Vec<String>)>,
+    plain_function: bool,
 ) {
-    let caller = declarator
+    let mut caller = declarator
         .name
         .as_ref()
         .map(|name| name.text.clone())
         .unwrap_or_else(|| "<function>".to_string());
+    if !plain_function {
+        caller = format!("{caller}@{}:{}", body.span.file.0, body.span.start);
+    }
     let mut names = Vec::new();
     called_names(body, &mut names);
     calls.push((caller, names));
@@ -1917,23 +1950,35 @@ fn unresolved_reached(
     helpers: &[(String, Vec<String>)],
 ) -> Option<String> {
     let function = parsed.const_fns.get(request.function)?;
-    let mut pending = vec![function.name.clone()];
+    let mut pending = vec![function.declarator.name.as_ref()?.text.clone()];
     let mut seen: Vec<String> = Vec::new();
     while let Some(name) = pending.pop() {
         if seen.contains(&name) {
             continue;
         }
-        if parsed.deferred_body_functions.contains(&name) {
-            return Some(name);
-        }
         seen.push(name.clone());
-        if let Some(index) = parsed
-            .const_fns
-            .iter()
-            .position(|function| function.name == name)
-        {
+        if let Some(index) = parsed.const_fns.iter().position(|function| {
+            function
+                .declarator
+                .name
+                .as_ref()
+                .is_some_and(|n| n.text == name)
+        }) {
+            if body_is_unresolved(
+                parsed.const_fns[index].body.span,
+                &parsed.deferred_body_functions,
+            ) {
+                return Some(name);
+            }
             called_names(&parsed.const_fns[index].body, &mut pending);
         } else if let Some((_, names)) = helpers.iter().find(|(helper, _)| *helper == name) {
+            if parsed.unit.items.iter().any(|item| {
+                matches!(item, ast::Item::Function(function)
+                    if function.declarator.name.as_ref().is_some_and(|n| n.text == name)
+                    && body_is_unresolved(function.body.span, &parsed.deferred_body_functions))
+            }) {
+                return Some(name);
+            }
             pending.extend(names.iter().cloned());
         }
     }
@@ -1947,7 +1992,13 @@ fn unresolved_reached(
 /// out of the round, and an indirect call must fail instead of answering from a
 /// missing expansion. Keeping only the fail-fast entry call and a zero return
 /// also keeps the placeholder's type out of the image's type check.
-fn guard_unresolved_bodies(items: &mut [ast::Item], names: &[String]) -> bool {
+fn body_is_unresolved(body: Span, openings: &[Span]) -> bool {
+    openings
+        .iter()
+        .any(|span| span.file == body.file && span.start == body.start)
+}
+
+fn guard_unresolved_bodies(items: &mut [ast::Item], names: &[Span]) -> bool {
     let mut guarded = false;
     for item in items {
         match item {
@@ -1988,12 +2039,12 @@ fn guard_unresolved_body(
     specs: &ast::DeclSpecs,
     declarator: &ast::Declarator,
     body: &mut ast::Block,
-    names: &[String],
+    names: &[Span],
 ) -> bool {
     let Some(name) = &declarator.name else {
         return false;
     };
-    if !names.contains(&name.text) {
+    if !body_is_unresolved(body.span, names) {
         return false;
     }
     let span = body.span;
@@ -2117,11 +2168,13 @@ fn const_dependencies(
     unit_calls(items, &mut helper_calls);
     for (_, names) in helper_calls {
         for name in names {
-            if let Some(index) = parsed
-                .const_fns
-                .iter()
-                .position(|function| function.name == name)
-            {
+            if let Some(index) = parsed.const_fns.iter().position(|function| {
+                function
+                    .declarator
+                    .name
+                    .as_ref()
+                    .is_some_and(|n| n.text == name)
+            }) {
                 pending.push(index);
             }
         }
@@ -2134,10 +2187,13 @@ fn const_dependencies(
         let mut names = Vec::new();
         called_names(&parsed.const_fns[index].body, &mut names);
         for name in names {
-            let dependency = parsed
-                .const_fns
-                .iter()
-                .position(|function| function.name == name);
+            let dependency = parsed.const_fns.iter().position(|function| {
+                function
+                    .declarator
+                    .name
+                    .as_ref()
+                    .is_some_and(|n| n.text == name)
+            });
             if let Some(dependency) = dependency
                 && !reached.contains(&dependency)
             {

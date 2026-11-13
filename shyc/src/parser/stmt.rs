@@ -258,11 +258,6 @@ impl Parser {
         let is_function_body = params.is_some();
         if is_function_body {
             self.function_bodies.push(open);
-            self.function_body_names.push(
-                params
-                    .and_then(|declarator| declarator.name.as_ref())
-                    .map(|name| name.text.clone()),
-            );
         }
         self.push_scope();
         if let Some(declarator) = params
@@ -287,7 +282,6 @@ impl Parser {
         self.body_stack.pop();
         if is_function_body {
             self.function_bodies.pop();
-            self.function_body_names.pop();
         }
         Ok(Block {
             span: open.join(close),
@@ -665,7 +659,7 @@ impl Parser {
         parser.body_world = self.body_world.clone();
         parser.defer_body_calls = self.defer_body_calls;
         parser.body_stack = self.body_stack.clone();
-        parser.function_body_names = self.function_body_names.clone();
+        parser.function_bodies = self.function_bodies.clone();
         let mut statements = Vec::new();
         while !parser.at_eof() {
             statements.extend(parser.statement_or_expansion()?);

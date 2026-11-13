@@ -102,12 +102,18 @@ fn global_reader(void) -> FileReader;
    device implements Reader/Writer for it and calls the trait methods. */
 fn print<B: Buffer>(B *buffer) -> int {
     let mut out = global_writer();
-    return out.write_buffer(buffer);
+    let mut writer = out.borrow();
+    return writer.write_all(buffer.data(), buffer.len());
 }
 
 fn print_line<B: Buffer>(B *buffer) -> int {
     let mut out = global_writer();
-    return out.write_line(buffer);
+    let mut writer = out.borrow();
+    int written = writer.write_all(buffer.data(), buffer.len());
+    if (written < 0 || writer.putc('\n') < 0) {
+        return -1;
+    }
+    return written;
 }
 
 fn get_char(void) -> int;

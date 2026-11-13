@@ -107,6 +107,8 @@ const HOST_OP_PROVIDE_IMPL: u32 = 9;
 /// op 10: reject a field query for an unknown or unsupported struct.
 #[cfg(feature = "constfn-probe")]
 const HOST_OP_FIELD_REFLECTION_FAILURE: u32 = 10;
+#[cfg(feature = "constfn-probe")]
+const HOST_OP_COMPILE_ERROR: u32 = 11;
 /// The highest `TokenKind` a committed token stream may carry: the seven kinds
 /// the compiler's lexer declares (ident, number, string, char, punct, newline,
 /// eof).
@@ -806,6 +808,7 @@ pub fn answer_host_request(
             Ok((text.len() as u32).to_be_bytes().to_vec())
         }
         HOST_OP_TOKENS_FROM_TEXT => answer_tokens_from_text(&call, emu, layout),
+        HOST_OP_COMPILE_ERROR => bail!("{}", query_name(emu, call.args[0])?),
         HOST_OP_TRY => answer_try(&call, emu, provided),
         HOST_OP_IMPLEMENTS | HOST_OP_DECLARED => answer_world_query(&call, emu),
         HOST_OP_PROVIDE_IMPL => answer_provide_impl(&call, emu, provided),
