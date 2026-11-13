@@ -316,6 +316,16 @@ int numbers[factorial(5)];        // 120 elements
 char buffer[round_up(37, 16)];    // 48 bytes
 ```
 
+In an expression, `name!(...)` explicitly calls a declared `const fn`.
+This works for user-defined functions too: `factorial!(5)` produces `120`.
+The `!` does not change the signature: value parameters receive compile-time
+values, while a single `Tokens` parameter receives the argument syntax.
+
+Ordinary `name(...)` calls also select a const fn unless a runtime function has
+the same name. In that case, `name(...)` selects the runtime function and
+`name!(...)` selects the const fn. The `!` is a way to choose the compile-time
+function, not a marker reserved for compiler builtins.
+
 A string argument is the text the program would see at run time: escapes are
 already decoded, so a `const char *` parameter receives the three bytes of
 `"a\tb"`, and `tokens_from_text("\"x\"")` lexes a quoted token.
@@ -627,7 +637,7 @@ const fn twice(Tokens input) -> Tokens {
 }
 
 int main(void) {
-    show(twice(20) + 2);   /* generates print_value((20) * 2 + 2); */
+    show(twice!(20) + 2);  /* generates print_value((20) * 2 + 2); */
     return 0;
 }
 ```
@@ -660,10 +670,9 @@ after the declaration it decorates, and `println!("{:?}", value)` then uses the
 generated impl — the argument still has to implement `Debug`.
 
 `write!`, `writeln!`, `print!`, `println!`, `eprintln!`, and `format!` are
-library const fns receiving `Tokens`; `name!(...)` invokes a const fn with the
-argument tokens as written. Ordinary token-generator calls also accept
-`name(...)`. A runtime function with the same name keeps ordinary calls, so
-POSIX `write(...)` and formatting `write!(...)` can coexist.
+library const fns receiving `Tokens`. They use the same `name!(...)` call syntax
+as any user-defined const fn. Ordinary token-generator calls also accept
+`name(...)`; POSIX `write(...)` and formatting `write!(...)` can coexist.
 
 The formatting const fns check the literal format string, its placeholder
 count, `{}` versus `{:?}`, brace balance, and `{name}` captures. They generate

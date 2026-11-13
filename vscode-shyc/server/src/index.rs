@@ -33,7 +33,7 @@ pub enum SymKind {
     TypeParam,
     ConstParam,
     Label,
-    /// A const fn declaration, a call to one, or a println!/format!/scanln!.
+    /// A const fn declaration or call, including name!(...), or built-in scanln!.
     Comptime,
 }
 
@@ -652,12 +652,12 @@ impl Collector<'_> {
     fn collect_comptime(&mut self, sites: &[shyc::parser::ComptimeSite]) {
         use shyc::parser::ComptimeSiteKind;
 
-        let mut declarations: HashMap<usize, usize> = HashMap::new();
+        let mut declarations: HashMap<Span, usize> = HashMap::new();
         for site in sites {
             if site.kind != ComptimeSiteKind::Declaration {
                 continue;
             }
-            if declarations.contains_key(&site.span.start) {
+            if declarations.contains_key(&site.span) {
                 continue;
             }
             let detail = match site.signature {
@@ -677,7 +677,7 @@ impl Collector<'_> {
                 container: None,
                 scope: None,
             });
-            declarations.insert(site.span.start, id);
+            declarations.insert(site.span, id);
         }
 
         for site in sites {
@@ -686,7 +686,7 @@ impl Collector<'_> {
                 ComptimeSiteKind::Call => {
                     let target = site
                         .declaration
-                        .and_then(|declaration| declarations.get(&declaration.start).copied())
+                        .and_then(|declaration| declarations.get(&declaration).copied())
                         .or_else(|| self.index.lookup(&site.name).first().copied());
                     if let Some(target) = target {
                         self.index.add_ref(site.span, target);
@@ -1364,15 +1364,10 @@ impl Collector<'_> {
     fn infer_method_call_type(&self, object: &ast::Expr, name: &Name) -> Option<String> {
         let receiver = self.infer_expr_type(object)?;
         let container = base_type_name(&receiver);
-        let id = self
-            .index
-            .lookup(&name.text)
-            .iter()
-            .copied()
-            .find(|&id| {
-                self.index.symbols[id].kind == SymKind::Method
-                    && self.index.symbols[id].container.as_deref() == Some(container.as_str())
-            })?;
+        let id = self.index.lookup(&name.text).iter().copied().find(|&id| {
+            self.index.symbols[id].kind == SymKind::Method
+                && self.index.symbols[id].container.as_deref() == Some(container.as_str())
+        })?;
         let return_type = self.index.symbols[id].type_text.clone()?;
         let generics = self
             .index
@@ -1616,10 +1611,7 @@ fn type_kinds(kind: SymKind) -> bool {
 /// Parameters, locals, and fields belong to whatever declaration introduced
 /// them, so a same-named one from an included file is not this name.
 fn file_value_kind(kind: SymKind) -> bool {
-    matches!(
-        kind,
-        SymKind::Function | SymKind::Global | SymKind::Variant
-    )
+    matches!(kind, SymKind::Function | SymKind::Global | SymKind::Variant)
 }
 
 /// Rebuild a method return type from the receiver's actual type arguments.

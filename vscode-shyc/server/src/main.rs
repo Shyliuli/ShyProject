@@ -1089,6 +1089,18 @@ fn symbol_at(analysis: &Analysis, offset: usize) -> Option<&index::Sym> {
     }
     let (start, end) = text::word_span(&analysis.text, offset)?;
     let name = &analysis.text[start..end];
+    let explicit_const_call = analysis.text[end..]
+        .trim_start()
+        .strip_prefix('!')
+        .is_some_and(|rest| rest.trim_start().starts_with('('));
+    if explicit_const_call {
+        return analysis
+            .index
+            .lookup(name)
+            .iter()
+            .map(|&id| analysis.index.symbol(id))
+            .find(|symbol| symbol.kind == SymKind::Comptime);
+    }
     if let Some(id) = analysis
         .index
         .visible_symbols(analysis.root, offset)
@@ -1306,6 +1318,11 @@ fn semantic_tokens(analysis: &Analysis) -> Vec<SemanticToken> {
                         class
                     } else if let Some(token_type) = keyword_token(word) {
                         (token_type, 0)
+                    } else if matches!(
+                        next.map(|token| &token.kind),
+                        Some(shyc::lexer::TokenKind::Punct(punct)) if punct == "!"
+                    ) {
+                        (TOK_MACRO, 0)
                     } else if let Some(id) = analysis.index.lookup(word).first() {
                         (token_type(analysis.index.symbol(*id).kind), 0)
                     } else {
@@ -1495,6 +1512,7 @@ fn completions(analysis: &Analysis, offset: usize) -> Vec<CompletionItem> {
         if !matches!(
             symbol.kind,
             SymKind::Function
+                | SymKind::Comptime
                 | SymKind::Struct
                 | SymKind::Union
                 | SymKind::Enum
@@ -1639,7 +1657,7 @@ fn dedupe(items: Vec<CompletionItem>) -> Vec<CompletionItem> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for item in items {
-        let key = format!("{:?}:{}", item.kind, item.label);
+        let key = format!("{:?}:{}:{:?}", item.kind, item.label, item.detail);
         if seen.insert(key) {
             out.push(item);
         }
