@@ -1388,8 +1388,10 @@ struct CompletionContext {
 fn completion_context(text: &str, offset: usize) -> CompletionContext {
     let before = &text[..offset];
     let word_start = before
-        .rfind(|character: char| !(character.is_alphanumeric() || character == '_'))
-        .map(|index| index + 1)
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !(character.is_alphanumeric() || *character == '_'))
+        .map(|(index, character)| index + character.len_utf8())
         .unwrap_or(0);
     let prefix = before[word_start..].to_string();
     let head = before[..word_start].trim_end();
@@ -1444,8 +1446,10 @@ fn strip_generic_arguments(text: &str) -> String {
 fn trailing_identifier(text: &str) -> Option<String> {
     let text = text.trim_end();
     let start = text
-        .rfind(|character: char| !(character.is_alphanumeric() || character == '_'))
-        .map(|index| index + 1)
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !(character.is_alphanumeric() || *character == '_'))
+        .map(|(index, character)| index + character.len_utf8())
         .unwrap_or(0);
     let name = &text[start..];
     if name.is_empty() {
