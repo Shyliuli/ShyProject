@@ -9,7 +9,7 @@ impl Str {
             Str empty = {0, 0};
             return empty;
         }
-        let mut n = 0;
+        let mut n = (usize)0;
         while (s[n]) {
             n = n + 1;
         }
@@ -25,7 +25,7 @@ impl Str {
         if (s.len != other.len) {
             return 0;
         }
-        for (int i = 0; i < s.len; i++) {
+        for (usize i = 0; i < s.len; i++) {
             if (s.data[i] != other.data[i]) {
                 return 0;
             }
@@ -42,7 +42,7 @@ impl Str {
         if (p.len > s.len) {
             return 0;
         }
-        for (int i = 0; i < p.len; i++) {
+        for (usize i = 0; i < p.len; i++) {
             if (s.data[i] != p.data[i]) {
                 return 0;
             }
@@ -55,8 +55,8 @@ impl Str {
         if (p.len > s.len) {
             return 0;
         }
-        int start = s.len - p.len;
-        for (int i = 0; i < p.len; i++) {
+        usize start = s.len - p.len;
+        for (usize i = 0; i < p.len; i++) {
             if (s.data[start + i] != p.data[i]) {
                 return 0;
             }
@@ -64,53 +64,52 @@ impl Str {
         return 1;
     }
 
-    pub fn find(const self *s, Str needle) -> int {
+    pub fn find(const self *s, Str needle) -> isize {
         if (needle.len == 0) {
             return 0;
         }
         if (needle.len > s.len) {
             return -1;
         }
-        for (int start = 0; start <= s.len - needle.len; start++) {
+        for (usize start = 0; start <= s.len - needle.len; start++) {
             int matched = 1;
-            for (int i = 0; i < needle.len; i++) {
+            for (usize i = 0; i < needle.len; i++) {
                 if (s.data[start + i] != needle.data[i]) {
                     matched = 0;
                     break;
                 }
             }
             if (matched) {
-                return start;
+                return (isize)start;
             }
         }
         return -1;
     }
 
-    pub fn slice(const self *s, int start, int len) -> Str {
-        if (start < 0 || len < 0 || start > s.len || len > s.len - start) {
-            Str empty = {0, 0};
-            return empty;
+    pub fn slice(const self *s, usize start, usize end) -> Option<Str> {
+        if (start > end || end > s.len) {
+            return Option<Str>::None();
         }
         // A null view has len 0, so only (0, 0) reaches here; do not form
         // `NULL + 0`, which C leaves undefined.
         if (s.data == 0) {
             Str empty = {0, 0};
-            return empty;
+            return Option<Str>::Some(empty);
         }
-        Str result = {s.data + start, len};
-        return result;
+        Str result = {s.data + start, end - start};
+        return Option<Str>::Some(result);
     }
 
     pub fn trim(const self *s) -> Str {
-        int start = 0;
-        int end = s.len;
+        usize start = 0;
+        usize end = s.len;
         while (start < end && str_is_space(s.data[start])) {
             start = start + 1;
         }
         while (end > start && str_is_space(s.data[end - 1])) {
             end = end - 1;
         }
-        return s.slice(start, end - start);
+        return s.slice(start, end).unwrap();
     }
 
     pub fn split(const self *s, int separator) -> StrSplit {
@@ -122,7 +121,7 @@ impl Str {
     }
 
     pub fn parse_int(const self *s) -> Option<int> {
-        int i = 0;
+        usize i = 0;
         int negative = 0;
         if (s.len > 0 && (s.data[0] == '+' || s.data[0] == '-')) {
             negative = s.data[0] == '-';
@@ -164,15 +163,15 @@ impl StrSplit {
         if (s.done) {
             return Option<Str>::None();
         }
-        int start = 0;
+        usize start = 0;
         while (start < s.rest.len && s.rest.data[start] != (char)s.separator) {
             start = start + 1;
         }
-        Str piece = s.rest.slice(0, start);
+        Str piece = s.rest.slice(0, start).unwrap();
         if (start == s.rest.len) {
             s.done = 1;
         } else {
-            s.rest = s.rest.slice(start + 1, s.rest.len - start - 1);
+            s.rest = s.rest.slice(start + 1, s.rest.len).unwrap();
         }
         return Option<Str>::Some(piece);
     }

@@ -5,11 +5,11 @@
 #include <stdint.h>
 #include <alloc/string.shyh>
 
-fn string_reserve(String *s, int required) {
+fn string_reserve(String *s, usize required) {
     if (required <= s.cap) {
         return;
     }
-    int cap = s.cap ? s.cap : 16;
+    usize cap = s.cap ? s.cap : 16;
     while (cap < required) {
         cap = cap * 2;
     }
@@ -34,7 +34,7 @@ impl String {
         return s;
     }
 
-    pub fn with_capacity(int capacity) -> String {
+    pub fn with_capacity(usize capacity) -> String {
         String s = {0};
         s.reserve(capacity);
         return s;
@@ -51,10 +51,7 @@ impl String {
         return String::from_str(Str::from_cstr(text));
     }
 
-    pub fn reserve(self *s, int additional) -> int {
-        if (additional < 0) {
-            return 0;
-        }
+    pub fn reserve(self *s, usize additional) -> int {
         string_reserve(s, s.view.len + additional + 1);
         return 1;
     }
@@ -68,21 +65,23 @@ impl String {
     }
 
     pub fn push_str(self *s, Str text) {
-        int old_len = s.view.len;
-        int source_offset = -1;
+        usize old_len = s.view.len;
+        usize source_offset = 0;
+        int source_inside = 0;
         if (s.view.data && text.data) {
             uintptr_t base = (uintptr_t)s.view.data;
             uintptr_t source = (uintptr_t)text.data;
             if (source >= base && source - base <= (uintptr_t)old_len) {
-                source_offset = (int)(source - base);
+                source_offset = (usize)(source - base);
+                source_inside = 1;
             }
         }
         string_reserve(s, old_len + text.len + 1);
-        if (source_offset >= 0) {
+        if (source_inside) {
             text.data = (const char *)s.view.data + source_offset;
         }
         char *data = (char *)s.view.data;
-        for (int i = 0; i < text.len; i++) {
+        for (usize i = 0; i < text.len; i++) {
             data[old_len + i] = text.data[i];
         }
         s.view.len = old_len + text.len;
@@ -93,7 +92,7 @@ impl String {
         s.push_str(Str::from_cstr(text));
     }
 
-    pub fn len(const self *s) -> int {
+    pub fn len(const self *s) -> usize {
         return s.view.len;
     }
 

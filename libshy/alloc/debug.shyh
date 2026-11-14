@@ -190,7 +190,7 @@ impl Debug for char {
 impl Debug for Str {
     fn debug(const self *value, WriterRef *out) -> int {
         int written = fmt_putc(out, '"');
-        for (int i = 0; i < value.len; i++) {
+        for (usize i = 0; i < value.len; i++) {
             written = written + fmt_escape_byte(out, (int)(unsigned char)value.data[i]);
         }
         written = written + fmt_putc(out, '"');

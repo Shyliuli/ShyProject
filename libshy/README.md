@@ -236,12 +236,14 @@ Both print `2 lines`. `read_to_string(path)` from `<std/fs.shyh>` returns
 whitespace, `split(separator)` returns a `StrSplit` whose `next()` yields
 `Option<Str>` pieces, and `parse_int` reads a decimal `int` or returns `None`;
 `eq`, `eq_cstr`, `starts_with`, `ends_with`, `find`, and `slice` are the rest.
+`slice(start, end)` uses byte offsets and an exclusive end; an invalid range
+returns `None`.
 
 `String` owns a NUL-terminated byte buffer that a read-only `Deref<Str>` exposes,
 so `s.len()`, `s.is_empty()`, `s.eq_cstr("x")`, and `s.starts_with("x")` work
 directly on the owner; `as_str()` returns the `Str` view for field access. Its
-layout is the `Str` view followed by an `int cap`, so C sees
-`struct { const char *data; int len; int cap; }`. Create one with
+layout is the `Str` view followed by a `usize cap`, so C sees
+`struct { const char *data; usize len; usize cap; }`. Create one with
 `String::new()`, `String::from_str(s)`, `String::from_cstr("x")`, or
 `String::with_capacity(n)`; append with `push`, `push_str`, `push_cstr`, or
 `write!(&s, ...)`; `as_str` gives the `Str` view, `as_cstr` a

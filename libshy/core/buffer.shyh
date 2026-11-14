@@ -12,17 +12,17 @@
    whether the room already exists. */
 trait Buffer {
     fn data(self *b) -> char *;
-    fn len(const self *b) -> int;
-    fn reserve(self *b, int additional) -> int;
-    fn set_len(self *b, int newlen) -> int;
+    fn len(const self *b) -> usize;
+    fn reserve(self *b, usize additional) -> int;
+    fn set_len(self *b, usize newlen) -> int;
 }
 
 /* Non-owning view of a fixed byte array, wrapped as {array, 0, sizeof array}.
    The view supplies the length and capacity a bare array cannot carry. */
 struct BufferView {
     char *ptr;
-    int used;
-    int size;
+    usize used;
+    usize size;
 };
 
 impl Buffer for BufferView {
@@ -30,19 +30,16 @@ impl Buffer for BufferView {
         return b.ptr;
     }
 
-    fn len(const self *b) -> int {
+    fn len(const self *b) -> usize {
         return b.used;
     }
 
-    fn reserve(self *b, int additional) -> int {
-        if (additional < 0) {
-            return 0;
-        }
+    fn reserve(self *b, usize additional) -> int {
         return additional <= b.size - b.used;
     }
 
-    fn set_len(self *b, int newlen) -> int {
-        if (newlen < 0 || newlen > b.size) {
+    fn set_len(self *b, usize newlen) -> int {
+        if (newlen > b.size) {
             return 0;
         }
         b.used = newlen;
@@ -53,7 +50,7 @@ impl Buffer for BufferView {
 /* A destination for bytes. write may return a short count, or a negative
    value on failure. borrow keeps the destination alive in its caller. */
 trait Writer {
-    fn write(self *w, const char *data, int len) -> int;
+    fn write(self *w, const char *data, usize len) -> isize;
 
     fn borrow(self *w) -> WriterRef {
         WriterRef out = {w, Writer::from<self>(), 0};
@@ -69,37 +66,37 @@ struct WriterRef {
 };
 
 impl WriterRef {
-    fn write_all(self *out, const char *data, int len) -> int {
+    fn write_all(self *out, const char *data, usize len) -> isize {
         if (out.failed) {
             return -1;
         }
-        int written = 0;
+        usize written = 0;
         while (written < len) {
-            int n = out.methods.write(out.target, data + written, len - written);
-            if (n <= 0 || n > len - written) {
+            isize n = out.methods.write(out.target, data + written, len - written);
+            if (n <= 0 || (usize)n > len - written) {
                 out.failed = 1;
                 return -1;
             }
-            written = written + n;
+            written = written + (usize)n;
         }
-        return written;
+        return (isize)written;
     }
 
-    fn write_str(self *out, Str text) -> int {
+    fn write_str(self *out, Str text) -> isize {
         return out.write_all(text.data, text.len);
     }
 
-    fn write_cstr(self *out, const char *text) -> int {
+    fn write_cstr(self *out, const char *text) -> isize {
         return out.write_str(Str::from_cstr(text));
     }
 
-    fn putc(self *out, char byte) -> int {
+    fn putc(self *out, char byte) -> isize {
         return out.write_all(&byte, 1);
     }
 }
 
 impl Writer for WriterRef {
-    fn write(self *out, const char *data, int len) -> int {
+    fn write(self *out, const char *data, usize len) -> isize {
         return out.write_all(data, len);
     }
 
@@ -110,66 +107,66 @@ impl Writer for WriterRef {
 }
 
 impl Writer for BufferView {
-    fn write(self *out, const char *data, int len) -> int {
-        int available = out.size - out.used;
-        int count = len < available ? len : available;
-        for (int i = 0; i < count; i++) {
+    fn write(self *out, const char *data, usize len) -> isize {
+        usize available = out.size - out.used;
+        usize count = len < available ? len : available;
+        for (usize i = 0; i < count; i++) {
             out.ptr[out.used + i] = data[i];
         }
         out.used = out.used + count;
-        return count;
+        return (isize)count;
     }
 }
 
 /* A source of bytes. A device implements read; the buffer and line helpers are
    defaults over it. */
 trait Reader {
-    fn read(self *r, char *data, int max_len) -> int;
+    fn read(self *r, char *data, usize max_len) -> isize;
 
     /* Append what is read to any Buffer. Returns the byte count, 0 at end of
        input, and a negative value on a read error the device reports. */
-    fn read_buffer<D: Buffer>(self *r, D *buffer, int max_len) -> int {
-        if (max_len <= 0) {
+    fn read_buffer<D: Buffer>(self *r, D *buffer, usize max_len) -> isize {
+        if (max_len == 0) {
             return 0;
         }
-        int len = buffer.len();
+        usize len = buffer.len();
         if (buffer.reserve(max_len) == 0) {
             return 0;
         }
-        int read = r.read(buffer.data() + len, max_len);
-        if (read > 0 && buffer.set_len(len + read) == 0) {
+        isize read = r.read(buffer.data() + len, max_len);
+        if (read > 0 && buffer.set_len(len + (usize)read) == 0) {
             return 0;
         }
         return read;
     }
 
     /* One byte, or -1 at end of input. */
-    fn getc(self *r) -> int {
+    fn getc(self *r) -> isize {
         char c;
-        int n = r.read(&c, 1);
+        isize n = r.read(&c, 1);
         if (n <= 0) {
             return -1;
         }
-        return (int)(unsigned char)c;
+        return (isize)(unsigned char)c;
     }
 
     /* Append one line without its newline. Returns the number of bytes
        appended, which is 0 at end of input. */
-    fn getline<D: Buffer>(self *r, D *buffer) -> int {
-        int start = buffer.len();
+    fn getline<D: Buffer>(self *r, D *buffer) -> isize {
+        usize start = buffer.len();
         while (1) {
             if (buffer.reserve(1) == 0) {
-                return buffer.len() - start;
+                return (isize)(buffer.len() - start);
             }
             char c;
-            int n = r.read(&c, 1);
+            isize n = r.read(&c, 1);
             if (n <= 0) {
-                return buffer.len() - start;
+                return (isize)(buffer.len() - start);
             }
             if (c == '\n') {
-                return buffer.len() - start;
+                return (isize)(buffer.len() - start);
             }
-            int len = buffer.len();
+            usize len = buffer.len();
             buffer.data()[len] = c;
             buffer.set_len(len + 1);
         }

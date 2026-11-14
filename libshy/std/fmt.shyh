@@ -170,7 +170,7 @@ const fn fmt_literal(Tokens input) -> String {
 const fn fmt_quote(String *code, Str text) {
     /* Fixed-width octal escapes keep following hex digits separate. */
     code.push('"');
-    for (int i = 0; i < text.len; i++) {
+    for (usize i = 0; i < text.len; i++) {
         int byte = (unsigned char)text.data[i];
         if (byte == '"' || byte == '\\') {
             code.push('\\');
@@ -190,7 +190,7 @@ const fn fmt_quote(String *code, Str text) {
 const fn fmt_count_begin(String *code, Str prefix) {
     code.push_cstr("if (");
     fmt_name(code, prefix, "count", -1);
-    code.push_cstr(" >= 0) { int ");
+    code.push_cstr(" >= 0) { isize ");
     fmt_name(code, prefix, "part", -1);
     code.push_cstr(" = ");
 }
@@ -215,7 +215,7 @@ const fn fmt_text(String *code, Str prefix, Str text) {
     fmt_quote(code, text);
     code.push_cstr(", ");
     let mut writer = code.borrow();
-    fmt_unsigned(&writer, (unsigned int)text.len);
+    fmt_unsigned_wide(&writer, (unsigned long)text.len);
     code.push_cstr(")");
     fmt_count_end(code, prefix);
 }
@@ -223,7 +223,7 @@ const fn fmt_text(String *code, Str prefix, Str text) {
 /* kind: 0 write, 1 writeln, 2 format, 3 print, 4 println, 5 eprintln. */
 const fn fmt_expand(Tokens input, int kind) -> Tokens {
     let mut args = fmt_arguments(input);
-    int format_index = kind <= 1 ? 1 : 0;
+    usize format_index = kind <= 1 ? 1 : 0;
     if (args.len <= format_index) {
         compile_error("formatting needs a literal format string");
     }
@@ -243,20 +243,20 @@ const fn fmt_expand(Tokens input, int kind) -> Tokens {
     code.push_cstr(" = ");
     fmt_name(&code, prefix.view, "target", -1);
     code.push_cstr(".borrow(); ");
-    int first_value = format_index + 1;
-    for (int i = first_value; i < args.len; i++) {
+    usize first_value = format_index + 1;
+    for (usize i = first_value; i < args.len; i++) {
         code.push_cstr("let ");
         fmt_name(&code, prefix.view, "arg", i - first_value);
         code.push_cstr(" = ");
         fmt_source(&code, args.data[i]);
         code.push_cstr("; ");
     }
-    code.push_cstr("int ");
+    code.push_cstr("isize ");
     fmt_name(&code, prefix.view, "count", -1);
     code.push_cstr(" = 0; ");
     let mut pending = String::new();
-    int positional = 0;
-    for (int i = 0; i < format.len(); i++) {
+    usize positional = 0;
+    for (usize i = 0; i < format.len(); i++) {
         int byte = (unsigned char)format.view.data[i];
         if ((byte == '{' || byte == '}') && i + 1 < format.len() &&
             format.view.data[i + 1] == byte) {
@@ -286,7 +286,7 @@ const fn fmt_expand(Tokens input, int kind) -> Tokens {
                 slot.len = slot.len - 4;
 #endif
             }
-            for (int j = 0; j < slot.len; j++) {
+            for (usize j = 0; j < slot.len; j++) {
                 int c = (unsigned char)slot.data[j];
                 if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                       c == '_' || (j > 0 && c >= '0' && c <= '9') || c >= 128)) {

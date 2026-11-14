@@ -2,6 +2,7 @@
 #define SHY_CORE_STR_SHYH
 
 #include <core/option.shyh>
+#include <stdtype.h>
 
 /* A borrowed byte view: pointer plus length, never owning and not
    NUL-terminated. Bytes are not validated as UTF-8. A view copied from a
@@ -9,7 +10,7 @@
    dangling. */
 struct Str {
     const char *data;
-    int len;
+    usize len;
 };
 
 /* The pieces between one separator byte. next() returns the next piece, or
@@ -27,8 +28,9 @@ impl Str {
     fn eq_cstr(const self *s, const char *other) -> int;
     fn starts_with(const self *s, const char *prefix) -> int;
     fn ends_with(const self *s, const char *suffix) -> int;
-    fn find(const self *s, Str needle) -> int;
-    fn slice(const self *s, int start, int len) -> Str;
+    fn find(const self *s, Str needle) -> isize;
+    /* Half-open byte range; None when start > end or end > len. */
+    fn slice(const self *s, usize start, usize end) -> Option<Str>;
     fn trim(const self *s) -> Str;
     fn split(const self *s, int separator) -> StrSplit;
     fn parse_int(const self *s) -> Option<int>;

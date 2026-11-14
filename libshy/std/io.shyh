@@ -28,7 +28,7 @@ impl File {
     fn create(const char *path) -> Result<File, IoError>;
     /* Read up to max_len bytes: a positive count, 0 at end of file, and a
        negative value on error. */
-    fn read(self *f, char *data, int max_len) -> int;
+    fn read(self *f, char *data, usize max_len) -> isize;
     /* Everything left from the current position, or the error that stopped
        the read. */
     fn read_to_string(self *f) -> Result<String, IoError>;
@@ -44,7 +44,7 @@ fn read_stream(FILE *f) -> String;
 /* A cursor over an immutable Str. The view is not advanced; the cursor is. */
 struct StrReader {
     Str source;
-    int position;
+    usize position;
 };
 
 impl StrReader {
@@ -52,17 +52,17 @@ impl StrReader {
 }
 
 impl Reader for StrReader {
-    fn read(self *r, char *data, int max_len) -> int {
-        int available = r.source.len - r.position;
-        if (available <= 0) {
+    fn read(self *r, char *data, usize max_len) -> isize {
+        if (r.position >= r.source.len) {
             return 0;
         }
-        int n = available < max_len ? available : max_len;
-        for (int i = 0; i < n; i++) {
+        usize available = r.source.len - r.position;
+        usize n = available < max_len ? available : max_len;
+        for (usize i = 0; i < n; i++) {
             data[i] = r.source.data[r.position + i];
         }
         r.position = r.position + n;
-        return n;
+        return (isize)n;
     }
 }
 
@@ -72,8 +72,8 @@ struct FileReader {
 };
 
 impl Reader for FileReader {
-    fn read(self *r, char *data, int max_len) -> int {
-        return (int)fread(data, 1, (size_t)max_len, r.file);
+    fn read(self *r, char *data, usize max_len) -> isize {
+        return (isize)fread(data, 1, max_len, r.file);
     }
 }
 
@@ -82,8 +82,8 @@ struct FileWriter {
 };
 
 impl Writer for FileWriter {
-    fn write(self *w, const char *data, int len) -> int {
-        return (int)fwrite(data, 1, (size_t)len, w.file);
+    fn write(self *w, const char *data, usize len) -> isize {
+        return (isize)fwrite(data, 1, len, w.file);
     }
 }
 
@@ -100,25 +100,25 @@ fn global_reader(void) -> FileReader;
 
 /* Convenience helpers that default to stdio. A program that wants another
    device implements Reader/Writer for it and calls the trait methods. */
-fn print<B: Buffer>(B *buffer) -> int {
+fn print<B: Buffer>(B *buffer) -> isize {
     let mut out = global_writer();
     let mut writer = out.borrow();
     return writer.write_all(buffer.data(), buffer.len());
 }
 
-fn print_line<B: Buffer>(B *buffer) -> int {
+fn print_line<B: Buffer>(B *buffer) -> isize {
     let mut out = global_writer();
     let mut writer = out.borrow();
-    int written = writer.write_all(buffer.data(), buffer.len());
+    isize written = writer.write_all(buffer.data(), buffer.len());
     if (written < 0 || writer.putc('\n') < 0) {
         return -1;
     }
     return written;
 }
 
-fn get_char(void) -> int;
+fn get_char(void) -> isize;
 
-fn get_line<B: Buffer>(B *buffer) -> int {
+fn get_line<B: Buffer>(B *buffer) -> isize {
     let mut input = global_reader();
     return input.getline(buffer);
 }

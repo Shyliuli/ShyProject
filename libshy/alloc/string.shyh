@@ -7,7 +7,7 @@
 
 /* Owned NUL-terminated byte buffer; bytes are not validated as UTF-8. The
    embedded Str is its read-only Deref view, followed by cap, the allocation
-   size, so the layout is `{ const char *data; int len; int cap; }`. Create
+   size, so the layout is `{ const char *data; usize len; usize cap; }`. Create
    with new(), from_str(), from_cstr(), or with_capacity(); a zero-initialized
    `String s = {0}` also works and lets the first push allocate. An operation
    that may reallocate invalidates copies of the view. A plain local is not
@@ -15,21 +15,21 @@
    declare it `defer String s = ...` for cleanup at scope exit. */
 struct String {
     Str view;
-    int cap;
+    usize cap;
 };
 
 impl String {
     fn new(void) -> String;
-    fn with_capacity(int capacity) -> String;
+    fn with_capacity(usize capacity) -> String;
     fn from_str(Str text) -> String;
     fn from_cstr(const char *text) -> String;
 
     fn push(self *s, int byte);
     fn push_str(self *s, Str text);
     fn push_cstr(self *s, const char *text);
-    fn reserve(self *s, int additional) -> int;
+    fn reserve(self *s, usize additional) -> int;
 
-    fn len(const self *s) -> int;
+    fn len(const self *s) -> usize;
     fn is_empty(const self *s) -> int;
     fn as_str(const self *s) -> Str;
     fn as_cstr(const self *s) -> const char *;
@@ -41,10 +41,10 @@ impl String {
 
 impl Writer for String {
     /* Appending to a String is a write; the whole text always fits. */
-    fn write(self *s, const char *data, int len) -> int {
+    fn write(self *s, const char *data, usize len) -> isize {
         Str text = { data, len };
         s.push_str(text);
-        return len;
+        return (isize)len;
     }
 }
 
@@ -53,16 +53,16 @@ impl Buffer for String {
         return (char *)s.view.data;
     }
 
-    fn len(const self *s) -> int {
+    fn len(const self *s) -> usize {
         return s.view.len;
     }
 
-    fn reserve(self *s, int additional) -> int {
+    fn reserve(self *s, usize additional) -> int {
         return String::reserve(s, additional);
     }
 
-    fn set_len(self *s, int newlen) -> int {
-        if (newlen < 0 || newlen >= s.cap) {
+    fn set_len(self *s, usize newlen) -> int {
+        if (newlen >= s.cap) {
             return 0;
         }
         s.view.len = newlen;

@@ -28,15 +28,15 @@ impl File {
         return Result<File, IoError>::Ok(file);
     }
 
-    pub fn read(self *f, char *data, int max_len) -> int {
-        return (int)read(f.fd, data, (size_t)max_len);
+    pub fn read(self *f, char *data, usize max_len) -> isize {
+        return (isize)read(f.fd, data, max_len);
     }
 
     pub fn read_to_string(self *f) -> Result<String, IoError> {
         let mut text = String::new();
         while (1) {
             char chunk[256];
-            int n = f.read(chunk, 256);
+            isize n = f.read(chunk, 256);
             if (n < 0) {
                 text.drop();
                 return Result<String, IoError>::Err(ReadFailed);
@@ -52,13 +52,13 @@ impl File {
     }
 
     pub fn write_all(self *f, Str text) -> Result<void, IoError> {
-        int done = 0;
+        usize done = 0;
         while (done < text.len) {
-            int n = (int)write(f.fd, text.data + done, (size_t)(text.len - done));
+            int n = (int)write(f.fd, text.data + done, text.len - done);
             if (n <= 0) {
                 return Result<void, IoError>::Err(WriteFailed);
             }
-            done = done + n;
+            done = done + (usize)n;
         }
         return Result<void, IoError>::Ok();
     }
@@ -115,7 +115,7 @@ pub fn global_reader(void) -> FileReader {
     return global_in;
 }
 
-pub fn get_char(void) -> int {
+pub fn get_char(void) -> isize {
     let mut input = global_reader();
     return input.getc();
 }
@@ -148,5 +148,5 @@ pub fn write_file(Str path, Str text) -> int {
     }
     let written = fwrite(text.data, 1, text.len, f);
     fclose(f);
-    return written == (size_t)text.len;
+    return written == text.len;
 }

@@ -518,7 +518,7 @@ one translation unit defines them:
 
 ```c
 // str.shyh
-struct Str { const char *ptr; int len; };
+struct Str { const char *ptr; usize len; };
 impl Str {
   fn eq(self *s, Str other) -> int;
 }
@@ -567,7 +567,7 @@ and defines separately like any other:
 
 ```c
 // pass.shyh
-struct Vec<T> { T *data; int len; };
+struct Vec<T> { T *data; usize len; };
 typedef Vec<int> IntVec;
 
 impl Pass for IntVec {
