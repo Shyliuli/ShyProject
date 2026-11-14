@@ -6,6 +6,7 @@
 //! result: diagnostics, the syntax tree, and the symbol index.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use shyc::abi::AbiKind;
@@ -116,7 +117,8 @@ impl Analysis {
         let unit = match preprocess::preprocess(&mut sources, file, &options) {
             Ok(output) => {
                 attributes = output.attributes;
-                match parse_with_answers(&output.tokens, answers.as_deref()) {
+                let tokens = Rc::new(output.tokens);
+                match parse_with_answers(&tokens, answers.as_deref()) {
                     Ok((parsed, spans)) => {
                         sites = parsed.sites;
                         generated = spans;
@@ -125,7 +127,7 @@ impl Analysis {
                     }
                     Err(error) => {
                         diagnostics.push(error.clone());
-                        match recover_parse(&output.tokens, file, &error, answers.as_deref()) {
+                        match recover_parse(&tokens, file, &error, answers.as_deref()) {
                             Some((parsed, spans)) => {
                                 sites = parsed.sites;
                                 generated = spans;
@@ -222,7 +224,7 @@ impl Analysis {
 /// Parse once to learn where the unanswered calls stand, then again with the
 /// probe answers carrying the span of the call each one belongs to.
 fn parse_with_answers(
-    tokens: &[Token],
+    tokens: &parser::TokenStream,
     answers: Option<&ProbeAnswers>,
 ) -> Result<(parser::ParseOutput, Vec<Span>), Diagnostic> {
     let parsed = parser::parse_for_probe(tokens, parser::Answers::default())?;
@@ -244,7 +246,7 @@ fn parse_with_answers(
 /// dropped, the blocks it leaves open are closed, and the resulting tree only
 /// feeds the symbol index; the caller keeps reporting the real error.
 fn recover_parse(
-    tokens: &[Token],
+    tokens: &parser::TokenStream,
     file: FileId,
     error: &Diagnostic,
     answers: Option<&ProbeAnswers>,
@@ -278,7 +280,7 @@ fn recover_parse(
             at_line_start: false,
             leading_space: false,
         });
-        if let Ok(parsed) = parse_with_answers(&prefix, answers) {
+        if let Ok(parsed) = parse_with_answers(&Rc::new(prefix), answers) {
             return Some(parsed);
         }
     }
