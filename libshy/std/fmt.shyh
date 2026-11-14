@@ -274,6 +274,18 @@ const fn fmt_expand(Tokens input, int kind) -> Tokens {
             int debug = slot.len >= 2 && slot.data[slot.len - 2] == ':' &&
                         slot.data[slot.len - 1] == '?';
             if (debug) { slot.len = slot.len - 2; }
+            int precision = -1;
+            if (!debug && slot.len >= 4 && slot.data[slot.len - 1] == 'f' &&
+                slot.data[slot.len - 3] == '.' &&
+                slot.data[slot.len - 4] == ':' &&
+                slot.data[slot.len - 2] >= '0' && slot.data[slot.len - 2] <= '9') {
+#ifdef __SHY_NO_FLOAT__
+                compile_error("floating-point formatting is disabled by -nofloat");
+#else
+                precision = slot.data[slot.len - 2] - '0';
+                slot.len = slot.len - 4;
+#endif
+            }
             for (int j = 0; j < slot.len; j++) {
                 int c = (unsigned char)slot.data[j];
                 if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -282,7 +294,13 @@ const fn fmt_expand(Tokens input, int kind) -> Tokens {
                 }
             }
             fmt_count_begin(&code, prefix.view);
-            code.push_cstr(debug ? "fmt_debug(" : "fmt_display(");
+            if (precision >= 0) {
+                code.push_cstr("fmt_float(&");
+                fmt_name(&code, prefix.view, "writer", -1);
+                code.push_cstr(", (double)(");
+            } else {
+                code.push_cstr(debug ? "fmt_debug(" : "fmt_display(");
+            }
             if (slot.len > 0) {
                 code.push_str(slot);
             } else {
@@ -291,8 +309,14 @@ const fn fmt_expand(Tokens input, int kind) -> Tokens {
                 }
                 fmt_name(&code, prefix.view, "arg", positional++);
             }
-            code.push_cstr(", &");
-            fmt_name(&code, prefix.view, "writer", -1);
+            if (precision >= 0) {
+                code.push_cstr("), ");
+                let mut writer = code.borrow();
+                fmt_unsigned(&writer, (unsigned int)precision);
+            } else {
+                code.push_cstr(", &");
+                fmt_name(&code, prefix.view, "writer", -1);
+            }
             code.push_cstr(")");
             fmt_count_end(&code, prefix.view);
         } else if (byte == '}') {

@@ -184,7 +184,11 @@ pub(crate) fn canonical_type_name(text: &str) -> String {
         return format!("{}*", canonical_type_name(pointee));
     }
     if let Some(spelling) = crate::parser::canonical_builtin_name(text) {
-        return spelling;
+        return if spelling == "signed char" {
+            "char".to_string()
+        } else {
+            spelling
+        };
     }
     if let Ok(value) = crate::literal::integer(
         text,
@@ -1144,14 +1148,44 @@ fn reflect_fields(
             }
             let name = declarator.declarator.name.as_ref()?.text.clone();
             let pointer = pointer_field(&member.specs, &declarator.declarator, aliases)?;
+            let specs = expand_typedefs(&member.specs, aliases, &mut Vec::new());
             fields.push(FieldReflection {
                 name,
-                ty: field_type_text(&member.specs, &declarator.declarator, pointer),
+                ty: field_type_text(&specs, &declarator.declarator, pointer),
                 pointer,
             });
         }
     }
     Some(fields)
+}
+
+/// Replaces a simple typedef name with the declaration it aliases. This keeps
+/// reflection keys on the representation the trait matcher uses: `u32` and
+/// `unsigned int` must not look like two unrelated owners.
+fn expand_typedefs(
+    specs: &ast::DeclSpecs,
+    aliases: &HashMap<String, (ast::DeclSpecs, ast::Declarator)>,
+    seen: &mut Vec<String>,
+) -> ast::DeclSpecs {
+    let expanded = specs.clone();
+    let Some(ast::TypeSpecifier::TypedefName(name)) =
+        expanded.type_specs.first().cloned()
+    else {
+        return expanded;
+    };
+    if expanded.type_specs.len() != 1 || seen.contains(&name.text) {
+        return expanded;
+    }
+    let Some((alias_specs, alias_declarator)) = aliases.get(&name.text) else {
+        return expanded;
+    };
+    if !alias_declarator.derived.is_empty() {
+        return expanded;
+    }
+    seen.push(name.text);
+    let mut target = expand_typedefs(alias_specs, aliases, seen);
+    target.qualifiers.extend(expanded.qualifiers);
+    target
 }
 
 /// Whether a field is a pointer, resolving typedef chains.
@@ -1237,7 +1271,17 @@ fn field_type_text(specs: &ast::DeclSpecs, declarator: &ast::Declarator, pointer
         specs,
         declarator: Some(declarator),
     };
-    canonical_type_name(&crate::c::types::type_name_text(&type_name))
+    let spelling = crate::c::types::Spelling {
+        self_name: "void",
+        instances: None,
+        bindings: None,
+        generics: true,
+        preserve_generic_args: true,
+    };
+    canonical_type_name(&crate::c::types::type_name_text_with(
+        &type_name,
+        spelling,
+    ))
 }
 
 /// Bakes the owner and field tables the four reflection builtins read.

@@ -4,6 +4,9 @@
 #include <alloc/string.shyh>
 #include <core/comptime.shyh>
 #include <stdint.h>
+#ifndef __SHY_NO_FLOAT__
+#include <stdio.h>
+#endif
 
 /* Rust-style Debug rendering into a Writer: integers are decimal, characters
    are single quoted, strings are quoted and escaped.
@@ -30,6 +33,36 @@ fn fmt_unsigned(WriterRef *out, unsigned int value) -> int {
     } while (value > 0);
     return out.write_all(digits + start, 12 - start);
 }
+
+fn fmt_unsigned_wide(WriterRef *out, unsigned long value) -> int {
+    char digits[24];
+    int start = 24;
+    do {
+        start--;
+        digits[start] = (char)('0' + (int)(value % 10));
+        value = value / 10;
+    } while (value > 0);
+    return out.write_all(digits + start, 24 - start);
+}
+
+#ifndef __SHY_NO_FLOAT__
+/* Reuse the C formatter for decimal conversion, then copy into the Writer. */
+fn fmt_float(WriterRef *out, double value, int precision) -> int {
+    char buffer[64];
+    char format[8];
+    if (precision < 0) precision = 6;
+    if (precision > 9) precision = 9;
+    format[0] = '%';
+    format[1] = '.';
+    format[2] = (char)('0' + precision);
+    format[3] = 'f';
+    format[4] = 0;
+    int length = snprintf(buffer, sizeof(buffer), format, value);
+    if (length < 0) { out.failed = 1; return -1; }
+    if (length >= (int)sizeof(buffer)) length = (int)sizeof(buffer) - 1;
+    return out.write_all(buffer, length);
+}
+#endif
 
 fn fmt_hex(WriterRef *out, int value) -> int {
     const char *digits = "0123456789abcdef";
@@ -69,6 +102,81 @@ impl Debug for int {
         return fmt_unsigned(out, (unsigned int)v);
     }
 }
+
+impl Debug for unsigned int {
+    fn debug(const self *value, WriterRef *out) -> int {
+        return fmt_unsigned(out, *value);
+    }
+}
+
+impl Debug for short {
+    fn debug(const self *value, WriterRef *out) -> int {
+        int wide = *value;
+        let mut inner = Debug::from<int>();
+        return inner.debug(&wide, out);
+    }
+}
+
+impl Debug for unsigned short {
+    fn debug(const self *value, WriterRef *out) -> int {
+        unsigned int wide = *value;
+        let mut inner = Debug::from<unsigned int>();
+        return inner.debug(&wide, out);
+    }
+}
+
+impl Debug for unsigned char {
+    fn debug(const self *value, WriterRef *out) -> int {
+        unsigned int wide = *value;
+        let mut inner = Debug::from<unsigned int>();
+        return inner.debug(&wide, out);
+    }
+}
+
+impl Debug for long {
+    fn debug(const self *value, WriterRef *out) -> int {
+        long wide = *value;
+        if (wide >= 0) return fmt_unsigned_wide(out, (unsigned long)wide);
+        int written = fmt_putc(out, '-');
+        return written + fmt_unsigned_wide(out, (unsigned long)0 - (unsigned long)wide);
+    }
+}
+
+impl Debug for unsigned long {
+    fn debug(const self *value, WriterRef *out) -> int {
+        return fmt_unsigned_wide(out, *value);
+    }
+}
+
+impl Debug for long long {
+    fn debug(const self *value, WriterRef *out) -> int {
+        long wide = (long)*value;
+        let mut inner = Debug::from<long>();
+        return inner.debug(&wide, out);
+    }
+}
+
+impl Debug for unsigned long long {
+    fn debug(const self *value, WriterRef *out) -> int {
+        unsigned long wide = (unsigned long)*value;
+        let mut inner = Debug::from<unsigned long>();
+        return inner.debug(&wide, out);
+    }
+}
+
+#ifndef __SHY_NO_FLOAT__
+impl Debug for float {
+    fn debug(const self *value, WriterRef *out) -> int {
+        return fmt_float(out, (double)*value, 6);
+    }
+}
+
+impl Debug for double {
+    fn debug(const self *value, WriterRef *out) -> int {
+        return fmt_float(out, *value, 6);
+    }
+}
+#endif
 
 impl Debug for char {
     fn debug(const self *value, WriterRef *out) -> int {

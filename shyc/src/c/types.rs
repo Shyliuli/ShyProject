@@ -40,6 +40,9 @@ pub(crate) struct Spelling<'a> {
     /// Whether generic parameter lists are printed. An instance drops them,
     /// because C has no template.
     pub generics: bool,
+    /// Keep `Vec<int>` as written instead of reducing it to the C instance
+    /// name. Probe field reflection uses this to match the source-world key.
+    pub preserve_generic_args: bool,
 }
 
 impl<'a> Spelling<'a> {
@@ -50,6 +53,7 @@ impl<'a> Spelling<'a> {
             instances: None,
             bindings: None,
             generics: true,
+            preserve_generic_args: false,
         }
     }
 
@@ -405,6 +409,9 @@ pub(crate) fn generic_spec_text(generic: &GenericSpec, spelling: Spelling) -> St
             GenericArgKind::Const(value) => expr_text(value),
         })
         .collect::<Vec<_>>();
+    if spelling.preserve_generic_args {
+        return format!("{}<{}>", generic.name.text, args.join(", "));
+    }
     spelling.instance(&generic.name.text, &args)
 }
 

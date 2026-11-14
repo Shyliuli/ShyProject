@@ -692,11 +692,31 @@ as any user-defined const fn. Ordinary token-generator calls also accept
 `name(...)`; POSIX `write(...)` and formatting `write!(...)` can coexist.
 
 The formatting const fns check the literal format string, its placeholder
-count, `{}` versus `{:?}`, brace balance, and `{name}` captures. They generate
-direct writes and concrete `Display`/`Debug` calls, inside a statement
-expression. Neither format parsing nor intermediate strings remain at run
-time. `Display` and `Debug` accept `WriterRef *`, a borrowed destination with
-the `Writer` function table; nested formatting uses the same destination.
+count, `{}` (Display), `{:?}` (Debug), `{name}` captures, and `{:.Nf}` for a
+floating-point value with `N` digits after the decimal point (`N` is 0 through
+9). They generate direct writes and concrete `Display`/`Debug` calls, inside a
+statement expression. Neither format parsing nor intermediate strings remain
+at run time. `Display` and `Debug` accept `WriterRef *`, a borrowed destination
+with the `Writer` function table; nested formatting uses the same destination.
+
+Floating-point Display/Debug use the C fixed-point `%f` conversion. `{}` and
+`{:?}` print six decimal places; `{:.Nf}` selects another supported precision:
+
+```c
+#include <std/fmt.shyh>
+#include <stdtype.h>
+
+int main(void) {
+    f64 ratio = 1.25;
+    println!("ratio = {:.2f}", ratio);
+    return 0;
+}
+```
+
+The Shy target includes its soft-float runtime in libshy by default. Passing
+`-nofloat` omits that runtime, removes floating-point `Debug`/`Display`, and
+rejects `{:.Nf}` with a compile-time diagnostic. Non-floating-point programs
+still build in that mode.
 
 `write!(writer, ...)` writes without a newline; `writeln!` appends one.
 `print!` and `println!` use the global writer; `eprintln!` uses stderr.

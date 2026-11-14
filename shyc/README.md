@@ -178,7 +178,10 @@ The two backends have different C libraries, and each one gets its own default:
 
 `shycc` links libshy by default because it owns the whole Shy link step, and
 passes `--gc-sections` so only the reachable functions stay; `-llibshy` and
-`-lfloat` are still accepted and never duplicated. On a hosted LLVM target
+`-lfloat` are still accepted and never duplicated. The soft-float runtime is
+part of libshy on the Shy target; `-nofloat` omits it and defines
+`__SHY_NO_FLOAT__`, which removes the floating-point `Debug`/`Display`
+implementations and rejects `{:.Nf}` formatting. On a hosted LLVM target
 `shycc` links libshy's core, alloc, and std over the system libc. `shyc
 --emit=llvm` alone stops at LLVM IR, so the libraries come from whatever links
 the IR.

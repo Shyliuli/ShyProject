@@ -21,6 +21,78 @@ impl Display for int {
     }
 }
 
+impl Display for unsigned int {
+    fn display(const self *value, WriterRef *out) -> int {
+        let mut decimal = Debug::from<unsigned int>();
+        return decimal.debug(value, out);
+    }
+}
+
+impl Display for short {
+    fn display(const self *value, WriterRef *out) -> int {
+        let mut decimal = Debug::from<short>();
+        return decimal.debug(value, out);
+    }
+}
+
+impl Display for unsigned short {
+    fn display(const self *value, WriterRef *out) -> int {
+        let mut decimal = Debug::from<unsigned short>();
+        return decimal.debug(value, out);
+    }
+}
+
+impl Display for unsigned char {
+    fn display(const self *value, WriterRef *out) -> int {
+        let mut decimal = Debug::from<unsigned char>();
+        return decimal.debug(value, out);
+    }
+}
+
+impl Display for long {
+    fn display(const self *value, WriterRef *out) -> int {
+        let mut decimal = Debug::from<long>();
+        return decimal.debug(value, out);
+    }
+}
+
+impl Display for unsigned long {
+    fn display(const self *value, WriterRef *out) -> int {
+        let mut decimal = Debug::from<unsigned long>();
+        return decimal.debug(value, out);
+    }
+}
+
+impl Display for long long {
+    fn display(const self *value, WriterRef *out) -> int {
+        let mut decimal = Debug::from<long long>();
+        return decimal.debug(value, out);
+    }
+}
+
+impl Display for unsigned long long {
+    fn display(const self *value, WriterRef *out) -> int {
+        let mut decimal = Debug::from<unsigned long long>();
+        return decimal.debug(value, out);
+    }
+}
+
+#ifndef __SHY_NO_FLOAT__
+impl Display for float {
+    fn display(const self *value, WriterRef *out) -> int {
+        let mut decimal = Debug::from<float>();
+        return decimal.debug(value, out);
+    }
+}
+
+impl Display for double {
+    fn display(const self *value, WriterRef *out) -> int {
+        let mut decimal = Debug::from<double>();
+        return decimal.debug(value, out);
+    }
+}
+#endif
+
 impl Display for char {
     fn display(const self *value, WriterRef *out) -> int {
         return fmt_putc(out, (int)(unsigned char)*value);

@@ -449,6 +449,7 @@ fn parse_one_stage(
     // answered from the cache or became a request.
     parser.parse_unit_items(&mut items)?;
     super::desugar::struct_variants(&mut items)?;
+    super::desugar::anonymous_members(&mut items);
     let mut requests = parser.take_probe_requests();
     let suspended = parser
         .probe

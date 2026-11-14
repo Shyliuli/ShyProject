@@ -56,6 +56,46 @@ pub(crate) fn struct_variants(items: &mut Vec<ast::Item>) -> Result<(), Diagnost
     Ok(())
 }
 
+/// Give an unnamed record member an internal name so later stages can address
+/// it. The member's type still has to provide whatever trait the use site asks
+/// for; `derive_debug` therefore requires its `Debug` implementation normally.
+pub(crate) fn anonymous_members(items: &mut [ast::Item]) {
+    for item in items {
+        if let ast::Item::Decl(declaration) = item {
+            name_anonymous_members(&mut declaration.specs);
+        }
+    }
+}
+
+fn name_anonymous_members(specs: &mut ast::DeclSpecs) {
+    for specifier in &mut specs.type_specs {
+        let ast::TypeSpecifier::Record(record) = specifier else {
+            continue;
+        };
+        let Some(members) = &mut record.members else {
+            continue;
+        };
+        for member in members {
+            name_anonymous_members(&mut member.specs);
+            if member.declarators.is_empty() {
+                let name = ast::Name::new(
+                    format!("__shy_anonymous_{}", member.span.start),
+                    member.span,
+                );
+                member.declarators.push(ast::MemberDeclarator {
+                    span: member.span,
+                    declarator: ast::Declarator {
+                        span: member.span,
+                        name: Some(name),
+                        derived: Vec::new(),
+                    },
+                    bit_width: None,
+                });
+            }
+        }
+    }
+}
+
 fn record_declaration(
     name: &str,
     generics: &[ast::GenericParam],

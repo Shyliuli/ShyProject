@@ -18,6 +18,7 @@ const DEFAULT_PROBE_STEPS: u64 = 32_000_000;
 const DEFAULT_PROBE_TIMEOUT_MS: u64 = 2_000;
 /// A probe that keeps asking for the same thing is a bug; stop instead.
 const DEFAULT_PROBE_ROUNDS: usize = 256;
+const NO_FLOAT_DEFINE: &str = "-D__SHY_NO_FLOAT__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -43,6 +44,8 @@ struct Options {
     emit_source_lines: bool,
     /// `-nostdlib` / `-nodefaultlibs`: do not add libshy or the float runtime.
     no_default_libs: bool,
+    /// `-nofloat`: omit the soft-float runtime and exclude float stdlib paths.
+    no_float: bool,
     /// Target triple. `shy` selects the Shy ISA pipeline, `host` is replaced
     /// by the machine's own triple, and anything else is lowered to LLVM IR
     /// and finished by clang.
@@ -131,7 +134,6 @@ impl Drop for TempFiles {
 /// keeps each probe round from recompiling libshy.
 struct ProbeLibs {
     libshy: Vec<PathBuf>,
-    float: PathBuf,
 }
 
 fn main() -> Result<()> {
@@ -148,6 +150,7 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
         print_only: false,
         emit_source_lines: false,
         no_default_libs: false,
+        no_float: false,
         target: "shy".to_string(),
         sysroot: None,
         emit: None,
@@ -180,6 +183,10 @@ fn parse_args(args: Vec<String>) -> Result<Options> {
                 std::process::exit(0);
             }
             "-nostdlib" | "-nodefaultlibs" | "-nolibc" => opts.no_default_libs = true,
+            "-nofloat" => {
+                opts.no_float = true;
+                opts.compile_args.push(NO_FLOAT_DEFINE.to_string());
+            }
             "--target" => {
                 i += 1;
                 let Some(value) = args.get(i) else {
@@ -673,17 +680,11 @@ fn run(mut opts: Options) -> Result<()> {
         return Ok(());
     }
 
-    // libshy and the soft-float runtime are the target's C library and are
-    // linked by default, the way a hosted compiler links libc. `-nostdlib`
-    // and `-nodefaultlibs` turn that off, and an explicit `-l` is not
-    // duplicated.
+    // libshy includes the soft-float runtime unless `-nofloat` is set.
+    // `-nostdlib` and `-nodefaultlibs` turn off the default library.
     let mut libraries: Vec<String> = opts.libs.clone();
-    if !opts.no_default_libs {
-        for default in ["libshy", "float"] {
-            if !libraries.iter().any(|lib| lib == default) {
-                libraries.push(default.to_string());
-            }
-        }
+    if !opts.no_default_libs && !libraries.iter().any(|lib| lib == "libshy") {
+        libraries.push("libshy".to_string());
     }
 
     for lib in &libraries {
@@ -696,10 +697,11 @@ fn run(mut opts: Options) -> Result<()> {
                 }
                 _ => objects.extend(build_libshy(&repo, &opts, &mut temps, false)?),
             },
-            "float" => match &probe_libs {
-                Some(built) => objects.push(built.float.clone()),
-                None => objects.push(build_float_lib(&repo, &opts, &mut temps)?),
-            },
+            "float" if opts.no_float => bail!("`-lfloat` conflicts with `-nofloat`"),
+            "float" if opts.no_default_libs => {
+                objects.push(build_float_lib(&repo, &opts, &mut temps)?);
+            }
+            "float" => {}
             _ => bail!("unknown internal Shy library: -l{lib}"),
         }
     }
@@ -924,13 +926,11 @@ fn run_probe_image(
     if libs.is_none() {
         *libs = Some(ProbeLibs {
             libshy: build_libshy(repo, opts, temps, true)?,
-            float: build_float_lib(repo, opts, temps)?,
         });
     }
     let built = libs.as_ref().expect("probe libraries built above");
     let mut objects = vec![obj];
     objects.extend(built.libshy.iter().cloned());
-    objects.push(built.float.clone());
     let image = temps.temp_path(".probe.sfs");
     run_linker(repo, opts, &objects, &image, None)?;
     let bytes = fs::read(&image)
@@ -1451,7 +1451,9 @@ fn emit_llvm(repo: &Path, opts: &Options, input: &Path, ll: &Path, user_unit: bo
         add_libshy_includes(&mut cmd);
     }
     for arg in &opts.compile_args {
-        if forwarded_to_shyc(arg) && (user_unit || arg.starts_with("-O")) {
+        if forwarded_to_shyc(arg)
+            && (user_unit || arg.starts_with("-O") || arg == NO_FLOAT_DEFINE)
+        {
             cmd.arg(arg);
         }
     }
@@ -1655,6 +1657,7 @@ fn libshy_ll_key(opts: &Options, source: &str) -> Option<String> {
         .text(&shyc_identity(opts.print_only)?)
         .text(&opts.target)
         .text(source);
+    fingerprint.text(if opts.no_float { "nofloat" } else { "float" });
     if bare_target(&opts.target) {
         fingerprint.text("-ffreestanding");
     }
@@ -1731,6 +1734,9 @@ fn build_libshy(
             Some(key) => cache().store(&key, "sobj", &obj),
             None => obj,
         });
+    }
+    if !opts.no_float {
+        objects.push(build_float_lib(repo, opts, temps)?);
     }
     Ok(objects)
 }
@@ -1925,8 +1931,8 @@ fn print_usage() {
          \x20 is the local clang triple, and a full triple is handed to clang as written\n\
          sysroot: --sysroot <dir> for a cross link (default /usr/<triple>)\n\
          optimization: -O0, -O1, -O2, or -O3 (forwarded to shyc; -O0 by default)\n\
-         libraries: libshy and the soft-float runtime are linked by default;\n\
-         \x20 -nostdlib/-nodefaultlibs disables that, -llibshy and -lfloat\n\
-         \x20 are accepted and never duplicated"
+         libraries: libshy includes the soft-float runtime by default;\n\
+         \x20 -nofloat omits it and disables float stdlib formatting;\n\
+         \x20 -nostdlib/-nodefaultlibs disables all default libraries"
     );
 }

@@ -256,6 +256,7 @@ impl<'a> Backend<'a> {
             instances: Some(&self.type_names),
             bindings: None,
             generics: true,
+            preserve_generic_args: false,
         }
     }
 
@@ -1406,6 +1407,7 @@ impl<'a> Backend<'a> {
             instances: Some(&self.type_names),
             bindings: Some(bindings),
             generics: false,
+            preserve_generic_args: false,
         }
     }
 
@@ -1795,6 +1797,7 @@ impl<'a, 'b> Body<'a, 'b> {
             instances: Some(&self.backend.type_names),
             bindings: Some(&self.bindings),
             generics: !self.instance,
+            preserve_generic_args: false,
         }
     }
 
