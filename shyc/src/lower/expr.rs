@@ -486,15 +486,6 @@ impl FnLower<'_> {
                             "generic function '{name}' needs explicit generic arguments to be used as a value"
                         ),
                     ))
-                } else if let Some(macro_name) = format_macro_wrapper(&name) {
-                    // `println!("x")` becomes `println0("x")`, which lives in
-                    // the formatting header rather than in the language.
-                    Err(Diagnostic::new(
-                        span,
-                        format!(
-                            "'{name}' comes from the '{macro_name}!' macro; add #include <std/fmt.shyh>"
-                        ),
-                    ))
                 } else {
                     Err(Diagnostic::new(
                         span,
@@ -2012,23 +2003,4 @@ pub(super) fn assign_binary(op: ast::AssignOp) -> Option<ast::BinaryOp> {
         ast::AssignOp::BitXor => Some(ast::BinaryOp::BitXor),
         ast::AssignOp::BitOr => Some(ast::BinaryOp::BitOr),
     }
-}
-
-/// The macro a generated wrapper name came from, as in `println3`.
-fn format_macro_wrapper(name: &str) -> Option<&'static str> {
-    // The statement expression a `println!` or `format!` expands to lands on
-    // these, so a missing header is reported the same way.
-    match name {
-        "fmt_begin" | "fmt_display" | "fmt_debug" | "fmt_line" => return Some("println"),
-        _ => {}
-    }
-    for prefix in ["println", "format", "scanln"] {
-        let Some(rest) = name.strip_prefix(prefix) else {
-            continue;
-        };
-        if !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Some(prefix);
-        }
-    }
-    None
 }

@@ -50,36 +50,74 @@ impl Buffer for BufferView {
     }
 }
 
-/* A destination for bytes. A device implements write; everything else is a
-   default over it. */
+/* A destination for bytes. write may return a short count, or a negative
+   value on failure. borrow keeps the destination alive in its caller. */
 trait Writer {
     fn write(self *w, const char *data, int len) -> int;
 
-    /* Write the buffer's current contents and return the bytes written. */
-    fn write_buffer<D: Buffer>(self *w, D *buffer) -> int {
-        int len = buffer.len();
-        if (len <= 0) {
-            return 0;
+    fn borrow(self *w) -> WriterRef {
+        WriterRef out = {w, Writer::from<self>(), 0};
+        return out;
+    }
+}
+
+/* A borrowed Writer: no buffer, allocation, or ownership of the destination. */
+struct WriterRef {
+    void *target;
+    Writer methods;
+    int failed;
+};
+
+impl WriterRef {
+    fn write_all(self *out, const char *data, int len) -> int {
+        if (out.failed) {
+            return -1;
         }
-        return w.write(buffer.data(), len);
-    }
-
-    fn write_str(self *w, Str text) -> int {
-        if (text.len <= 0) {
-            return 0;
+        int written = 0;
+        while (written < len) {
+            int n = out.methods.write(out.target, data + written, len - written);
+            if (n <= 0 || n > len - written) {
+                out.failed = 1;
+                return -1;
+            }
+            written = written + n;
         }
-        return w.write(text.data, text.len);
-    }
-
-    fn newline(self *w) -> int {
-        return w.write("\n", 1);
-    }
-
-    /* Write the buffer's contents followed by a newline. */
-    fn write_line<D: Buffer>(self *w, D *buffer) -> int {
-        int written = w.write_buffer(buffer);
-        w.newline();
         return written;
+    }
+
+    fn write_str(self *out, Str text) -> int {
+        return out.write_all(text.data, text.len);
+    }
+
+    fn write_cstr(self *out, const char *text) -> int {
+        return out.write_str(Str::from_cstr(text));
+    }
+
+    fn putc(self *out, char byte) -> int {
+        return out.write_all(&byte, 1);
+    }
+}
+
+impl Writer for WriterRef {
+    fn write(self *out, const char *data, int len) -> int {
+        return out.write_all(data, len);
+    }
+
+    /* Recursion reuses the original destination instead of chaining adapters. */
+    fn borrow(self *out) -> WriterRef {
+        return *out;
+    }
+}
+
+impl Writer for BufferView {
+    fn write(self *out, const char *data, int len) -> int {
+        int available = out.size - out.used;
+        int count = len < available ? len : available;
+        for (int i = 0; i < count; i++) {
+            out.ptr[out.used + i] = data[i];
+        }
+        out.used = out.used + count;
+        return count;
     }
 }
 

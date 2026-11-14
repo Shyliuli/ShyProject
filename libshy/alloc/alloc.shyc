@@ -127,7 +127,7 @@ impl String {
         return String::from_str(s.view);
     }
 
-    pub fn free(self *s) {
+    pub fn drop(self *s) {
         string_free(s);
     }
 }

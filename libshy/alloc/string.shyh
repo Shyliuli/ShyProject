@@ -11,8 +11,8 @@
    with new(), from_str(), from_cstr(), or with_capacity(); a zero-initialized
    `String s = {0}` also works and lets the first push allocate. An operation
    that may reallocate invalidates copies of the view. A plain local is not
-   dropped automatically: call free() when the buffer is no longer needed, or
-   declare it `defer String s = ...` so drop() calls free() at scope exit. */
+   dropped automatically: call drop() when the buffer is no longer needed, or
+   declare it `defer String s = ...` for cleanup at scope exit. */
 struct String {
     Str view;
     int cap;
@@ -36,13 +36,7 @@ impl String {
     fn eq(const self *s, Str other) -> int;
     fn clear(self *s);
     fn clone(const self *s) -> String;
-    fn free(self *s);
-
-    /* A `defer String s` drops through this. Every unit that includes this
-       header gets its own file-local copy, so no unit needs the definition. */
-    fn drop(self *s) {
-        String::free(s);
-    }
+    fn drop(self *s);
 }
 
 impl Writer for String {

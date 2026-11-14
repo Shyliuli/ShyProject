@@ -5,7 +5,7 @@ bottom and three layers above it:
 
 | View | Contents |
 |---|---|
-| `c/` | the C include view: only `.h`, and only C-library headers — `stdio`, `stdlib`, `string`, `ctype`, `unistd`, `fcntl`, `errno`, `stddef`, `stdint`, `stdtype`, `stdarg` |
+| `c/` | the C include view: only `.h`, and only C-library headers — `stdio`, `stdlib`, `string`, `ctype`, `unistd`, `fcntl`, `errno`, `limits`, `stddef`, `stdint`, `stdtype`, `stdarg` |
 | `core/` | ShyC declarations and their C spelling (`str.shyh`, `buffer.shyh`, `option.{shyh,h}`, `result.{shyh,h}`), plus `core.shyc` |
 | `alloc/` | `vec.shyh`, `string.shyh`, `debug.shyh`, `display.shyh`, `alloc.shyc` |
 | `std/` | `fs.shyh`, `io.shyh`, `fmt.shyh`, `env.{shyh,shyc}`, `std.shyc` |
@@ -18,8 +18,12 @@ desugared on the way *out*, by the compiler, not carried in the source.
 
 `c/*.h` are generated from the `.shyh` sources in `libc/` and `core/` with
 `shyc --emit=c-header` and committed; `make libshy-headers` regenerates them.
-`c/stddef.h` and `c/stdint.h` are hand-written routers because their contents
-follow the target pointer width, which a generated header would freeze.
+`c/stddef.h`, `c/stdint.h`, `c/errno.h`, and `c/limits.h` forward to their native
+headers to preserve target-dependent definitions and macros.
+
+`<limits.h>` defines the integer bounds from `CHAR_MIN` through `ULLONG_MAX`.
+On ShyISA, `char` is signed, `short` is 16 bits, `int` is 32 bits, and both
+`long` and `long long` are 64 bits. `CHAR_BIT` is 8 and `MB_LEN_MAX` is 1.
 
 The C layer is libc-compatible, so ordinary C code compiles against it.
 `<stdtype.h>` adds Rust-style aliases such as `i32`, `u64`, and `usize`.
@@ -59,10 +63,11 @@ Streams are unbuffered. `FILE` is opaque, so on a hosted target `stdin`,
 `B: Buffer` therefore serves memory, and the same code works for any storage.
 
 `Reader` and `Writer` (`core/buffer.shyh`) are endpoints. A device implements
-`read`/`write`; the default methods `read_buffer`, `write_buffer`, `getc`,
-`getline`, `write_str`, `newline`, and `write_line` build the rest, so a UART
-driver only supplies the two raw operations. `String` is a `Writer` too: its
-`write` appends, so the same helpers can fill memory instead of a stream.
+`read`/`write`. `Reader` provides `read_buffer`, `getc`, and `getline`.
+`Writer::borrow()` provides a `WriterRef` with `write_all`, `write_str`,
+`write_cstr`, and `putc`; `write!` and `writeln!` format through that borrow.
+A UART driver only supplies the two raw operations. `String` is a `Writer`
+too: its `write` appends, so the same formatting can fill memory or a stream.
 `getline` appends the line without
 its newline and returns the number of bytes it added, so reusing a buffer means
 resetting it first. A line longer than a fixed `BufferView` is delivered in
@@ -107,7 +112,7 @@ int main(void) {
     Str path = Str::from_cstr("notes.txt");
     String text = String::from_cstr("hello\n");
     write_file(path, text.as_str());
-    text.free();
+    text.drop();
 
     let read = read_to_string(path);
     if (read.is_err()) {
@@ -116,7 +121,7 @@ int main(void) {
     }
     String back = read.unwrap();
     printf("%s", back.as_cstr());
-    back.free();
+    back.drop();
     return 0;
 }
 ```
@@ -137,7 +142,7 @@ int main(void) {
     }
     String text = read.unwrap();
     printf("%s", text.as_cstr());
-    text.free();
+    text.drop();
     return 0;
 }
 ```
@@ -153,19 +158,32 @@ declaration, and both stay invisible to callers. A `Result<void, E>` has no
 `unwrap_or`, because a fallback of type `void` cannot be declared.
 
 `Debug` and `Display` (`alloc/debug.shyh`, `alloc/display.shyh`) render a value
-into a `String`; both are traits, so a struct opts in with `impl Debug for T`.
+into a borrowed `WriterRef`; a struct opts in with `impl Debug for T`.
 Traits can be implemented for scalars and enums too, so `impl Display for int`
 is a normal declaration.
 
 `std/fmt.shyh` formats with `{}` (Display), `{:?}` (Debug), `{name}`, and
-literal `{{`/`}}`. `println!` and `format!` are compiled away: the compiler
-checks the literal format string and expands the call into a `String` filled
-with the literal pieces plus one statically dispatched Display/Debug call per
-argument, so nothing is parsed at run time. `writeln!(writer, ...)` builds the
-same line and writes it through any `Writer`, then frees the temporary
-`String`; the writer expression is evaluated once, so `writeln!(stdout_writer(),
-...)` and `writeln!(&text, ...)` both work. `scanln!` keeps a wrapper per
-argument count, because `sscanf` reads the C conversions itself.
+literal `{{`/`}}`. Its const fns parse literal format strings and generate
+ordinary writes; the compiler has no built-in output formatting rules.
+`write!(writer, ...)` writes directly to any `Writer`; `writeln!` also writes
+a newline. `print!` and `println!` use the global writer, and `eprintln!` uses
+stderr. These calls return the byte count, including the newline, or -1 on
+failure. The destination and each argument expression are evaluated once, in
+order, before output begins. A short write is retried; a failed write stops
+the remaining output. Output can be partial when a device fails.
+
+`WriterRef` borrows a destination through its `Writer` function table without
+allocating or buffering. A `Display` or `Debug` implementation receives
+`WriterRef *out` and can use `write!(out, ...)` to recursively format children
+into the same destination. `Buffer` separately describes contiguous storage;
+formatting does not require it. `BufferView` implements Writer for fixed
+storage as well. Numbers use a small stack array.
+
+Pass an existing String by address (`write!(&text, ...)`); a temporary endpoint
+such as `writeln!(stdout_writer(), ...)` also works. `format!` explicitly
+creates and returns a String using the same formatting path; drop it when
+finished. `scanln!` keeps a wrapper per argument count, because `sscanf` reads
+the C conversions itself.
 
 ```c
 #include <std/fmt.shyh>
@@ -226,11 +244,11 @@ layout is the `Str` view followed by an `int cap`, so C sees
 `struct { const char *data; int len; int cap; }`. Create one with
 `String::new()`, `String::from_str(s)`, `String::from_cstr("x")`, or
 `String::with_capacity(n)`; append with `push`, `push_str`, `push_cstr`, or
-`push_str(format!(...).as_str())`; `as_str` gives the `Str` view, `as_cstr` a
+`write!(&s, ...)`; `as_str` gives the `Str` view, `as_cstr` a
 `const char *` that is always NUL-terminated, `clear` empties it, `clone`
-copies the bytes, and `free` releases the buffer. A plain local is not dropped
-automatically, so the owner calls `free` when it is done; `defer String s = ...`
-drops it at scope exit through `String::drop`, which calls `free`. Neither type
+copies the bytes, and `drop` releases the buffer. A plain local is not dropped
+automatically, so the owner calls `drop` when it is done; `defer String s = ...`
+drops it at scope exit through `String::drop`. Neither type
 validates UTF-8:
 `push` appends one byte. A `Str` copied out of a `String` is a snapshot that a
 later `push`, `push_str`, or `push_cstr` may invalidate by reallocating the

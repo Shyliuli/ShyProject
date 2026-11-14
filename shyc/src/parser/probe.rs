@@ -235,7 +235,7 @@ pub struct ParseOutput {
     /// Ordinary functions whose bodies still contain declaration-stage
     /// placeholders. Probe construction must not evaluate a generator through
     /// one of these bodies.
-    pub deferred_body_functions: Vec<String>,
+    pub deferred_body_functions: Vec<Span>,
     /// Compile-time sites, for tools that need the syntax an expansion removed.
     pub sites: Vec<ComptimeSite>,
     /// `try_run` calls this parse rewrote, in source order. Each one stands in
@@ -561,10 +561,10 @@ impl Parser {
     /// that owns it, so a generator cannot be probed through that placeholder.
     pub(crate) fn defer_body_call(&mut self) {
         self.bodies_deferred = true;
-        if let Some(Some(name)) = self.function_body_names.last()
-            && !self.deferred_body_functions.contains(name)
+        if let Some(span) = self.function_bodies.last()
+            && !self.deferred_body_functions.contains(span)
         {
-            self.deferred_body_functions.push(name.clone());
+            self.deferred_body_functions.push(*span);
         }
     }
 

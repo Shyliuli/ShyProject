@@ -1,0 +1,5 @@
+/* Compatibility wrapper: the native ShyC header lives in ../libc/. */
+#ifndef __SHY_COMPAT_C_LIMITS_SHYH
+#define __SHY_COMPAT_C_LIMITS_SHYH
+#include "../libc/limits.shyh"
+#endif

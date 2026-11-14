@@ -5,52 +5,39 @@
 #include <core/comptime.shyh>
 #include <stdint.h>
 
-/* Rust-style Debug rendering into a String: integers are decimal, characters
+/* Rust-style Debug rendering into a Writer: integers are decimal, characters
    are single quoted, strings are quoted and escaped.
 
    The method is deliberately not generic: a trait value (`Debug::from<int>()`)
    is a table of plain function pointers, so one table type serves every
    concrete type that implements the trait. */
 trait Debug {
-    fn debug(const self *value, String *out) -> int;
+    fn debug(const self *value, WriterRef *out) -> int;
 }
 
 /* Shared building blocks for Debug and Display. */
-fn fmt_putc(String *out, int byte) -> int {
-    if (out.reserve(1) == 0) {
-        return 0;
-    }
-    int len = out.len();
-    out.data()[len] = (char)byte;
-    out.set_len(len + 1);
-    return 1;
+fn fmt_putc(WriterRef *out, int byte) -> int {
+    return out.putc((char)byte);
 }
 
-fn fmt_unsigned(String *out, unsigned int value) -> int {
-    if (value == 0) {
-        return fmt_putc(out, '0');
-    }
+fn fmt_unsigned(WriterRef *out, unsigned int value) -> int {
     char digits[12];
-    int count = 0;
-    while (value > 0) {
-        digits[count] = (char)('0' + (int)(value % 10));
+    int start = 12;
+    do {
+        start--;
+        digits[start] = (char)('0' + (int)(value % 10));
         value = value / 10;
-        count = count + 1;
-    }
-    int written = 0;
-    for (int i = count - 1; i >= 0; i--) {
-        written = written + fmt_putc(out, digits[i]);
-    }
-    return written;
+    } while (value > 0);
+    return out.write_all(digits + start, 12 - start);
 }
 
-fn fmt_hex(String *out, int value) -> int {
+fn fmt_hex(WriterRef *out, int value) -> int {
     const char *digits = "0123456789abcdef";
     int written = fmt_putc(out, digits[(value >> 4) & 0xf]);
     return written + fmt_putc(out, digits[value & 0xf]);
 }
 
-fn fmt_escape_byte(String *out, int byte) -> int {
+fn fmt_escape_byte(WriterRef *out, int byte) -> int {
     if (byte == '"') {
         return fmt_putc(out, '\\') + fmt_putc(out, '"');
     }
@@ -73,7 +60,7 @@ fn fmt_escape_byte(String *out, int byte) -> int {
 }
 
 impl Debug for int {
-    fn debug(const self *value, String *out) -> int {
+    fn debug(const self *value, WriterRef *out) -> int {
         int v = *value;
         if (v < 0) {
             int written = fmt_putc(out, '-');
@@ -84,7 +71,7 @@ impl Debug for int {
 }
 
 impl Debug for char {
-    fn debug(const self *value, String *out) -> int {
+    fn debug(const self *value, WriterRef *out) -> int {
         int written = fmt_putc(out, '\'');
         written = written + fmt_escape_byte(out, (int)(unsigned char)*value);
         written = written + fmt_putc(out, '\'');
@@ -93,7 +80,7 @@ impl Debug for char {
 }
 
 impl Debug for Str {
-    fn debug(const self *value, String *out) -> int {
+    fn debug(const self *value, WriterRef *out) -> int {
         int written = fmt_putc(out, '"');
         for (int i = 0; i < value.len; i++) {
             written = written + fmt_escape_byte(out, (int)(unsigned char)value.data[i]);
@@ -104,17 +91,16 @@ impl Debug for Str {
 }
 
 impl Debug for String {
-    fn debug(const self *value, String *out) -> int {
+    fn debug(const self *value, WriterRef *out) -> int {
         let mut inner = Debug::from<Str>();
         return inner.debug(&value.view, out);
     }
 }
 
 /* A C string is quoted and escaped just like Str; NULL prints as null. */
-fn fmt_debug_cstr(String *out, const char *text) -> int {
+fn fmt_debug_cstr(WriterRef *out, const char *text) -> int {
     if (text == 0) {
-        out.push_cstr("null");
-        return 4;
+        return out.write_cstr("null");
     }
     Str view = Str::from_cstr(text);
     let mut inner = Debug::from<Str>();
@@ -122,40 +108,38 @@ fn fmt_debug_cstr(String *out, const char *text) -> int {
 }
 
 impl Debug for char * {
-    fn debug(const self *value, String *out) -> int {
+    fn debug(const self *value, WriterRef *out) -> int {
         return fmt_debug_cstr(out, *value);
     }
 }
 
 impl Debug for const char * {
-    fn debug(const self *value, String *out) -> int {
+    fn debug(const self *value, WriterRef *out) -> int {
         return fmt_debug_cstr(out, *value);
     }
 }
 
 /* Like argv, the array must end with a NULL pointer. */
 impl Debug for char ** {
-    fn debug(const self *value, String *out) -> int {
+    fn debug(const self *value, WriterRef *out) -> int {
         if (*value == 0) {
-            out.push_cstr("null");
-            return 4;
+            return out.write_cstr("null");
         }
-        int start = out.len();
-        fmt_putc(out, '[');
+        int written = fmt_putc(out, '[');
         for (int i = 0; (*value)[i] != 0; i++) {
             if (i > 0) {
-                out.push_cstr(", ");
+                written = written + out.write_cstr(", ");
             }
-            fmt_debug_cstr(out, (*value)[i]);
+            written = written + fmt_debug_cstr(out, (*value)[i]);
         }
-        fmt_putc(out, ']');
-        return out.len() - start;
+        written = written + fmt_putc(out, ']');
+        return out.failed ? -1 : written;
     }
 }
 
 /* Other pointers are addresses; their pointees are never read. */
 impl Debug for void * {
-    fn debug(const self *value, String *out) -> int {
+    fn debug(const self *value, WriterRef *out) -> int {
         uintptr_t address = (uintptr_t)*value;
         const char *digits = "0123456789abcdef";
         char reversed[2 * sizeof(uintptr_t)];
@@ -165,13 +149,12 @@ impl Debug for void * {
             count++;
             address = address >> 4;
         } while (address != 0);
-        int start = out.len();
-        out.push_cstr("0x");
+        int written = out.write_cstr("0x");
         while (count > 0) {
             count--;
-            fmt_putc(out, reversed[count]);
+            written = written + fmt_putc(out, reversed[count]);
         }
-        return out.len() - start;
+        return out.failed ? -1 : written;
     }
 }
 
@@ -185,7 +168,7 @@ const fn derive_debug(Tokens input) -> Tokens {
     let mut text = String::new();
     text.push_cstr("impl Debug for ");
     text.push_cstr(owner);
-    text.push_cstr(" { fn debug(const self *value, String *out) -> int { int start = out.len(); out.push_cstr(\"");
+    text.push_cstr(" { fn debug(const self *value, WriterRef *out) -> int { int written = out.write_cstr(\"");
     text.push_cstr(owner);
     text.push_cstr(" {\");");
     for (int i = 0; i < count; i++) {
@@ -195,7 +178,7 @@ const fn derive_debug(Tokens input) -> Tokens {
         if (pointer == 0) {
             require_impl(type, "Debug");
         }
-        text.push_cstr("out.push_cstr(\"");
+        text.push_cstr("written = written + out.write_cstr(\"");
         text.push_cstr(i == 0 ? " " : ", ");
         text.push_cstr(name);
         text.push_cstr(": \"); { let mut field = Debug::from<");
@@ -204,18 +187,18 @@ const fn derive_debug(Tokens input) -> Tokens {
         if (pointer) {
             text.push_cstr("void *address = (void *)value->");
             text.push_cstr(name);
-            text.push_cstr("; field.debug(&address, out);");
+            text.push_cstr("; written = written + field.debug(&address, out);");
         } else {
-            text.push_cstr("field.debug(&value->");
+            text.push_cstr("written = written + field.debug(&value->");
             text.push_cstr(name);
             text.push_cstr(", out);");
         }
         text.push_cstr(" }");
     }
-    text.push_cstr(count == 0 ? "out.push_cstr(\"}\");" : "out.push_cstr(\" }\");");
-    text.push_cstr("return out.len() - start; } }");
+    text.push_cstr(count == 0 ? "written = written + out.write_cstr(\"}\");" : "written = written + out.write_cstr(\" }\");");
+    text.push_cstr("return out.failed ? -1 : written; } }");
     Tokens result = tokens_from_text(text.as_cstr());
-    text.free();
+    text.drop();
     return result;
 }
 

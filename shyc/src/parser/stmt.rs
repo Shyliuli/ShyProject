@@ -12,7 +12,39 @@ use super::probe::{Answer, Place, ProbeRequest};
 
 impl Parser {
     /// One statement, including a declaration used as a statement.
+    ///
+    /// A compile-time generator may stand here too, but this position holds
+    /// one statement and cannot represent a longer expansion.
     pub(crate) fn statement(&mut self) -> Result<Stmt, Diagnostic> {
+        let mut statements = self.statement_or_expansion()?;
+        match statements.len() {
+            0 => Ok(Stmt::Empty(self.here())),
+            1 => Ok(statements.pop().expect("one statement")),
+            count => Err(Diagnostic::new(
+                self.here(),
+                format!(
+                    "a compile-time generator produced {count} statements where one statement is required; wrap it in a block"
+                ),
+            )),
+        }
+    }
+
+    /// One statement, or the zero or more statements a compile-time generator
+    /// produces. Blocks and generated statement lists share this path.
+    fn statement_or_expansion(&mut self) -> Result<Vec<Stmt>, Diagnostic> {
+        if let Some(expanded) = self.expand_statement_list()? {
+            // The generator call's own semicolon closes the invocation; it is
+            // not an extra empty statement.
+            if self.at_punct(";") {
+                self.bump();
+            }
+            return Ok(expanded);
+        }
+        Ok(vec![self.plain_statement()?])
+    }
+
+    /// Parses one written statement without expanding a generator.
+    fn plain_statement(&mut self) -> Result<Stmt, Diagnostic> {
         if self.at_punct("#") {
             return self.attributed_statement();
         }
@@ -226,11 +258,6 @@ impl Parser {
         let is_function_body = params.is_some();
         if is_function_body {
             self.function_bodies.push(open);
-            self.function_body_names.push(
-                params
-                    .and_then(|declarator| declarator.name.as_ref())
-                    .map(|name| name.text.clone()),
-            );
         }
         self.push_scope();
         if let Some(declarator) = params
@@ -248,20 +275,13 @@ impl Parser {
             if self.at_eof() {
                 return Err(Diagnostic::new(self.here(), "unterminated block"));
             }
-            // A const fn that returns tokens may expand to a statement list,
-            // so one call can contribute zero or more statements.
-            if let Some(expanded) = self.expand_statement_list()? {
-                stmts.extend(expanded);
-                continue;
-            }
-            stmts.push(self.statement()?);
+            stmts.extend(self.statement_or_expansion()?);
         }
         let close = self.expect_punct("}")?;
         self.pop_scope();
         self.body_stack.pop();
         if is_function_body {
             self.function_bodies.pop();
-            self.function_body_names.pop();
         }
         Ok(Block {
             span: open.join(close),
@@ -639,10 +659,10 @@ impl Parser {
         parser.body_world = self.body_world.clone();
         parser.defer_body_calls = self.defer_body_calls;
         parser.body_stack = self.body_stack.clone();
-        parser.function_body_names = self.function_body_names.clone();
+        parser.function_bodies = self.function_bodies.clone();
         let mut statements = Vec::new();
         while !parser.at_eof() {
-            statements.push(parser.statement()?);
+            statements.extend(parser.statement_or_expansion()?);
         }
         self.bodies_deferred |= parser.bodies_deferred;
         self.deferred_body_functions

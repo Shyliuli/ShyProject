@@ -82,6 +82,10 @@ struct Tokens tokens_from_int(int value);
 #[const_fn_token_builtin]
 struct Tokens tokens_from_text(const char *text);
 
+/* Stop this compilation with a diagnostic supplied by the generator. */
+#[const_fn_token_builtin]
+void compile_error(const char *message);
+
 /* The answer to a name.
    `declared` is 1 when `name` is a declaration visible in the round being
    compiled, and 0 otherwise. Every file-scope name counts: a function, an

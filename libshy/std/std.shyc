@@ -38,7 +38,7 @@ impl File {
             char chunk[256];
             int n = f.read(chunk, 256);
             if (n < 0) {
-                text.free();
+                text.drop();
                 return Result<String, IoError>::Err(ReadFailed);
             }
             if (n == 0) {

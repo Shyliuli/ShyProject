@@ -85,7 +85,7 @@ pub enum ComptimeSiteKind {
     Declaration,
     /// A call to a const fn, including a detached generator call.
     Call,
-    /// A println!, format!, or scanln! invocation.
+    /// A built-in scanln! invocation; library macros are const fn calls.
     Macro,
 }
 
@@ -323,11 +323,8 @@ pub(crate) struct Parser {
     /// Span of the function body being parsed, innermost last. A call inside a
     /// nested block still belongs to this body for re-parsing.
     pub(crate) function_bodies: Vec<Span>,
-    /// Function names whose bodies were left with const fn placeholders in the
-    /// declaration pass.
-    pub(crate) function_body_names: Vec<Option<String>>,
-    /// Names of those functions, for probe safety checks.
-    pub(crate) deferred_body_functions: Vec<String>,
+    /// Body openings, so methods sharing a name remain distinct.
+    pub(crate) deferred_body_functions: Vec<Span>,
     /// Bodies that contain a const fn call: only these need re-parsing once the
     /// declaration world is settled.
     /// Declarator produced by a type-position expansion, waiting to be joined
@@ -336,9 +333,6 @@ pub(crate) struct Parser {
     /// Set while a `const fn` body is parsed. Calls there remain ordinary
     /// function calls whose arguments are evaluated by the compiled probe.
     pub(crate) in_const_body: bool,
-    /// Names one expanded format macro already used, so its locals cannot
-    /// capture an identifier the arguments mention.
-    pub(crate) macro_index: usize,
     /// Ordinary function bodies the evaluator may interpret for `try_run`.
     /// Probe mode: answers from an earlier round and the requests this parse
     /// collects. Absent in a normal parse, which evaluates instead.
@@ -800,11 +794,9 @@ impl Parser {
             defer_body_calls: false,
             bodies_deferred: false,
             function_bodies: Vec::new(),
-            function_body_names: Vec::new(),
             deferred_body_functions: Vec::new(),
             pending_declarator: None,
             in_const_body: false,
-            macro_index: 0,
             probe: None,
             try_sites: Vec::new(),
             pending_token_builtin: None,
@@ -851,13 +843,16 @@ impl Parser {
     /// A trait is a compile-time name, but it is parsed like a typedef so its
     /// misuse reaches semantic analysis with a precise message.
     pub(crate) fn is_type_name(&self, name: &str) -> bool {
+        if self.at_ident(name) && self.at_punct_ahead(1, "!") {
+            return false;
+        }
         // A const fn that returns tokens can stand where a type is written, so
         // a cast or a sizeof must parse it as a type and expand it.
-        if self
-            .const_fns
-            .iter()
-            .any(|function| function.returns_tokens && function.name == name)
-        {
+        if self.const_fns.iter().any(|function| {
+            function.returns_tokens
+                && function.name == name
+                && !self.scopes[0].values.contains(name)
+        }) {
             return true;
         }
         for scope in self.scopes.iter().rev() {
@@ -925,6 +920,9 @@ impl Parser {
             return None;
         };
         if !self.at_punct_ahead(1, "(") {
+            return None;
+        }
+        if self.scopes[0].values.contains(name) {
             return None;
         }
         self.const_fns

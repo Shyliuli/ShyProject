@@ -71,6 +71,11 @@ fn main() -> Result<()> {
         objects.push(obj);
     }
 
+    // Diagnose methods that survive section collection. Header-only helpers
+    // otherwise make unused String writes look like missing cleanup.
+    if gc {
+        gc_sections(&mut objects);
+    }
     let named_objects: Vec<_> = inputs
         .iter()
         .zip(objects.iter())
@@ -81,9 +86,6 @@ fn main() -> Result<()> {
     }
 
     // 2. 链接。
-    if gc {
-        gc_sections(&mut objects);
-    }
     let linked = link(objects)?;
 
     // 3. 写出 .sfs raw 内存镜像。shyfile 只能追加写入，所以先删掉旧输出文件。

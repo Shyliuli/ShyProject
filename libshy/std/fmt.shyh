@@ -2,129 +2,369 @@
 #define SHY_STD_FMT_SHYH
 
 #include <stdio.h>
+#include <string.h>
 #include <core/comptime.shyh>
 #include <alloc/string.shyh>
 #include <alloc/debug.shyh>
 #include <alloc/display.shyh>
+#include <alloc/vec.shyh>
 #include <std/io.shyh>
 
-/* Formatting over the Display and Debug traits.
-
-   {} renders with Display, {:?} with Debug, {{ and }} are literal braces, and
-   {name} inserts that variable. The compiler checks a literal format string
-   and expands the call itself: the literal pieces are pushed into a String and
-   each argument is rendered by one statically dispatched display/debug call,
-   so nothing is parsed at run time. The names the expansion lands on are
-   below; they are trivial on purpose.
-
-   writeln!(writer, "x = {}", value) is the same expansion, except that the
-   finished line goes to the Writer expression instead of the global writer
-   and the temporary String is freed afterwards. The writer is one ordinary
-   expression of a type implementing Writer; the expansion stores it in a
-   local, so it is evaluated once. A temporary endpoint such as
-   stdout_writer() works, and an existing String is written through its
-   address (writeln!(&text, ...)), because passing the owner by value would
-   copy it.
-
-   scanln! is the exception: it hands its string to sscanf, which reads the C
-   conversions at run time, so it keeps one wrapper per argument count. Those
-   wrappers are generated at the end of this file. */
-
-fn fmt_begin(void) -> String {
-    return String::new();
+/* Formatting expands at compile time. Only format! creates a result String
+   at run time; Display and Debug write directly to the borrowed destination. */
+fn fmt_display<A: Display>(A value, WriterRef *out) -> int {
+    int written = value.display(out);
+    if (written < 0) { out.failed = 1; }
+    return out.failed ? -1 : written;
 }
 
-fn fmt_display<A: Display>(A value, String *out) -> int {
-    return value.display(out);
+fn fmt_debug<A: Debug>(A value, WriterRef *out) -> int {
+    int written = value.debug(out);
+    if (written < 0) { out.failed = 1; }
+    return out.failed ? -1 : written;
 }
 
-fn fmt_debug<A: Debug>(A value, String *out) -> int {
-    return value.debug(out);
-}
-
-/* Ends println!: write the built line to the global writer. */
-fn fmt_line(String *line) -> int {
-    let mut out = global_writer();
-    return out.write_line(line);
-}
-
-/* sscanf writes through one pointer per conversion, so scanln! needs a typed
-   wrapper for every arity. scanln_generation(8) sets the largest one, the same
-   limit the compiler enforces.
-
-   The wrappers are text, and text is built with the ordinary String the rest
-   of this file already uses: push_cstr for the fixed pieces, push for one
-   character, and fmt_unsigned for the arity number. tokens_from_text then
-   hands the finished source to the compiler's lexer. */
-
-const fn append_value_name(String *out, int index) {
-    String::push(out, 'a' + index);
-}
-
-const fn append_type_name(String *out, int index) {
-    String::push(out, 'A' + index);
-}
-
-/* "<A, B, C>" */
-const fn append_type_parameters(String *out, int count) {
-    String::push_cstr(out, "<");
-    for (int i = 0; i < count; i++) {
-        if (i > 0) {
-            String::push_cstr(out, ", ");
+/* Keep generated names out of the input, including captured {names}. */
+const fn fmt_prefix(Tokens input) -> String {
+    let mut prefix = String::from_cstr("__shy_fmt_");
+    int collision = 1;
+    while (collision) {
+        collision = 0;
+        for (int i = 0; i < input.count; i++) {
+            if (strstr(input.texts[i], prefix.as_cstr()) != 0) {
+                prefix.push('_');
+                collision = 1;
+                break;
+            }
         }
-        append_type_name(out, i);
     }
-    String::push_cstr(out, ">");
+    return prefix;
 }
 
-/* "const char *fmt, A *a, B *b" */
-const fn append_pointer_parameters(String *out, int count) {
-    String::push_cstr(out, "const char *fmt");
-    for (int i = 0; i < count; i++) {
-        String::push_cstr(out, ", ");
-        append_type_name(out, i);
-        String::push_cstr(out, " *");
-        append_value_name(out, i);
+const fn fmt_name(String *code, Str prefix, const char *name, int index) {
+    code.push_str(prefix);
+    code.push_cstr(name);
+    if (index >= 0) {
+        let mut writer = code.borrow();
+        fmt_unsigned(&writer, (unsigned int)index);
     }
 }
 
-/* ", a, b" */
-const fn append_passed_arguments(String *out, int count) {
-    for (int i = 0; i < count; i++) {
-        String::push_cstr(out, ", ");
-        append_value_name(out, i);
+const fn fmt_source(String *code, Tokens input) {
+    for (int i = 0; i < input.count; i++) {
+        code.push_cstr(input.texts[i]);
+        code.push(' ');
     }
 }
+
+/* f<A, B>(x) contains commas outside (). Only treat <...> as nesting when
+   its closing > introduces a call or ::, so comparisons keep their meaning. */
+const fn fmt_generic_end(Tokens input, int start) -> int {
+    int depth = 0;
+    for (int i = start; i < input.count; i++) {
+        const char *text = input.texts[i];
+        if (strcmp(text, "<") == 0) {
+            depth++;
+        } else if (strcmp(text, ">") == 0 || strcmp(text, ">>") == 0) {
+            depth = depth - (strcmp(text, ">>") == 0 ? 2 : 1);
+            if (depth <= 0) {
+                if (i + 1 < input.count &&
+                    (strcmp(input.texts[i + 1], "(") == 0 ||
+                     strcmp(input.texts[i + 1], "::") == 0)) {
+                    return i;
+                }
+                return start;
+            }
+        } else if (strcmp(text, ";") == 0) {
+            break;
+        }
+    }
+    return start;
+}
+
+const fn fmt_arguments(Tokens input) -> Vec<Tokens> {
+    Vec<Tokens> args = {0};
+    int start = 0;
+    int depth = 0;
+    for (int i = 0; i < input.count; i++) {
+        if (input.kinds[i] != TOKEN_PUNCT) { continue; }
+        const char *text = input.texts[i];
+        if (strcmp(text, "(") == 0 || strcmp(text, "[") == 0 ||
+            strcmp(text, "{") == 0) {
+            depth++;
+        } else if (strcmp(text, ")") == 0 || strcmp(text, "]") == 0 ||
+                   strcmp(text, "}") == 0) {
+            depth--;
+        } else if (depth == 0 && strcmp(text, "<") == 0) {
+            i = fmt_generic_end(input, i);
+        } else if (depth == 0 && strcmp(text, ",") == 0) {
+            if (i == start) { compile_error("empty formatting argument"); }
+            args.push(tokens_slice(input, start, i - start));
+            start = i + 1;
+        }
+    }
+    if (start < input.count) {
+        args.push(tokens_slice(input, start, input.count - start));
+    }
+    return args;
+}
+
+const fn fmt_hex_digit(int byte) -> int {
+    if (byte >= '0' && byte <= '9') { return byte - '0'; }
+    if (byte >= 'a' && byte <= 'f') { return byte - 'a' + 10; }
+    if (byte >= 'A' && byte <= 'F') { return byte - 'A' + 10; }
+    return -1;
+}
+
+/* Decode literal escapes before interpreting braces. */
+const fn fmt_literal(Tokens input) -> String {
+    let mut text = String::new();
+    for (int token = 0; token < input.count; token++) {
+        if (input.kinds[token] == TOKEN_NEWLINE) { continue; }
+        const char *raw = input.texts[token];
+        if (input.kinds[token] != TOKEN_STRING || raw[0] != '"') {
+            compile_error("the format string must be an ordinary string literal");
+        }
+        for (int i = 1; i < input.lens[token] - 1; i++) {
+            int byte = (unsigned char)raw[i];
+            if (byte == '\\') {
+                i++;
+                byte = raw[i];
+                switch (byte) {
+                case 'n': byte = '\n'; break;
+                case 'r': byte = '\r'; break;
+                case 't': byte = '\t'; break;
+                case 'a': byte = '\a'; break;
+                case 'b': byte = '\b'; break;
+                case 'f': byte = '\f'; break;
+                case 'v': byte = '\v'; break;
+                case 'x':
+                    byte = 0;
+                    if (fmt_hex_digit(raw[i + 1]) < 0) {
+                        compile_error("a hex escape needs a digit");
+                    }
+                    while (fmt_hex_digit(raw[i + 1]) >= 0) {
+                        i++;
+                        byte = byte * 16 + fmt_hex_digit(raw[i]);
+                    }
+                    break;
+                default:
+                    if (byte >= '0' && byte <= '7') {
+                        byte = byte - '0';
+                        int count = 1;
+                        while (count < 3 && raw[i + 1] >= '0' && raw[i + 1] <= '7') {
+                            i++;
+                            byte = byte * 8 + raw[i] - '0';
+                            count++;
+                        }
+                    }
+                    break;
+                }
+            }
+            text.push(byte);
+        }
+    }
+    return text;
+}
+
+const fn fmt_quote(String *code, Str text) {
+    /* Fixed-width octal escapes keep following hex digits separate. */
+    code.push('"');
+    for (int i = 0; i < text.len; i++) {
+        int byte = (unsigned char)text.data[i];
+        if (byte == '"' || byte == '\\') {
+            code.push('\\');
+            code.push(byte);
+        } else if (byte < 32 || byte >= 127) {
+            code.push('\\');
+            code.push('0' + ((byte >> 6) & 7));
+            code.push('0' + ((byte >> 3) & 7));
+            code.push('0' + (byte & 7));
+        } else {
+            code.push(byte);
+        }
+    }
+    code.push('"');
+}
+
+const fn fmt_count_begin(String *code, Str prefix) {
+    code.push_cstr("if (");
+    fmt_name(code, prefix, "count", -1);
+    code.push_cstr(" >= 0) { int ");
+    fmt_name(code, prefix, "part", -1);
+    code.push_cstr(" = ");
+}
+
+const fn fmt_count_end(String *code, Str prefix) {
+    code.push_cstr("; ");
+    fmt_name(code, prefix, "count", -1);
+    code.push_cstr(" = ");
+    fmt_name(code, prefix, "part", -1);
+    code.push_cstr(" < 0 ? -1 : ");
+    fmt_name(code, prefix, "count", -1);
+    code.push_cstr(" + ");
+    fmt_name(code, prefix, "part", -1);
+    code.push_cstr("; } ");
+}
+
+const fn fmt_text(String *code, Str prefix, Str text) {
+    if (text.len == 0) { return; }
+    fmt_count_begin(code, prefix);
+    fmt_name(code, prefix, "writer", -1);
+    code.push_cstr(".write_all(");
+    fmt_quote(code, text);
+    code.push_cstr(", ");
+    let mut writer = code.borrow();
+    fmt_unsigned(&writer, (unsigned int)text.len);
+    code.push_cstr(")");
+    fmt_count_end(code, prefix);
+}
+
+/* kind: 0 write, 1 writeln, 2 format, 3 print, 4 println, 5 eprintln. */
+const fn fmt_expand(Tokens input, int kind) -> Tokens {
+    let mut args = fmt_arguments(input);
+    int format_index = kind <= 1 ? 1 : 0;
+    if (args.len <= format_index) {
+        compile_error("formatting needs a literal format string");
+    }
+    let mut format = fmt_literal(args.data[format_index]);
+    let mut prefix = fmt_prefix(input);
+    let mut code = String::from_cstr("({ let mut ");
+    fmt_name(&code, prefix.view, "target", -1);
+    code.push_cstr(" = ");
+    if (kind <= 1) {
+        fmt_source(&code, args.data[0]);
+    } else {
+        code.push_cstr(kind == 2 ? "String::new()" :
+                       kind == 5 ? "stderr_writer()" : "global_writer()");
+    }
+    code.push_cstr("; let mut ");
+    fmt_name(&code, prefix.view, "writer", -1);
+    code.push_cstr(" = ");
+    fmt_name(&code, prefix.view, "target", -1);
+    code.push_cstr(".borrow(); ");
+    int first_value = format_index + 1;
+    for (int i = first_value; i < args.len; i++) {
+        code.push_cstr("let ");
+        fmt_name(&code, prefix.view, "arg", i - first_value);
+        code.push_cstr(" = ");
+        fmt_source(&code, args.data[i]);
+        code.push_cstr("; ");
+    }
+    code.push_cstr("int ");
+    fmt_name(&code, prefix.view, "count", -1);
+    code.push_cstr(" = 0; ");
+    let mut pending = String::new();
+    int positional = 0;
+    for (int i = 0; i < format.len(); i++) {
+        int byte = (unsigned char)format.view.data[i];
+        if ((byte == '{' || byte == '}') && i + 1 < format.len() &&
+            format.view.data[i + 1] == byte) {
+            pending.push(byte);
+            i++;
+        } else if (byte == '{') {
+            fmt_text(&code, prefix.view, pending.view);
+            pending.clear();
+            int start = ++i;
+            while (i < format.len() && format.view.data[i] != '}') { i++; }
+            if (i == format.len()) {
+                compile_error("format string has an unclosed '{'");
+            }
+            Str slot = {format.view.data + start, i - start};
+            int debug = slot.len >= 2 && slot.data[slot.len - 2] == ':' &&
+                        slot.data[slot.len - 1] == '?';
+            if (debug) { slot.len = slot.len - 2; }
+            for (int j = 0; j < slot.len; j++) {
+                int c = (unsigned char)slot.data[j];
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                      c == '_' || (j > 0 && c >= '0' && c <= '9') || c >= 128)) {
+                    compile_error("unknown format specifier");
+                }
+            }
+            fmt_count_begin(&code, prefix.view);
+            code.push_cstr(debug ? "fmt_debug(" : "fmt_display(");
+            if (slot.len > 0) {
+                code.push_str(slot);
+            } else {
+                if (first_value + positional >= args.len) {
+                    compile_error("format string has more placeholders than arguments");
+                }
+                fmt_name(&code, prefix.view, "arg", positional++);
+            }
+            code.push_cstr(", &");
+            fmt_name(&code, prefix.view, "writer", -1);
+            code.push_cstr(")");
+            fmt_count_end(&code, prefix.view);
+        } else if (byte == '}') {
+            compile_error("format string has an unmatched '}'");
+        } else {
+            pending.push(byte);
+        }
+    }
+    if (positional != args.len - first_value) {
+        compile_error("format string has fewer placeholders than arguments");
+    }
+    if (kind == 1 || kind == 4 || kind == 5) { pending.push('\n'); }
+    fmt_text(&code, prefix.view, pending.view);
+    fmt_name(&code, prefix.view, kind == 2 ? "target" : "count", -1);
+    code.push_cstr("; })");
+    Tokens result = tokens_from_text(code.as_cstr());
+    pending.drop();
+    code.drop();
+    prefix.drop();
+    format.drop();
+    args.drop();
+    return result;
+}
+
+const fn write(Tokens input) -> Tokens { return fmt_expand(input, 0); }
+const fn writeln(Tokens input) -> Tokens { return fmt_expand(input, 1); }
+const fn format(Tokens input) -> Tokens { return fmt_expand(input, 2); }
+const fn print(Tokens input) -> Tokens { return fmt_expand(input, 3); }
+const fn println(Tokens input) -> Tokens { return fmt_expand(input, 4); }
+const fn eprintln(Tokens input) -> Tokens { return fmt_expand(input, 5); }
+
+/* scanf keeps its runtime C format string and typed argument wrappers. */
+const fn append_value_name(String *out, int index) { out.push('a' + index); }
+const fn append_type_name(String *out, int index) { out.push('A' + index); }
 
 const fn scanln_wrapper(int count) -> String {
-    let mut text = String::new();
-    String::push_cstr(&text, "fn scanln");
-    fmt_unsigned(&text, (unsigned int)count);
-    append_type_parameters(&text, count);
-    String::push_cstr(&text, "(");
-    append_pointer_parameters(&text, count);
-    String::push_cstr(&text, ") -> int { let mut line = String::new(); get_line(&line); return sscanf((const char *)line.data(), fmt");
-    append_passed_arguments(&text, count);
-    String::push_cstr(&text, "); }");
+    let mut text = String::from_cstr("fn scanln");
+    let mut writer = text.borrow();
+    fmt_unsigned(&writer, (unsigned int)count);
+    text.push_cstr("<");
+    for (int i = 0; i < count; i++) {
+        if (i > 0) { text.push_cstr(", "); }
+        append_type_name(&text, i);
+    }
+    text.push_cstr(">(const char *fmt");
+    for (int i = 0; i < count; i++) {
+        text.push_cstr(", ");
+        append_type_name(&text, i);
+        text.push_cstr(" *");
+        append_value_name(&text, i);
+    }
+    text.push_cstr(") -> int { let mut line = String::new(); get_line(&line); int count = sscanf((const char *)line.data(), fmt");
+    for (int i = 0; i < count; i++) {
+        text.push_cstr(", ");
+        append_value_name(&text, i);
+    }
+    text.push_cstr("); line.drop(); return count; }");
     return text;
 }
 
 const fn scanln_generation(int count) -> Tokens {
     let mut text = String::new();
     for (int n = 1; n <= count; n++) {
-        String::push_cstr(&text, " ");
-        let wrapper = scanln_wrapper(n);
-        String::push_str(&text, wrapper.view);
+        let mut wrapper = scanln_wrapper(n);
+        text.push_str(wrapper.view);
+        wrapper.drop();
     }
-    return tokens_from_text(text.view.data);
+    Tokens result = tokens_from_text(text.as_cstr());
+    text.drop();
+    return result;
 }
 
 scanln_generation(8);
-
-const fn eprintln(Tokens input) -> Tokens {
-    return tokens_concat(
-        tokens_concat(tokens_from_text("writeln!(stderr_writer(), "), input),
-        tokens_from_text(")"));
-}
 
 #endif
