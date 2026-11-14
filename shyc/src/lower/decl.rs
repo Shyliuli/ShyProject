@@ -1897,7 +1897,7 @@ impl FnLower<'_> {
         Ok(())
     }
 
-    fn copy_aggregate(
+    pub(super) fn copy_aggregate(
         &mut self,
         address: ir::Address,
         value: super::ExprVal,

@@ -132,7 +132,7 @@ pub struct InstanceTables {
 
 /// One payload enum the C output prints.
 ///
-/// The C printer asks this table about `.tag`, `.payload.<Variant>`, a `case`
+/// The C printer asks this table about `type()`, `value.Variant`, a `case`
 /// label, and a variant value, so the representation the compiler chose is the
 /// one C sees. A niche stores the payload itself, which no C declaration can
 /// express, so the printer builds and reads it through these entries.

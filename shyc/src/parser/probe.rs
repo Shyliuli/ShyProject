@@ -448,6 +448,7 @@ fn parse_one_stage(
     // Probe mode never queues a live generator: every file-scope call was
     // answered from the cache or became a request.
     parser.parse_unit_items(&mut items)?;
+    super::desugar::struct_variants(&mut items)?;
     let mut requests = parser.take_probe_requests();
     let suspended = parser
         .probe

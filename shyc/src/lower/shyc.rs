@@ -218,6 +218,28 @@ impl super::Lowerer {
                 "impl target must be a struct, union, enum, arithmetic type, or pointer",
             ));
         }
+        if matches!(
+            self.types.kind(ty),
+            TypeKind::Enum(_) | TypeKind::PayloadEnum(_)
+        ) {
+            let reserved = block
+                .methods
+                .iter()
+                .filter_map(|method| method.declarator.name.as_ref())
+                .chain(
+                    block
+                        .prototypes
+                        .iter()
+                        .filter_map(|method| method.declarator.name.as_ref()),
+                )
+                .find(|name| name.text == "type");
+            if let Some(name) = reserved {
+                return Err(Diagnostic::new(
+                    name.span,
+                    "method name 'type' is reserved for enum discriminants",
+                ));
+            }
+        }
         let name = self.impl_name(&block.self_type, ty)?;
         let trait_info = match &block.trait_name {
             Some(trait_name) => {

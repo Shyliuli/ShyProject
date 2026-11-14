@@ -171,10 +171,10 @@ impl Lowerer {
                     .enum_variant(record, &name.text)
                     .map(|variant| variant.value)
                 {
-                    let underlying = self.types.enum_underlying(record).ok_or_else(|| {
-                        Diagnostic::new(*span, "payload enum has no underlying type")
-                    })?;
-                    return Ok(ConstValue::int(underlying, value as u64));
+                    let tag_ty = self
+                        .enum_tag_type(record)
+                        .ok_or_else(|| Diagnostic::new(*span, "type is not an enum"))?;
+                    return Ok(ConstValue::int(tag_ty, value as u64));
                 }
                 let method = self.method_of(record, name)?.ok_or_else(|| {
                     Diagnostic::new(name.span, format!("no method '{}' on this type", name.text))
@@ -197,10 +197,10 @@ impl Lowerer {
                     .enum_variant(enum_ty, &name.text)
                     .map(|variant| variant.value)
                 {
-                    let underlying = self.types.enum_underlying(enum_ty).ok_or_else(|| {
-                        Diagnostic::new(*span, "payload enum has no underlying type")
-                    })?;
-                    return Ok(ConstValue::int(underlying, value as u64));
+                    let tag_ty = self
+                        .enum_tag_type(enum_ty)
+                        .ok_or_else(|| Diagnostic::new(*span, "type is not an enum"))?;
+                    return Ok(ConstValue::int(tag_ty, value as u64));
                 }
                 let method = self.method_on(enum_ty, name)?;
                 let ty = self

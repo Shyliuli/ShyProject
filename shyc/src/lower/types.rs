@@ -983,7 +983,7 @@ impl Lowerer {
             }
             next = value + 1;
             let payload = match &enumerator.payload {
-                Some(type_name) => {
+                ast::VariantPayload::Tuple(type_name) => {
                     let payload = self.resolve_type_name(type_name)?;
                     // `Result<void, E>` comes from binding `T` to `void`; the
                     // variant then has no payload at all. Only an instantiated
@@ -1006,7 +1006,13 @@ impl Lowerer {
                         Some(payload)
                     }
                 }
-                None => None,
+                ast::VariantPayload::None => None,
+                ast::VariantPayload::Struct(fields) => {
+                    return Err(Diagnostic::new(
+                        fields[0].span,
+                        "struct variant was not lowered to a record",
+                    ));
+                }
             };
             if variants
                 .iter()

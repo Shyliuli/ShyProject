@@ -60,7 +60,7 @@ impl File {
             }
             done = done + n;
         }
-        return Result<void, IoError>::Ok;
+        return Result<void, IoError>::Ok();
     }
 
     pub fn close(self *f) {

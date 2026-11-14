@@ -175,6 +175,12 @@ impl Parser {
             return Err(self.expected("an identifier"));
         }
         let span = self.here();
+        if word.starts_with("__shy_variant_") {
+            return Err(Diagnostic::new(
+                span,
+                "identifiers starting with '__shy_variant_' are reserved",
+            ));
+        }
         self.bump();
         Ok(Name::new(word, span))
     }

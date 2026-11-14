@@ -135,6 +135,33 @@ impl Lowerer {
                     None => Ok(self.method_on(ty, name)?.ty),
                 }
             }
+            ast::Expr::VariantInit {
+                qualifier,
+                type_args,
+                variant,
+                span,
+                ..
+            } => {
+                let ty = if type_args.is_empty() {
+                    self.lookup_named_type(&qualifier.text)
+                        .ok_or_else(|| Diagnostic::new(qualifier.span, "unknown enum type"))?
+                } else {
+                    self.generic_qualifier_type(qualifier, type_args)?
+                };
+                let variant = self
+                    .variant_of(ty, variant)
+                    .ok_or_else(|| Diagnostic::new(*span, "unknown enum variant"))?;
+                let payload = variant.payload.ok_or_else(|| {
+                    Diagnostic::new(*span, "a unit variant cannot be initialized with fields")
+                })?;
+                if !self.types.is_record(payload) {
+                    return Err(Diagnostic::new(
+                        *span,
+                        "this variant does not have struct fields",
+                    ));
+                }
+                Ok(ty)
+            }
             ast::Expr::BuiltinTypeCall { .. } => Ok(self.types.builtin(Builtin::Int)),
             ast::Expr::Unary { op, operand, span } => {
                 let operand_ty = self.type_of(operand, local)?;
@@ -209,6 +236,19 @@ impl Lowerer {
                 args,
                 span,
             } => {
+                if type_args.is_empty()
+                    && args.is_empty()
+                    && let ast::Expr::Member { object, name, .. } = callee.as_ref()
+                    && name.text == "type"
+                {
+                    let object_ty = self.type_of(object, local)?;
+                    let enum_ty = self
+                        .enum_target(object_ty)
+                        .ok_or_else(|| Diagnostic::new(*span, "type() needs an enum object"))?;
+                    return self
+                        .enum_tag_type(enum_ty)
+                        .ok_or_else(|| Diagnostic::new(*span, "type is not an enum"));
+                }
                 // `Enum::Variant(value)` constructs an aggregate; it is not a
                 // function call, so it never reaches the signature path.
                 if type_args.is_empty()
@@ -487,53 +527,20 @@ impl Lowerer {
         span: Span,
         local: LocalLookup<'_>,
     ) -> Result<TypeId, Diagnostic> {
-        // `m.payload.Variant` is the only way to name a payload; the inner
-        // `m.payload` has no type of its own.
-        if let ast::Expr::Member {
-            object: base,
-            name: payload,
-            ..
-        } = object
-            && payload.text == "payload"
-        {
-            let base_ty = self.type_of(base, &mut *local)?;
-            if let Some(enum_ty) = self.payload_enum_target(base_ty) {
-                let variant = self
-                    .types
-                    .enum_variant(enum_ty, &name.text)
-                    .ok_or_else(|| {
-                        Diagnostic::new(
-                            span,
-                            format!("payload enum has no variant '{}'", name.text),
-                        )
-                    })?;
-                // A payload-free variant stores nothing, so its payload reads
-                // as `void`. That is how `Result<void, E>::unwrap` returns
-                // nothing through a `-> T` signature.
-                return Ok(match variant.payload {
-                    Some(payload) => payload,
-                    None => self.types.builtin(Builtin::Void),
-                });
-            }
-        }
         let object_ty = self.type_of(object, local)?;
         if let Some(enum_ty) = self.payload_enum_target(object_ty) {
-            return match name.text.as_str() {
-                "tag" => self
-                    .types
-                    .enum_underlying(enum_ty)
-                    .ok_or_else(|| Diagnostic::new(span, "payload enum has no underlying type")),
-                "payload" => Err(Diagnostic::new(
-                    span,
-                    "a payload is read through a variant: write 'value.payload.Variant'",
-                )),
-                other => Err(Diagnostic::new(
-                    span,
-                    format!(
-                        "payload enum has no field '{other}'; use '.tag' or '.payload.<Variant>'"
-                    ),
-                )),
-            };
+            if let Some(variant) = self.types.enum_variant(enum_ty, &name.text) {
+                return variant.payload.ok_or_else(|| {
+                    Diagnostic::new(name.span, format!("variant '{}' has no payload", name.text))
+                });
+            }
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "payload enum has no member '{}'; use '.type()' or '.Variant'",
+                    name.text
+                ),
+            ));
         }
         if op == ast::MemberOp::Arrow && !self.types.is_pointer(object_ty) {
             return Err(Diagnostic::new(
@@ -643,24 +650,35 @@ impl Lowerer {
         self.variant_of(ty, name)
     }
 
-    /// The type a bare `Enum::Variant` names as a value.
-    ///
-    /// A payload-free variant is a complete value, so the name builds it. A
-    /// variant with a payload cannot be built without one, so the name can only
-    /// denote its tag; `o.tag != Option<Str>::Some` reads that way. The niche
-    /// representation stores no tag at all, so its variant names keep requiring
-    /// a payload.
+    /// The logical discriminant type a bare `Enum::Variant` names.
     fn variant_value_type(
         &mut self,
         variant: &ScopedVariant,
         span: Span,
     ) -> Result<TypeId, Diagnostic> {
-        if variant.payload.is_none() || self.types.is_niche_enum(variant.ty) {
-            return Ok(variant.ty);
+        self.enum_tag_type(variant.ty)
+            .ok_or_else(|| Diagnostic::new(span, "type is not an enum"))
+    }
+
+    /// The user-visible type of `value.type()` and `Enum::Variant`.
+    pub(super) fn enum_tag_type(&self, ty: TypeId) -> Option<TypeId> {
+        if self.types.is_niche_enum(ty) {
+            Some(self.types.builtin(Builtin::Int))
+        } else {
+            self.types.enum_underlying(ty)
         }
-        self.types
-            .enum_underlying(variant.ty)
-            .ok_or_else(|| Diagnostic::new(span, "payload enum has no underlying type"))
+    }
+
+    pub(super) fn enum_target(&self, mut ty: TypeId) -> Option<TypeId> {
+        loop {
+            if self.types.enum_info(ty).is_some() {
+                return Some(ty);
+            }
+            let TypeKind::Pointer { pointee } = self.types.kind(ty) else {
+                return None;
+            };
+            ty = pointee.ty;
+        }
     }
 
     /// The enum variant called `name`, for an already resolved type.
@@ -713,7 +731,7 @@ impl Lowerer {
 
     /// The payload enum an object of `ty` denotes, through any pointer depth.
     ///
-    /// ShyC dereferences dot access automatically, so `m.tag` on a `Msg *` or
+    /// ShyC dereferences dot access automatically, so `m.type()` on a `Msg *` or
     /// `Msg **` reaches the same object as an explicit dereference would.
     pub(super) fn payload_enum_target(&self, mut ty: TypeId) -> Option<TypeId> {
         loop {
@@ -764,7 +782,9 @@ impl Lowerer {
                 ..
             } => {
                 let ty = self.generic_qualifier_type(qualifier, type_args)?;
-                if self.method_of(ty, name)?.is_some() || !self.has_generic_method(ty, &name.text)? {
+                if self.method_of(ty, name)?.is_some()
+                    || !self.has_generic_method(ty, &name.text)?
+                {
                     return Ok(None);
                 }
                 (ty, name, 0)

@@ -359,10 +359,11 @@ declarations in that translation unit. Existing C declarations, including
 Payload enums (`enum(u8) Msg { Ping, Text(Str), Num(int) };`) are transparent
 aggregates: the tag at offset 0 and one union of payloads at the aligned
 payload offset. The tag uses the enum's underlying type, which is `int` when no
-`enum(type)` is written. Construct with `Msg::Text(value)` or `Msg::Ping` and
-read `.tag` and `.payload.<Variant>`. A payload enum is not an integer: it does
-not take part in arithmetic or integer conversion. `switch` is the exception:
-it loads the tag at offset 0 and compares it under C integer promotion.
+`enum(type)` is written. Construct with `Msg::Text(value)` or `Msg::Ping()` and
+read `value.Text` or `value.type()`. The source does not expose `.tag`; the tag
+stored at offset 0 remains an ABI detail. A payload enum is not an integer: it
+does not take part in arithmetic or integer conversion. `switch` is the
+exception: it compares the logical variant represented by the tag.
 
 `default:` and its `_:` spelling are the same switch arm. A payload enum is
 closed, so a switch needs a `case Msg::Variant:` for every variant unless it
@@ -401,12 +402,13 @@ Ineligible instances retain their ordinary tag and union representation.
 `switch` works with logical variant labels for both compact representations:
 `case Option<int *>::None:` / `case Option<int *>::Some:`, and
 `case Result<void, Error>::Ok:` / `case Result<void, Error>::Err:`. Payloads
-remain accessible through `.payload.Some` and `.payload.Err`. The scrutinee is
-evaluated once, then a zero/nonzero comparison supplies the logical variant
-tag. `.tag` remains the raw stored value. `?` propagates failure on NULL for
-Option and on nonzero for Result. Generated C headers and wrappers use the
-same pointer/integer types, with no extra tag or union. Global initialisers
-keep the payload-enum restriction.
+are read directly as `value.Some` and `value.Err`, and `value.type()` returns
+the logical variant without exposing the raw pointer or error code. The
+scrutinee is evaluated once, then a zero/nonzero comparison supplies the
+logical variant tag. `?` propagates failure on NULL for Option and on nonzero
+for Result. Generated C headers and wrappers use the same pointer/integer
+types, with no extra tag or union. Global initialisers keep the payload-enum
+restriction.
 
 A file-scope `use` is an include plus a symbol-table import. It expands the
 module header before parsing, so declarations are available without repeating

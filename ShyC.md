@@ -585,15 +585,42 @@ A trait declaration may give a method a default body, and an `impl` that omits
 the method inherits it. A method the impl only declares is not inherited: the
 declaration points at the definition in the translation unit that has it.
 
-### Payload enums
+### Payload and struct variants
 
-An `enum` variant may carry one payload. The enum then becomes a transparent
-tagged object: the tag is the underlying integer at offset 0, and every payload
-starts at the same offset after it, aligned for the widest payload. A variant
-with a payload is built as `Enum::Variant(value)` and read as
-`value.payload.Variant`; `.tag` is the variant's own integer. `switch` on the
-enum compares the tag, and `?` propagates `Option` (`None`/`Some`) and
-`Result` (`Err`/`Ok`) values.
+An enum variant may carry one type or a list of named fields. The enum is a
+transparent tagged object: the tag is the underlying integer at offset 0, and
+every payload starts at the same aligned offset after it.
+
+`Enum::Variant` is the variant's tag. Construction uses parentheses for one
+payload and braces for named fields. A payload-free variant is constructed with
+an empty argument list. `value.Variant` reads the payload, and `value.type()`
+returns the current variant tag.
+
+```c
+#include <stdio.h>
+#include <core/option.shyh>
+
+enum Token {
+    Keyword { text: int, line: int, column: int },
+    Number(int),
+    Eof
+};
+
+int main(void) {
+    Token token = Token::Keyword { text: 7, line: 3, column: 5 };
+    if (token.type() == Token::Keyword) {
+        printf("%d\n", token.Keyword.line);
+    }
+
+    Token end = Token::Eof();
+    if (end.type() == Token::Eof) return 0;
+    return 1;
+}
+```
+
+`switch` on the enum compares `value.type()`. A variant tag may be written
+directly in a case label. `?` propagates `Option` (`None`/`Some`) and `Result`
+(`Err`/`Ok`) values.
 
 ```c
 #include <stdio.h>
@@ -601,26 +628,26 @@ enum compares the tag, and `?` propagates `Option` (`None`/`Some`) and
 
 enum Shape {
     Point,
-    Circle(int)
+    Circle { radius: int }
 };
 
 int main(void) {
-    Shape s = Shape::Circle(3);
-    printf("%d %d\n", s.tag, s.payload.Circle);
+    Shape s = Shape::Circle { radius: 3 };
+    printf("%d %d\n", s.type(), s.Circle.radius);
 
     Option<int> value = Option<int>::Some(7);
     printf("%d %d %d %d\n", value.is_some(), value.is_none(), value.unwrap(), value.unwrap_or(9));
 
     switch (value) {
     case Some:
-        printf("%d\n", value.payload.Some);
+        printf("%d\n", value.Some);
         break;
     default:
         printf("none\n");
     }
 
-    Option<int> none = Option<int>::None;
-    printf("%d %d\n", value.tag != Option<int>::Some, none.tag == Option<int>::None.tag);
+    Option<int> none = Option<int>::None();
+    printf("%d %d\n", value.type() != Option<int>::Some, none.type() == Option<int>::None);
     printf("%d\n", (int)sizeof(Option<int *>) == (int)sizeof(int *));
     return 0;
 }
@@ -646,24 +673,25 @@ A generic payload enum may ask for a C-compatible representation:
   is `Ok` and any other value is `Err`.
 
 Both apply only to an instantiated generic enum; a hand-written enum keeps the
-tagged layout. A niche enum stores no tag, so `.tag` is the raw stored value
-(the pointer or the error integer); compare variants through `switch`, `?`, or
-the methods the header provides.
+tagged layout. A niche enum stores no tag. `type()` normalizes its representation
+to the logical variant so comparisons and `switch` do not expose the pointer or
+error integer.
 
 #### Bare variant names
 
-A variant may be named through its enum type for every enum, whether or not any
-variant carries a payload. For an ordinary C-style enum, `Color::Red` and the
-unscoped enumerator `Red` denote the same value.
+A variant may be named through its enum type for every enum. A bare
+`Enum::Variant` always denotes the variant tag. For an ordinary C-style enum,
+`Color::Red` and the unscoped enumerator `Red` denote the same integer value.
 
-A variant name on its own is the value when the variant has no payload, and its
-tag when it has one, because a payload variant cannot be built without one:
-`value.tag != Option<int>::Some` compares against the tag, while
-`Option<int>::None` is the value itself.
+Construction is explicit:
 
-Reading `value.payload.Variant` of a payload-free variant is a `void`
-expression: it holds nothing. That is how a `-> T` method returns nothing when
-its `T` is `void`.
+```c
+Option<int> none = Option<int>::None();
+Result<void, Error> ok = Result<void, Error>::Ok();
+```
+
+`value.Variant` requires the variant to carry a payload. It yields the payload
+value directly, so fields are read as `value.Variant.field`.
 
 #### Generic impls
 
@@ -864,7 +892,7 @@ use c::stdio::*;
 
 int main(void) {
   Option<int> value = Option<int>::Some(1);
-  printf("%d\n", value.payload.Some);
+  printf("%d\n", value.Some);
   return 0;
 }
 ```

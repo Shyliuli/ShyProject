@@ -245,14 +245,34 @@ pub struct EnumSpec {
 
 /// One enumerator. A missing `value` means "previous value plus one".
 ///
-/// `payload` is the type in `Variant(Type)`; such an enum is a payload enum
-/// and the variant cannot also carry an explicit value.
+/// A payload variant cannot also carry an explicit value. Struct fields are
+/// kept here until parsing finishes, then lowered to a private record type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Enumerator {
     pub span: Span,
     pub name: Name,
     pub value: Option<Expr>,
-    pub payload: Option<TypeName>,
+    pub payload: VariantPayload,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VariantPayload {
+    None,
+    Tuple(TypeName),
+    Struct(Vec<VariantField>),
+}
+
+impl VariantPayload {
+    pub fn is_some(&self) -> bool {
+        !matches!(self, VariantPayload::None)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariantField {
+    pub span: Span,
+    pub name: Name,
+    pub ty: TypeName,
 }
 
 // ---------------------------------------------------------------------------

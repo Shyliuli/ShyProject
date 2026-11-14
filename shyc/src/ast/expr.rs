@@ -223,6 +223,14 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
+    /// A struct-variant constructor: `Enum::Variant { field: value }`.
+    VariantInit {
+        qualifier: Name,
+        type_args: Vec<GenericArg>,
+        variant: Name,
+        fields: Vec<VariantFieldInit>,
+        span: Span,
+    },
     /// Array subscript: `a[i]`. `a` may be a pointer or an array.
     Index {
         array: Box<Expr>,
@@ -265,6 +273,13 @@ pub enum Expr {
     StatementExpr { block: Block, span: Span },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariantFieldInit {
+    pub span: Span,
+    pub name: Name,
+    pub value: Expr,
+}
+
 impl Expr {
     /// Source range of the whole expression.
     pub fn span(&self) -> Span {
@@ -284,6 +299,7 @@ impl Expr {
             | Expr::Conditional { span, .. }
             | Expr::Comma { span, .. }
             | Expr::Call { span, .. }
+            | Expr::VariantInit { span, .. }
             | Expr::Index { span, .. }
             | Expr::Member { span, .. }
             | Expr::Cast { span, .. }

@@ -7,7 +7,7 @@
 
 use crate::ast::{
     AssignOp, BinaryOp, CharLit, Expr, GenericArg, MemberOp, Name, NumberLit, PostfixOp, StringLit,
-    StringLitGroup, UnaryOp,
+    StringLitGroup, UnaryOp, VariantFieldInit,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -651,7 +651,41 @@ impl Parser {
             {
                 break;
             }
-            if self.at_punct("[") {
+            if self.at_punct("{")
+                && matches!(
+                    expr,
+                    Expr::ScopedName { .. } | Expr::GenericScopedName { .. }
+                )
+            {
+                let fields = self.variant_fields()?;
+                let close = self.last_span();
+                let span = expr.span().join(close);
+                expr = match expr {
+                    Expr::ScopedName {
+                        qualifier, name, ..
+                    } => Expr::VariantInit {
+                        qualifier,
+                        type_args: Vec::new(),
+                        variant: name,
+                        fields,
+                        span,
+                    },
+                    Expr::GenericScopedName {
+                        qualifier,
+                        args,
+                        name,
+                        ..
+                    } => Expr::VariantInit {
+                        qualifier,
+                        type_args: args,
+                        variant: name,
+                        fields,
+                        span,
+                    },
+                    _ => unreachable!(),
+                };
+                fresh_try = false;
+            } else if self.at_punct("[") {
                 self.bump();
                 let index = self.expression()?;
                 let close = self.expect_punct("]")?;
@@ -795,6 +829,29 @@ impl Parser {
             }
         }
         Ok(expr)
+    }
+
+    fn variant_fields(&mut self) -> Result<Vec<VariantFieldInit>, Diagnostic> {
+        self.expect_punct("{")?;
+        let mut fields = Vec::new();
+        while !self.at_punct("}") {
+            let name = self.expect_ident()?;
+            self.expect_punct(":")?;
+            let value = self.assignment()?;
+            let span = name.span.join(value.span());
+            fields.push(VariantFieldInit { span, name, value });
+            if !self.eat_punct(",") {
+                break;
+            }
+        }
+        self.expect_punct("}")?;
+        if fields.is_empty() {
+            return Err(Diagnostic::new(
+                self.here(),
+                "a struct variant constructor needs at least one field",
+            ));
+        }
+        Ok(fields)
     }
 
     /// Whether the `?` at the cursor is the C conditional operator.

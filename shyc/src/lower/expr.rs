@@ -596,10 +596,7 @@ impl FnLower<'_> {
                 span,
             } => {
                 if let Some(variant) = self.l.scoped_variant(qualifier, name) {
-                    if variant.payload.is_some() && !self.l.types.is_niche_enum(variant.ty) {
-                        return self.variant_tag_value(&variant, *span);
-                    }
-                    return self.construct_payload_enum(qualifier, name, variant, &[], *span);
+                    return self.variant_tag_value(&variant, *span);
                 }
                 let method = self.l.scoped_method(qualifier, name)?;
                 Ok(ExprVal {
@@ -616,10 +613,7 @@ impl FnLower<'_> {
             } => {
                 let ty = self.l.generic_qualifier_type(qualifier, args)?;
                 if let Some(variant) = self.l.variant_of(ty, name) {
-                    if variant.payload.is_some() && !self.l.types.is_niche_enum(variant.ty) {
-                        return self.variant_tag_value(&variant, *span);
-                    }
-                    return self.construct_payload_enum(qualifier, name, variant, &[], *span);
+                    return self.variant_tag_value(&variant, *span);
                 }
                 let method = self.l.method_on(ty, name)?;
                 Ok(ExprVal {
@@ -628,6 +622,13 @@ impl FnLower<'_> {
                     kind: ExprKind::Place(ir::Address::symbol(method.symbol)),
                 })
             }
+            ast::Expr::VariantInit {
+                qualifier,
+                type_args,
+                variant,
+                fields,
+                span,
+            } => self.construct_struct_variant(qualifier, type_args, variant, fields, *span),
             ast::Expr::BuiltinTypeCall {
                 name,
                 type_args,

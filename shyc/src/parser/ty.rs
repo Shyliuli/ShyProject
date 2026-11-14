@@ -9,7 +9,7 @@ use crate::ast::{
     ArrayDeclarator, ArrayLength, BuiltinType, DeclSpecs, Declarator, DerivedDeclarator, EnumSpec,
     Enumerator, FunctionDeclarator, GenericArg, GenericArgKind, GenericParam, GenericParamKind,
     GenericSpec, MemberDecl, MemberDeclarator, ParamDecl, PointerDeclarator, Qualifier, RecordKind,
-    RecordSpec, StorageClass, TraitBound, TypeName, TypeSpecifier,
+    RecordSpec, StorageClass, TraitBound, TypeName, TypeSpecifier, VariantField, VariantPayload,
 };
 use crate::lexer::TokenKind;
 use crate::source::Diagnostic;
@@ -570,9 +570,33 @@ impl Parser {
                         let payload = if self.eat_punct("(") {
                             let type_name = self.type_name()?;
                             self.expect_punct(")")?;
-                            Some(type_name)
+                            VariantPayload::Tuple(type_name)
+                        } else if self.eat_punct("{") {
+                            let mut fields = Vec::new();
+                            while !self.at_punct("}") {
+                                let field_name = self.expect_ident()?;
+                                self.expect_punct(":")?;
+                                let ty = self.type_name()?;
+                                let span = field_name.span.join(ty.span);
+                                fields.push(VariantField {
+                                    span,
+                                    name: field_name,
+                                    ty,
+                                });
+                                if !self.eat_punct(",") {
+                                    break;
+                                }
+                            }
+                            self.expect_punct("}")?;
+                            if fields.is_empty() {
+                                return Err(Diagnostic::new(
+                                    name.span,
+                                    "a struct variant needs at least one field",
+                                ));
+                            }
+                            VariantPayload::Struct(fields)
                         } else {
-                            None
+                            VariantPayload::None
                         };
                         if payload.is_some() && self.at_punct("=") {
                             return Err(Diagnostic::new(
@@ -592,8 +616,12 @@ impl Parser {
                             Some(value) => name.span.join(value.span()),
                             None => name.span,
                         };
-                        if let Some(payload) = &payload {
+                        if let VariantPayload::Tuple(payload) = &payload {
                             span = span.join(payload.span);
+                        } else if let VariantPayload::Struct(fields) = &payload
+                            && let Some(last) = fields.last()
+                        {
+                            span = span.join(last.span);
                         }
                         list.push(Enumerator {
                             span,

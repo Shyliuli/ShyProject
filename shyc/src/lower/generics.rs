@@ -303,6 +303,25 @@ impl Lowerer {
                 ));
             }
         };
+        if self.generic_enums.contains_key(&generic.name.text) {
+            let reserved = block
+                .methods
+                .iter()
+                .filter_map(|method| method.declarator.name.as_ref())
+                .chain(
+                    block
+                        .prototypes
+                        .iter()
+                        .filter_map(|method| method.declarator.name.as_ref()),
+                )
+                .find(|name| name.text == "type");
+            if let Some(name) = reserved {
+                return Err(Diagnostic::new(
+                    name.span,
+                    "method name 'type' is reserved for enum discriminants",
+                ));
+            }
+        }
         if generic.args.len() != params.len() {
             return Err(Diagnostic::new(
                 block.self_type.span,

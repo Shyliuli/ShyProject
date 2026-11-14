@@ -2396,6 +2396,11 @@ fn expression_names(expression: &ast::Expr, names: &mut Vec<String>) {
                 expression_names(argument, names);
             }
         }
+        ast::Expr::VariantInit { fields, .. } => {
+            for field in fields {
+                expression_names(&field.value, names);
+            }
+        }
         ast::Expr::Index { array, index, .. } => {
             expression_names(array, names);
             expression_names(index, names);

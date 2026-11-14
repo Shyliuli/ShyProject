@@ -1815,10 +1815,15 @@ fn document_symbols_for_declaration(
                     .flatten()
                     .map(|enumerator| DocumentSymbol {
                         name: enumerator.name.text.clone(),
-                        detail: enumerator
-                            .payload
-                            .as_ref()
-                            .map(|payload| analysis.sources.text(payload.span).to_string()),
+                        detail: match &enumerator.payload {
+                            shyc::ast::VariantPayload::None => None,
+                            shyc::ast::VariantPayload::Tuple(payload) => {
+                                Some(analysis.sources.text(payload.span).to_string())
+                            }
+                            shyc::ast::VariantPayload::Struct(_) => {
+                                Some("struct variant".to_string())
+                            }
+                        },
                         kind: SymbolKind::ENUM_MEMBER,
                         tags: None,
                         deprecated: None,

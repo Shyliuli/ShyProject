@@ -605,24 +605,20 @@ impl Collector<'_> {
                         });
                     }
                     for enumerator in enumeration.enumerators.iter().flatten() {
-                        let detail = enumerator
-                            .payload
-                            .as_ref()
-                            .map(|payload| {
-                                format!(
-                                    "{}::{}({})",
-                                    container.as_deref().unwrap_or("enum"),
-                                    enumerator.name.text,
-                                    self.text(payload.span)
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                format!(
-                                    "{}::{}",
-                                    container.as_deref().unwrap_or("enum"),
-                                    enumerator.name.text
-                                )
-                            });
+                        let base = format!(
+                            "{}::{}",
+                            container.as_deref().unwrap_or("enum"),
+                            enumerator.name.text
+                        );
+                        let detail = match &enumerator.payload {
+                            ast::VariantPayload::None => base,
+                            ast::VariantPayload::Tuple(payload) => {
+                                format!("{base}({})", self.text(payload.span))
+                            }
+                            ast::VariantPayload::Struct(fields) => {
+                                format!("{base} {{ {} fields }}", fields.len())
+                            }
+                        };
                         self.index.push(Sym {
                             name: enumerator.name.text.clone(),
                             kind: SymKind::Variant,
@@ -1084,6 +1080,20 @@ impl Collector<'_> {
                     self.walk_expr(argument);
                 }
             }
+            ast::Expr::VariantInit {
+                qualifier,
+                type_args,
+                fields,
+                ..
+            } => {
+                self.add_type_ref(qualifier);
+                for argument in type_args {
+                    self.walk_generic_arg(argument);
+                }
+                for field in fields {
+                    self.walk_expr(&field.value);
+                }
+            }
             ast::Expr::Index { array, index, .. } => {
                 self.walk_expr(array);
                 self.walk_expr(index);
@@ -1171,8 +1181,16 @@ impl Collector<'_> {
                         self.push_frame(enumeration.span.start);
                         self.declare_generics(&enumeration.generics);
                         for enumerator in enumeration.enumerators.iter().flatten() {
-                            if let Some(payload) = &enumerator.payload {
-                                self.walk_type_name(payload);
+                            match &enumerator.payload {
+                                ast::VariantPayload::None => {}
+                                ast::VariantPayload::Tuple(payload) => {
+                                    self.walk_type_name(payload);
+                                }
+                                ast::VariantPayload::Struct(fields) => {
+                                    for field in fields {
+                                        self.walk_type_name(&field.ty);
+                                    }
+                                }
                             }
                             if let Some(value) = &enumerator.value {
                                 self.walk_expr(value);

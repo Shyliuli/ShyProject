@@ -15,6 +15,7 @@ use crate::ast::{
     FunctionDeclarator, GenericArg, GenericArgKind, GenericParam, GenericParamKind, GenericSpec,
     Initializer, InitializerKind, MemberDecl, MemberOp, ParamDecl, PostfixOp, Qualifier,
     RecordKind, RecordSpec, StorageClass, TraitDecl, TraitMethod, TypeName, TypeSpecifier, UnaryOp,
+    VariantPayload,
 };
 use std::collections::HashMap;
 
@@ -286,12 +287,15 @@ fn record_uses_generics(record: &RecordSpec) -> bool {
 fn enum_uses_generics(enumeration: &EnumSpec) -> bool {
     !enumeration.generics.is_empty()
         || enumeration.enumerators.as_ref().is_some_and(|enumerators| {
-            enumerators.iter().any(|enumerator| {
-                enumerator
-                    .payload
-                    .as_ref()
-                    .is_some_and(type_name_uses_generics)
-            })
+            enumerators
+                .iter()
+                .any(|enumerator| match &enumerator.payload {
+                    VariantPayload::None => false,
+                    VariantPayload::Tuple(type_name) => type_name_uses_generics(type_name),
+                    VariantPayload::Struct(fields) => fields
+                        .iter()
+                        .any(|field| type_name_uses_generics(&field.ty)),
+                })
         })
 }
 
@@ -550,12 +554,19 @@ fn payload_enum_text(
     let generics = generic_params_text(&enumeration.generics, spelling);
     let mut members = Vec::new();
     for enumerator in enumerators {
-        if let Some(payload) = &enumerator.payload {
+        if let VariantPayload::Tuple(payload) = &enumerator.payload {
             members.push(format!(
                 "{} {};",
                 type_name_text(payload),
                 enumerator.name.text
             ));
+        } else if let VariantPayload::Struct(fields) = &enumerator.payload {
+            let fields = fields
+                .iter()
+                .map(|field| format!("{} {};", type_name_text(&field.ty), field.name.text))
+                .collect::<Vec<_>>()
+                .join(" ");
+            members.push(format!("struct {{ {fields} }} {};", enumerator.name.text));
         }
     }
     format!(
@@ -792,6 +803,7 @@ fn expr_text(expression: &Expr) -> String {
                 generic_args_text(type_args, Spelling::plain())
             )
         }
+        Expr::VariantInit { .. } => UNSUPPORTED.to_string(),
         Expr::Index { array, index, .. } => {
             format!("{}[{}]", expr_text(array), expr_text(index))
         }

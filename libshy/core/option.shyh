@@ -30,7 +30,7 @@ impl Option<T> {
     fn unwrap(const self *o) -> T {
         switch (*o) {
         case Option<T>::Some:
-            return o.payload.Some;
+            return o.Some;
         default:
             abort();
         }
@@ -39,7 +39,7 @@ impl Option<T> {
     fn unwrap_or(const self *o, T fallback) -> T {
         switch (*o) {
         case Option<T>::Some:
-            return o.payload.Some;
+            return o.Some;
         default:
             return fallback;
         }

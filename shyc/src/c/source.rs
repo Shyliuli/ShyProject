@@ -12,8 +12,8 @@
 //!   becomes the constructor that fills one;
 //! - `value?` becomes a statement expression that returns the failure variant;
 //! - `asm!` becomes a GCC extended asm statement;
-//! - a payload enum reads and builds its `.tag` and `.payload.Variant`, and a
-//!   niche enum stores its payload directly, as the compiler laid it out.
+//! - a payload enum reads `value.Variant` and builds its internal `.tag` and
+//!   `.payload.Variant`, while a niche enum stores its payload directly.
 //!
 //! Everything else is ordinary C and prints as written. A generic function or
 //! record prints nothing: C has no template, and an instance of one is a
@@ -1318,16 +1318,6 @@ fn forward_record(specs: &DeclSpecs) -> Option<String> {
     Some(format!("typedef {keyword} {tag} {tag};", tag = tag.text))
 }
 
-/// The C value of one variant: a compound literal under its tag, or, for a
-/// niche, the stored representation the tag stands for.
-fn variant_text(plan: &PayloadEnumPlan, tag: i64) -> String {
-    if plan.niche {
-        format!("({}){tag}", plan.name)
-    } else {
-        format!("({}){{ .tag = {tag} }}", plan.name)
-    }
-}
-
 /// The key a generic use is looked up under: the source spelling.
 fn instance_key(name: &str, args: &[String]) -> String {
     format!("{name}<{}>", args.join(", "))
@@ -2404,6 +2394,35 @@ impl<'a, 'b> Body<'a, 'b> {
             Expr::Comma { left, right, .. } => {
                 Ok(format!("({}, {})", self.expr(left)?, self.expr(right)?))
             }
+            Expr::VariantInit {
+                qualifier,
+                type_args,
+                variant,
+                fields,
+                span,
+            } => {
+                let Some((plan, variant)) =
+                    self.backend
+                        .variant(qualifier, type_args, self.spelling(), &variant.text)
+                else {
+                    return Err(Diagnostic::new(*span, "struct variant has no C form"));
+                };
+                let fields = fields
+                    .iter()
+                    .map(|field| {
+                        Ok(format!(
+                            ".{} = {}",
+                            field.name.text,
+                            self.expr(&field.value)?
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, Diagnostic>>()?
+                    .join(", ");
+                Ok(format!(
+                    "({}){{ .tag = {}, .payload.{} = {{ {} }} }}",
+                    plan.name, variant.tag, variant.name, fields
+                ))
+            }
             Expr::Call {
                 callee,
                 args,
@@ -2465,11 +2484,7 @@ impl<'a, 'b> Body<'a, 'b> {
         }
     }
 
-    /// Print one payload-enum variant used as a value.
-    ///
-    /// A variant with a payload cannot be built without one, so its name alone
-    /// is the tag it stores. A payload-free variant, and every variant of a
-    /// niche enum, is the stored value itself.
+    /// Print one payload-enum variant used as a value: its logical tag.
     fn variant_value(
         &mut self,
         qualifier: &Name,
@@ -2481,10 +2496,8 @@ impl<'a, 'b> Body<'a, 'b> {
             self.backend
                 .variant(qualifier, args, self.spelling(), &name.text)
         {
-            if variant.payload.is_some() && !plan.niche {
-                return Ok(variant.tag.to_string());
-            }
-            return Ok(variant_text(plan, variant.tag));
+            let _ = plan;
+            return Ok(variant.tag.to_string());
         }
         // A plain C enum names its enumerator.
         if self.backend.enums.contains_key(&qualifier.text) {
@@ -2501,23 +2514,7 @@ impl<'a, 'b> Body<'a, 'b> {
 
     /// Print a member read, resolving the transparent payload-enum members.
     fn member(&mut self, object: &Expr, name: &Name, op: MemberOp) -> Result<String, Diagnostic> {
-        // `value.payload.Variant` is one access: the payload lives inside the
-        // value, and a niche stores it as the value itself.
-        if let Expr::Member {
-            object: base,
-            name: payload,
-            ..
-        } = object
-            && payload.text == "payload"
-            && let Some(text) = self.payload_value(base, name)?
-        {
-            return Ok(text);
-        }
-        // `value.tag` is the stored tag; a niche stores none, so its raw value
-        // is what `.tag` means there.
-        if name.text == "tag"
-            && let Some(text) = self.tag_value(object)?
-        {
+        if let Some(text) = self.payload_value(object, name)? {
             return Ok(text);
         }
         let arrow = self.arrow(object, op);
@@ -2554,21 +2551,6 @@ impl<'a, 'b> Body<'a, 'b> {
             return Ok(Some(object));
         }
         Ok(Some(format!("{object}.payload.{}", name.text)))
-    }
-
-    /// The tag of one payload enum object; a niche value is the object itself.
-    fn tag_value(&mut self, object: &Expr) -> Result<Option<String>, Diagnostic> {
-        let Some(ty) = self.ty(object) else {
-            return Ok(None);
-        };
-        let Some(plan) = self.backend.enum_plan(&ty) else {
-            return Ok(None);
-        };
-        let text = self.object_text(object, &ty)?;
-        if plan.niche {
-            return Ok(Some(text));
-        }
-        Ok(Some(format!("{text}.tag")))
     }
 
     /// The object one access goes through: ShyC's dot reads through every
@@ -2637,6 +2619,26 @@ impl<'a, 'b> Body<'a, 'b> {
         type_args: &[GenericArg],
         span: Span,
     ) -> Result<String, Diagnostic> {
+        if args.is_empty()
+            && type_args.is_empty()
+            && let Expr::Member { object, name, .. } = callee
+            && name.text == "type"
+        {
+            let ty = self
+                .ty(object)
+                .ok_or_else(|| Diagnostic::new(span, "type() needs a known enum type"))?;
+            let object = self.object_text(object, &ty)?;
+            if let Some(plan) = self.backend.enum_plan(&ty) {
+                if plan.niche {
+                    return Ok(format!("(({object}) != 0)"));
+                }
+                return Ok(format!("{object}.tag"));
+            }
+            if self.backend.enums.contains_key(&ty.base) {
+                return Ok(object);
+            }
+            return Err(Diagnostic::new(span, "type() needs an enum object"));
+        }
         // x.move() reads a defer variable and sets its moved flag.
         if let Expr::Member {
             object, name, op, ..
@@ -2869,6 +2871,9 @@ impl<'a, 'b> Body<'a, 'b> {
         if plan.niche {
             return Ok(Some(format!("({})({value})", plan.name)));
         }
+        if variant.payload.is_none() {
+            return Ok(Some(format!("({}){{ .tag = {} }}", plan.name, variant.tag)));
+        }
         Ok(Some(format!(
             "({}){{ .tag = {}, .payload.{} = {value} }}",
             plan.name, variant.tag, name.text
@@ -3009,16 +3014,9 @@ impl<'a, 'b> Body<'a, 'b> {
                 operand,
                 ..
             } => self.ty(operand).map(|ty| ty.pointee()),
-            // `value.payload.Variant` names the payload type directly.
             Expr::Member { object, name, .. } => {
-                if let Expr::Member {
-                    object: base,
-                    name: payload,
-                    ..
-                } = object.as_ref()
-                    && payload.text == "payload"
-                    && let Some(ty) = self.ty(base)
-                    && let Some(plan) = self.backend.enum_plan(&ty)
+                let ty = self.ty(object)?;
+                if let Some(plan) = self.backend.enum_plan(&ty)
                     && let Some(variant) = plan
                         .variants
                         .iter()
@@ -3027,7 +3025,6 @@ impl<'a, 'b> Body<'a, 'b> {
                     let payload = variant.payload.as_deref().unwrap_or("void");
                     return Some(Ty::from_text(payload));
                 }
-                let ty = self.ty(object)?;
                 match self.backend.enum_plan(&ty) {
                     Some(plan) if name.text == "tag" && plan.niche => {
                         Some(Ty::from_text(&plan.name))
@@ -3060,7 +3057,15 @@ impl<'a, 'b> Body<'a, 'b> {
                 Some(Stmt::Expr { expr, .. }) => self.ty(expr),
                 _ => None,
             },
-            Expr::Call { callee, .. } => self.callee_ty(callee),
+            Expr::Call { callee, args, .. } => {
+                if args.is_empty()
+                    && let Expr::Member { object, name, .. } = callee.as_ref()
+                    && name.text == "type"
+                {
+                    return self.ty(object).map(|_| Ty::from_text("int"));
+                }
+                self.callee_ty(callee)
+            }
             Expr::Cast { type_name, .. } => Some(type_name_of(type_name)),
             Expr::Index { array, .. } => self.ty(array).map(|ty| ty.pointee()),
             // A literal has the type its spelling implies, which is what
@@ -3075,18 +3080,13 @@ impl<'a, 'b> Body<'a, 'b> {
         }
     }
 
-    /// The type of one variant used as a value: the enum itself for a
-    /// payload-free or niche variant, and the tag's integer for a payload
-    /// variant written without one.
+    /// The type of one variant used as a value: its logical tag integer.
     fn variant_ty(&self, qualifier: &Name, args: &[GenericArg], name: &str) -> Option<Ty> {
-        let (plan, variant) = self
+        let (_plan, variant) = self
             .backend
             .variant(qualifier, args, self.spelling(), name)?;
-        Some(if variant.payload.is_some() && !plan.niche {
-            Ty::from_text("int")
-        } else {
-            Ty::from_text(&plan.name)
-        })
+        let _ = variant;
+        Some(Ty::from_text("int"))
     }
 
     fn callee_ty(&self, callee: &Expr) -> Option<Ty> {

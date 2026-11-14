@@ -129,18 +129,18 @@ impl Str {
             i = 1;
         }
         if (i == s.len) {
-            return Option<int>::None;
+            return Option<int>::None();
         }
         unsigned int value = 0;
         while (i < s.len) {
             if (s.data[i] < '0' || s.data[i] > '9') {
-                return Option<int>::None;
+                return Option<int>::None();
             }
             unsigned int digit = (unsigned int)(s.data[i] - '0');
             // 214748364 is INT_MAX / 10, so this rejects a value that the
             // next multiply would overflow before the range check below.
             if (value > (unsigned int)214748364) {
-                return Option<int>::None;
+                return Option<int>::None();
             }
             value = value * 10 + digit;
             unsigned int limit = (unsigned int)2147483647;
@@ -148,7 +148,7 @@ impl Str {
                 limit = (unsigned int)2147483648;
             }
             if (value > limit) {
-                return Option<int>::None;
+                return Option<int>::None();
             }
             i = i + 1;
         }
@@ -162,7 +162,7 @@ impl Str {
 impl StrSplit {
     pub fn next(self *s) -> Option<Str> {
         if (s.done) {
-            return Option<Str>::None;
+            return Option<Str>::None();
         }
         int start = 0;
         while (start < s.rest.len && s.rest.data[start] != (char)s.separator) {

@@ -30,7 +30,7 @@ impl Result<T, E> {
     fn unwrap(const self *r) -> T {
         switch (*r) {
         case Result<T, E>::Ok:
-            return r.payload.Ok;
+            return r.Ok;
         default:
             abort();
         }
@@ -39,7 +39,7 @@ impl Result<T, E> {
     fn unwrap_or(const self *r, T fallback) -> T {
         switch (*r) {
         case Result<T, E>::Ok:
-            return r.payload.Ok;
+            return r.Ok;
         default:
             return fallback;
         }
@@ -49,7 +49,7 @@ impl Result<T, E> {
     fn unwrap_err(const self *r) -> E {
         switch (*r) {
         case Result<T, E>::Err:
-            return r.payload.Err;
+            return r.Err;
         default:
             abort();
         }

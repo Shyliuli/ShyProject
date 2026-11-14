@@ -34,6 +34,7 @@
 mod comptime;
 mod cursor;
 mod decl;
+mod desugar;
 mod expr;
 mod init;
 mod probe;
@@ -205,8 +206,16 @@ fn collect_specs_type_names(specs: &ast::DeclSpecs, names: &mut TypeNames) {
                     names.tags.insert(tag.text.clone());
                 }
                 for enumerator in enumeration.enumerators.iter().flatten() {
-                    if let Some(payload) = &enumerator.payload {
-                        collect_type_name_names(payload, names);
+                    match &enumerator.payload {
+                        ast::VariantPayload::None => {}
+                        ast::VariantPayload::Tuple(payload) => {
+                            collect_type_name_names(payload, names);
+                        }
+                        ast::VariantPayload::Struct(fields) => {
+                            for field in fields {
+                                collect_type_name_names(&field.ty, names);
+                            }
+                        }
                     }
                 }
             }
