@@ -76,6 +76,24 @@ or `enum(u64)`.
 Payload enums use a transparent `tag + max-payload` representation. The tag is
 chosen as narrowly as possible unless an underlying type is explicitly given.
 
+`Enum::Variant` always names a variant tag, including for ordinary C enums. The
+current tag is queried with `value.type()` for every enum kind. ShyC source does
+not expose `.tag`; the storage representation remains an ABI detail. A single
+variant test can therefore be written directly as an `if`:
+
+```c
+if (token.type() == Token::Keyword) {
+    /* use token.Keyword */
+} else if (token.type() == Token::Eof) {
+    /* stop */
+}
+```
+
+One payload is constructed with parentheses and named fields with braces:
+`Token::Keyword("fn")` or `Token::Keyword { text: "fn" }`. A payload-free variant
+uses an empty argument list, as in `Token::Eof()`. Payloads are read directly as
+`token.Keyword`; there is no `payload` wrapper.
+
 `switch` remains the control-flow construct. It supports the existing `default`
 and `_` forms, and case ranges written `case low ... high:`, which dispatch
 through a comparison chain instead of a switch table. Overlapping labels and a
@@ -102,12 +120,11 @@ to `None`, rather than a distinct value. Instances that do not meet these
 conditions retain the ordinary tag and payload union.
 
 `switch` on either compact enum dispatches on its logical variant, using a
-zero/nonzero comparison of the stored value. Existing C-style case labels and
-payload access remain available: `case Option<int *>::Some:` followed by
-`value.payload.Some`, or `case Result<void, Error>::Err:` followed by
-`value.payload.Err`. The condition is evaluated once. `.tag` still exposes the
-raw pointer or error code: compare the pointer directly, or switch on
-`result.tag` to distinguish individual error codes.
+zero/nonzero comparison of the stored value. Payload access is direct:
+`case Option<int *>::Some:` followed by `value.Some`, or
+`case Result<void, Error>::Err:` followed by `value.Err`. The condition is
+evaluated once. `value.type()` returns the logical variant without exposing the
+raw pointer or error code.
 `?` treats NULL as Option failure and a nonzero error code as Result failure.
 Generated C interfaces use the same pointer or integer representation. A raw
 pointer may be passed to or received from its compatible compact Option type.
@@ -275,7 +292,7 @@ use c::stdio::*;
 
 int main(void) {
   Option<int> value = Option<int>::Some(1);
-  printf("%d\n", value.payload.Some);
+  printf("%d\n", value.Some);
   return 0;
 }
 ```
