@@ -148,6 +148,11 @@ trait Drawable {
 fn render<T: Drawable>(T *value);
 ```
 
+Trait bounds follow the same auto-dereference as member lookup. The compiler
+checks the type itself first, then its pointee and any `Deref` targets, so a
+pointer can satisfy `T: Drawable` when its pointee implements `Drawable`. An
+implementation on the pointer type itself still takes precedence.
+
 A method may carry a default body. An `impl` that does not define the method
 inherits that body with `self` bound to the implementing type, so one required
 method is enough for the rest of the interface:
