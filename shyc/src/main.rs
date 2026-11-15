@@ -1026,17 +1026,7 @@ fn probe_round(options: &Options) -> Result<(), String> {
             probe::Outcome::Nothing => {
                 return Err("const-fn probe round has requests but no probe unit".into());
             }
-            probe::Outcome::Unsupported {
-                function,
-                span,
-                reason,
-            } => {
-                let error = Diagnostic::new(
-                    span,
-                    format!("const fn '{function}' cannot be probed in this round: {reason}"),
-                );
-                return Err(sources.render(&error));
-            }
+            probe::Outcome::Unsupported { error } => return Err(sources.render(&error)),
         };
         let lowered = lower::lower(
             &program.unit,

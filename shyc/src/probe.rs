@@ -78,7 +78,7 @@ use crate::lexer::{self, Token};
 use crate::lower;
 use crate::parser::{Arguments, ConstFn, ParseOutput, Place, ProbeRequest, TrySite, WorldSnapshot};
 use crate::shy::abi::ARGUMENT_REGISTERS;
-use crate::source::{SourceMap, Span};
+use crate::source::{Diagnostic, SourceMap, Span};
 
 mod world;
 pub use world::decode_world;
@@ -290,16 +290,9 @@ pub enum Outcome {
     /// The round has no request, so there is nothing to run and nothing to
     /// fold.
     Nothing,
-    /// A request this builder cannot serve, and therefore a round whose
-    /// answers must not be used.
-    Unsupported {
-        /// The `const fn` the request calls.
-        function: String,
-        /// Where the call stands, for the driver's diagnostic.
-        span: Span,
-        /// Why the request cannot be served.
-        reason: String,
-    },
+    /// A request this builder cannot serve, at the most specific source span
+    /// known for the failure.
+    Unsupported { error: Diagnostic },
 }
 
 /// The tree and the calls of one probe round.
@@ -1980,8 +1973,17 @@ pub fn build(parsed: &mut ParseOutput, layout: Layout) -> Outcome {
     let unit = ast::TranslationUnit { items };
     // A unit that does not lower has no answer to give, and a narrower unit
     // would answer from a body whose helpers are missing.
-    if let Err(reason) = lowers(&unit, layout) {
-        return unsupported(&parsed.requests[0], reason);
+    if let Err(error) = lowers(&unit, layout) {
+        let request = &parsed.requests[0];
+        return Outcome::Unsupported {
+            error: Diagnostic::new(
+                error.span,
+                format!(
+                    "probe unit for const fn '{}' does not lower: {}",
+                    request.name, error.message
+                ),
+            ),
+        };
     }
     Outcome::Unit(ProbeUnit { unit, calls })
 }
@@ -3136,24 +3138,27 @@ fn fits(kind: ResultKind, value: i64) -> bool {
 /// A const fn body may reach for a construct only the evaluator understands,
 /// and a kept declaration may too. A failure here is a reason to skip the
 /// round, never a reason to guess.
-fn lowers(unit: &ast::TranslationUnit, layout: Layout) -> Result<(), String> {
+fn lowers(unit: &ast::TranslationUnit, layout: Layout) -> Result<(), Diagnostic> {
     let options = lower::Options {
         module_name: "probe".to_string(),
         layout,
         startup: lower::StartupMode::Manual,
         ..lower::Options::default()
     };
-    lower::lower(unit, &options)
-        .map(|_| ())
-        .map_err(|error| format!("the probe unit does not lower: {}", error.message))
+    lower::lower(unit, &options).map(|_| ())
 }
 
 /// Wraps a request's failure into the round's outcome.
 fn unsupported(request: &ProbeRequest, reason: impl Into<String>) -> Outcome {
     Outcome::Unsupported {
-        function: request.name.clone(),
-        span: request.site,
-        reason: reason.into(),
+        error: Diagnostic::new(
+            request.site,
+            format!(
+                "const fn '{}' cannot be probed in this round: {}",
+                request.name,
+                reason.into()
+            ),
+        ),
     }
 }
 
