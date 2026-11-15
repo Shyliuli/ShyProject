@@ -318,8 +318,7 @@ impl Lowerer {
                 let Some(step) = self.deref_step(record, mutable, name.span)? else {
                     return Ok(None);
                 };
-                let Some(mut path) =
-                    self.find_method_path_at(step.target, name, mutable, seen)?
+                let Some(mut path) = self.find_method_path_at(step.target, name, mutable, seen)?
                 else {
                     return Ok(None);
                 };

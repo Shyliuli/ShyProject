@@ -100,15 +100,15 @@ fn run() -> Result<(), String> {
         Stage::CSource => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
-            let unit =
-                parser::parse_shared(std::rc::Rc::new(preprocessed.tokens)).map_err(|error| sources.render(&error))?;
+            let unit = parser::parse_shared(std::rc::Rc::new(preprocessed.tokens))
+                .map_err(|error| sources.render(&error))?;
             render_c_source(&options, &unit, &preprocessed.attributes, &mut sources)?
         }
         Stage::CHeader => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
-            let unit =
-                parser::parse_shared(std::rc::Rc::new(preprocessed.tokens)).map_err(|error| sources.render(&error))?;
+            let unit = parser::parse_shared(std::rc::Rc::new(preprocessed.tokens))
+                .map_err(|error| sources.render(&error))?;
             // The output path names the include guard. Without `-o` the header
             // goes to stdout, so the input path names it instead.
             let guard_path = options.output.as_deref().unwrap_or(options.input.as_path());
@@ -132,23 +132,23 @@ fn run() -> Result<(), String> {
             };
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
-            let unit =
-                parser::parse_shared(std::rc::Rc::new(preprocessed.tokens)).map_err(|error| sources.render(&error))?;
+            let unit = parser::parse_shared(std::rc::Rc::new(preprocessed.tokens))
+                .map_err(|error| sources.render(&error))?;
             let lowered = lower_instances(&options, &unit, &preprocessed.attributes, &mut sources)?;
             export_instances::render_wrapper(&lowered)
         }
         Stage::Ast => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
-            let unit =
-                parser::parse_shared(std::rc::Rc::new(preprocessed.tokens)).map_err(|error| sources.render(&error))?;
+            let unit = parser::parse_shared(std::rc::Rc::new(preprocessed.tokens))
+                .map_err(|error| sources.render(&error))?;
             format!("{unit:#?}\n")
         }
         Stage::Ir | Stage::Emit(_) => {
             let preprocessed = preprocess::preprocess(&mut sources, file, &options.preprocess)
                 .map_err(|error| sources.render(&error))?;
-            let unit =
-                parser::parse_shared(std::rc::Rc::new(preprocessed.tokens)).map_err(|error| sources.render(&error))?;
+            let unit = parser::parse_shared(std::rc::Rc::new(preprocessed.tokens))
+                .map_err(|error| sources.render(&error))?;
             let target = resolve_target(&options)?;
             let startup = if preprocessed.attributes.no_main || options.freestanding {
                 StartupMode::Manual

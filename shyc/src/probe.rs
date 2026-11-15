@@ -1167,10 +1167,19 @@ fn expand_typedefs(
     aliases: &HashMap<String, (ast::DeclSpecs, ast::Declarator)>,
     seen: &mut Vec<String>,
 ) -> ast::DeclSpecs {
-    let expanded = specs.clone();
-    let Some(ast::TypeSpecifier::TypedefName(name)) =
-        expanded.type_specs.first().cloned()
-    else {
+    let mut expanded = specs.clone();
+    for specifier in &mut expanded.type_specs {
+        let ast::TypeSpecifier::Generic(generic) = specifier else {
+            continue;
+        };
+        for argument in &mut generic.args {
+            let ast::GenericArgKind::Type(type_name) = &mut argument.kind else {
+                continue;
+            };
+            type_name.specs = expand_typedefs(&type_name.specs, aliases, &mut seen.clone());
+        }
+    }
+    let Some(ast::TypeSpecifier::TypedefName(name)) = expanded.type_specs.first().cloned() else {
         return expanded;
     };
     if expanded.type_specs.len() != 1 || seen.contains(&name.text) {
@@ -1278,10 +1287,7 @@ fn field_type_text(specs: &ast::DeclSpecs, declarator: &ast::Declarator, pointer
         generics: true,
         preserve_generic_args: true,
     };
-    canonical_type_name(&crate::c::types::type_name_text_with(
-        &type_name,
-        spelling,
-    ))
+    canonical_type_name(&crate::c::types::type_name_text_with(&type_name, spelling))
 }
 
 /// Bakes the owner and field tables the four reflection builtins read.

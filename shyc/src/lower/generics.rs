@@ -40,8 +40,8 @@
 //! concrete receiver, and those resolved trait arguments, so several traits and
 //! several parameterizations of one trait can share a receiver.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
 use super::{
     FunctionInstance, GenericArgKey, GenericEnv, GenericFunction, GenericMethod, InstanceKey,
@@ -1499,11 +1499,7 @@ impl Lowerer {
                     self.pop_type_scope();
                     resolved?
                 };
-                self.instantiate_generic_impl(*ty)?;
-                if !self
-                    .trait_impls
-                    .contains(&(bound.name.text.clone(), bound_args, *ty))
-                {
+                if !self.trait_bound_holds(&bound.name.text, &bound_args, *ty, bound.span)? {
                     return Ok(false);
                 }
             }
@@ -1514,11 +1510,13 @@ impl Lowerer {
     /// Verifies every trait bound once the concrete type arguments are known.
     ///
     /// A bound is satisfied by an `impl Bound<Args> for Type` already collected
-    /// for the unit: the same [`Self::trait_impls`] table that rejects a
-    /// duplicate implementation answers the check. A bound may write trait
-    /// arguments (`T: From<int>`, `U: From<T>`); they resolve in the concrete
-    /// environment of the instantiation, so the lookup uses the same type and
-    /// constant identities the implementation registered.
+    /// for the unit, either on the argument type itself or on a type reached
+    /// through its pointer and `Deref` chain. The same [`Self::trait_impls`]
+    /// table that rejects a duplicate implementation answers the check. A
+    /// bound may write trait arguments (`T: From<int>`, `U: From<T>`); they
+    /// resolve in the concrete environment of the instantiation, so the lookup
+    /// uses the same type and constant identities the implementation
+    /// registered.
     fn check_generic_bounds(
         &mut self,
         subject: &str,
@@ -1569,10 +1567,8 @@ impl Lowerer {
                 };
                 // The bound may be satisfied by a generic trait impl that this
                 // concrete type argument has not needed until now.
-                self.instantiate_generic_impl(*ty)?;
                 let implemented =
-                    self.trait_impls
-                        .contains(&(bound.name.text.clone(), bound_args.clone(), *ty));
+                    self.trait_bound_holds(&bound.name.text, &bound_args, *ty, bound.span)?;
                 if !implemented {
                     return Err(Diagnostic::new(
                         span,
@@ -1589,6 +1585,46 @@ impl Lowerer {
             }
         }
         Ok(())
+    }
+
+    /// Whether `ty` implements a trait directly or after auto-dereference.
+    ///
+    /// A pointer itself is checked first, so an implementation on `T *` keeps
+    /// precedence. Otherwise the walk follows the pointer and `Deref` chain
+    /// used by member and method lookup, bounded and cycle-safe.
+    fn trait_bound_holds(
+        &mut self,
+        trait_name: &str,
+        trait_args: &[GenericArgKey],
+        ty: TypeId,
+        span: Span,
+    ) -> Result<bool, Diagnostic> {
+        let mut current = ty;
+        let mut seen = HashSet::new();
+        for _ in 0..=super::deref::MAX_AUTO_DEREF {
+            if !seen.insert(current) {
+                break;
+            }
+            self.instantiate_generic_impl(current)?;
+            if self
+                .trait_impls
+                .contains(&(trait_name.to_string(), trait_args.to_vec(), current))
+            {
+                return Ok(true);
+            }
+            if let Some(pointee) = self.pointee(current) {
+                current = pointee.ty;
+                continue;
+            }
+            let Some(record) = self.record_of(current) else {
+                break;
+            };
+            let Some(step) = self.deref_step(record, false, span)? else {
+                break;
+            };
+            current = step.target;
+        }
+        Ok(false)
     }
 
     /// `Trait<Args>` with resolved argument spellings, for a bound diagnostic.
